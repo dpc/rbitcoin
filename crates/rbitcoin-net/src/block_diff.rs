@@ -1854,6 +1854,13 @@ mod tests {
             CompareOne::Agreed { accept: false } => {}
             other => panic!("script-verify OP_RETURN: {other:?}"),
         }
+        let mock = MockOracle::new(OracleReply::Reason(
+            "mandatory-script-verify-flag-failed (OP_RETURN)".into(),
+        ));
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x6a]) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("mandatory OP_RETURN must compare: {other:?}"),
+        }
     }
 
     #[test]

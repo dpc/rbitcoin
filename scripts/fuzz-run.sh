@@ -120,6 +120,10 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "FUZZ_CORPUS_MERGE=1"
   echo "FUZZ_SKIP_RATE=1"
   echo "FUZZ_CRASHERS=$CRASHERS"
+  if [[ "$BIN" == "script_differential" || "$BIN" == "script_verify_differential" ]]; then
+    echo "FUZZ_DICT=fuzz/dict/script.dict"
+    echo "FUZZ_MAX_LEN=2000"
+  fi
   if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
@@ -257,6 +261,9 @@ elif [[ "$BIN" == "block_spend_differential" ]]; then
 elif [[ "$BIN" == "script_differential" ]]; then
   merge_seed fuzz/corpus/script_differential \
     crates/rbitcoin-consensus/tests/fixtures/script_op_true.bin op_true.bin
+  for f in crates/rbitcoin-consensus/tests/fixtures/script_fuzz_*.bin; do
+    merge_seed fuzz/corpus/script_differential "$f"
+  done
 elif [[ "$BIN" == "cmpct_reorg_differential" ]]; then
   merge_seed fuzz/corpus/cmpct_reorg_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin fork.bin
@@ -276,17 +283,27 @@ elif [[ "$BIN" == "mempool_differential" ]]; then
 elif [[ "$BIN" == "script_verify_differential" ]]; then
   merge_seed fuzz/corpus/script_verify_differential \
     crates/rbitcoin-consensus/tests/fixtures/script_op_true.bin op_true.bin
+  for f in crates/rbitcoin-consensus/tests/fixtures/script_fuzz_*.bin; do
+    merge_seed fuzz/corpus/script_verify_differential "$f"
+  done
 else
   merge_seed fuzz/corpus/block_fork_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin fork.bin
 fi
 
 log="${TMPDIR:-/tmp}/rbtc-fuzz-diff.$$.log"
+max_len=262144
+dict_args=()
+if [[ "$BIN" == "script_differential" || "$BIN" == "script_verify_differential" ]]; then
+  max_len=2000
+  dict_args=(-dict=fuzz/dict/script.dict)
+fi
 set +e
 env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer none "$BIN" -- \
   -max_total_time="${FUZZ_MAX_TOTAL_TIME:-480}" \
   -timeout="$timeout" \
-  -max_len=262144 \
+  -max_len="$max_len" \
+  "${dict_args[@]}" \
   -seed="$SEED" \
   2>&1 | tee "$log"
 st=${PIPESTATUS[0]}

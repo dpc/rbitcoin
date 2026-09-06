@@ -129,6 +129,16 @@ assert_ok "script-differential dry-run timeout 180" \
   grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
 assert_ok "script-differential dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
+assert_ok "script-differential dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/script.dict" <<<"$out"
+assert_ok "script-differential dry-run max_len 2000" \
+  grep -qx "FUZZ_MAX_LEN=2000" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" script_verify_differential)"
+assert_ok "script-verify dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/script.dict" <<<"$out"
+assert_ok "script-verify dry-run max_len 2000" \
+  grep -qx "FUZZ_MAX_LEN=2000" <<<"$out"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN" block_fork_differential)"
 assert_ok "fork-differential dry-run bin" \
@@ -270,6 +280,17 @@ mkdir -p "$WORKDIR/crashers"
 "$RUN" --copy-crashers "$WORKDIR/artifacts" "$WORKDIR/crashers"
 assert_ok "copy-crashers copies artifact files" \
   test -f "$WORKDIR/crashers/crash-abc"
+
+n_script_seeds=0
+for f in "$ROOT"/crates/rbitcoin-consensus/tests/fixtures/script_fuzz_*.bin; do
+  n_script_seeds=$((n_script_seeds + 1))
+  assert_ok "script seed $(basename "$f") non-empty" \
+    test -s "$f"
+done
+assert_ok "at least 8 script_fuzz seeds" \
+  test "$n_script_seeds" -ge 8
+assert_ok "script opcode dict exists" \
+  test -s "$ROOT/fuzz/dict/script.dict"
 
 rm -rf "$WORKDIR"
 
