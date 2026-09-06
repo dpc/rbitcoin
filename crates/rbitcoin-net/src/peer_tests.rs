@@ -6172,10 +6172,14 @@ fn snapshot_omits_peer_after_tcp_fin() {
     let peer = hub.register(addr, addr, &ver, true, PeerConnType::Inbound);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let la = listener.local_addr().unwrap();
-    let client = TcpStream::connect(la).unwrap();
+    let mut client = TcpStream::connect(la).unwrap();
     let (server, _) = listener.accept().unwrap();
     peer.attach_tcp_shutdown(server.try_clone().unwrap());
     assert_eq!(hub.snapshot().len(), 1);
+    {
+        use std::io::Write;
+        client.write_all(&[0xab]).unwrap();
+    }
     client.shutdown(Shutdown::Both).unwrap();
     let mut saw = false;
     for _ in 0..50 {
@@ -6185,7 +6189,7 @@ fn snapshot_omits_peer_after_tcp_fin() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(saw, "cloned fd must see FIN");
+    assert!(saw, "cloned fd must see FIN even with unread bytes");
     assert!(
         hub.snapshot().is_empty(),
         "getpeerinfo must omit a FIN'd session (mempool_reorg disconnect_nodes 5s)"

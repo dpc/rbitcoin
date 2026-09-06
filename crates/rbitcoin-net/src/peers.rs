@@ -191,6 +191,24 @@ pub struct LivePeer {
     next_local_addr_send: AtomicU64,
 }
 
+#[cfg(target_os = "linux")]
+fn tcp_has_peer_fin(tcp: &std::net::TcpStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut pfd = libc::pollfd {
+        fd: tcp.as_raw_fd(),
+        events: libc::POLLIN | libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: fd is a live TcpStream as_raw_fd, timeout 0.
+    let n = unsafe { libc::poll(&mut pfd, 1, 0) };
+    n >= 0 && pfd.revents & (libc::POLLHUP | libc::POLLRDHUP | libc::POLLERR) != 0
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tcp_has_peer_fin(_tcp: &std::net::TcpStream) -> bool {
+    false
+}
+
 impl LivePeer {
     pub fn attach_wire(&self, wire: crate::v2::WireBytes) {
         *self.wire_recv.lock().unwrap_or_else(|e| e.into_inner()) = Some(wire.recv);
@@ -355,6 +373,9 @@ impl LivePeer {
         let Some(tcp) = g.as_ref() else {
             return false;
         };
+        if tcp_has_peer_fin(tcp) {
+            return true;
+        }
         let _ = tcp.set_nonblocking(true);
         let mut b = [0u8; 1];
         match tcp.peek(&mut b) {

@@ -58,6 +58,9 @@ before 1.0).
 
 ### Fixed
 
+- **`getpeerinfo` omits a completed peer after TCP FIN even with unread bytes:**
+  `peek==0` missed the far-side close while the session was still draining
+  (`mempool_reorg` `disconnect_nodes` 5s). Linux uses `POLLRDHUP`.
 - **Held consensus-invalid children are not retried on the next sibling:**
   `try_apply_held` skipped `invalidateblock` hashes but not a missing-prevout
   child that failed mid-branch. That child stayed in `held_bodies` and the
