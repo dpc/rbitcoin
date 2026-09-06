@@ -11,6 +11,8 @@ before 1.0).
 
 ### Changed
 
+- **Electrum asof/live scripthash reads share `sh_at_view`:** history,
+  balance, and listunspent no longer copy a 4-way pin fork.
 - **CLI / conf share `NodeConfig::apply_kv`:** argv still has its own
   flag match and help text; conf `key=value` goes through one setter.
   Parsed flags live in `CliAccum` instead of ~40 `mut` locals.

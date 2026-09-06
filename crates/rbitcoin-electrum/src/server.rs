@@ -1156,6 +1156,32 @@ fn dispatch_with_join(
     )
 }
 
+fn sh_at_view<T>(
+    query: &Query,
+    pinned: Option<&ChainView>,
+    is_asof: bool,
+    asof: Option<[u8; 32]>,
+    sh_join: &mut Option<ShJoinSlot>,
+    asof_fn: impl FnOnce(&Query, &ChainView) -> Result<T, String>,
+    slot_fn: impl FnOnce(&Query, &mut Option<ShJoinSlot>, &ChainView) -> Result<T, String>,
+    live_fn: impl FnOnce(&Query, &mut Option<ShJoinSlot>) -> Result<T, String>,
+) -> Result<T, String> {
+    if let Some(view) = pinned {
+        if is_asof {
+            return asof_fn(query, view);
+        }
+        return slot_fn(query, sh_join, view);
+    }
+    if let Some(hash) = asof {
+        let view = query
+            .pin_sh_chain_view_at(&hash)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "asof not on chain".to_string())?;
+        return asof_fn(query, &view);
+    }
+    live_fn(query, sh_join)
+}
+
 fn dispatch_pinned(
     method: &str,
     params: &Value,
@@ -1231,29 +1257,25 @@ fn dispatch_pinned(
             if is_asof || asof.is_some() {
                 include_mempool = false;
             }
-            let mut hist = if let Some(view) = pinned {
-                if is_asof {
-                    query
-                        .scripthash_history_filtered_in(&sh, &filter, view)
-                        .map_err(|e| e.to_string())?
-                } else {
-                    query
-                        .scripthash_history_filtered_slot_in(&sh, &filter, sh_join, view)
-                        .map_err(|e| e.to_string())?
-                }
-            } else if let Some(hash) = asof {
-                let view = query
-                    .pin_sh_chain_view_at(&hash)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "asof not on chain".to_string())?;
-                query
-                    .scripthash_history_filtered_in(&sh, &filter, &view)
-                    .map_err(|e| e.to_string())?
-            } else {
-                query
-                    .scripthash_history_filtered_slot(&sh, &filter, sh_join)
-                    .map_err(|e| e.to_string())?
-            };
+            let mut hist = sh_at_view(
+                query,
+                pinned,
+                is_asof,
+                asof,
+                sh_join,
+                |q, view| {
+                    q.scripthash_history_filtered_in(&sh, &filter, view)
+                        .map_err(|e| e.to_string())
+                },
+                |q, slot, view| {
+                    q.scripthash_history_filtered_slot_in(&sh, &filter, slot, view)
+                        .map_err(|e| e.to_string())
+                },
+                |q, slot| {
+                    q.scripthash_history_filtered_slot(&sh, &filter, slot)
+                        .map_err(|e| e.to_string())
+                },
+            )?;
             // Confirmed rows are height-asc from the filter. Mempool (if any) is
             // appended as a tail — Electrum Cash: only when to_height is -1/omitted.
             if include_mempool {
@@ -1279,29 +1301,25 @@ fn dispatch_pinned(
                 take_trailing_asof(method, params, protocol == PROTOCOL_ASOF)?
             };
             let sh = param_scripthash(&params, 0)?;
-            let mut b = if let Some(view) = pinned {
-                if is_asof {
-                    query
-                        .scripthash_balance_in(&sh, view)
-                        .map_err(|e| e.to_string())?
-                } else {
-                    query
-                        .scripthash_balance_slot_in(&sh, sh_join, view)
-                        .map_err(|e| e.to_string())?
-                }
-            } else if let Some(hash) = asof {
-                let view = query
-                    .pin_sh_chain_view_at(&hash)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "asof not on chain".to_string())?;
-                query
-                    .scripthash_balance_in(&sh, &view)
-                    .map_err(|e| e.to_string())?
-            } else {
-                query
-                    .scripthash_balance_slot(&sh, sh_join)
-                    .map_err(|e| e.to_string())?
-            };
+            let mut b = sh_at_view(
+                query,
+                pinned,
+                is_asof,
+                asof,
+                sh_join,
+                |q, view| {
+                    q.scripthash_balance_in(&sh, view)
+                        .map_err(|e| e.to_string())
+                },
+                |q, slot, view| {
+                    q.scripthash_balance_slot_in(&sh, slot, view)
+                        .map_err(|e| e.to_string())
+                },
+                |q, slot| {
+                    q.scripthash_balance_slot(&sh, slot)
+                        .map_err(|e| e.to_string())
+                },
+            )?;
             if !is_asof && asof.is_none() {
                 if let Some(mp) = mempool {
                     b.unconfirmed = mp.scripthash_unconfirmed_delta(&sh);
@@ -1316,29 +1334,27 @@ fn dispatch_pinned(
                 take_trailing_asof(method, params, protocol == PROTOCOL_ASOF)?
             };
             let sh = param_scripthash(&params, 0)?;
-            let u = if let Some(view) = pinned {
-                if is_asof {
-                    query
-                        .scripthash_listunspent_in(&sh, view)
-                        .map_err(|e| e.to_string())?
-                } else {
+            let u = sh_at_view(
+                query,
+                pinned,
+                is_asof,
+                asof,
+                sh_join,
+                |q, view| {
+                    q.scripthash_listunspent_in(&sh, view)
+                        .map_err(|e| e.to_string())
+                },
+                |q, slot, view| {
                     crate::unspent::scripthash_utxos_with_mempool_slot_in(
-                        query, mempool, &sh, sh_join, view,
+                        q, mempool, &sh, slot, view,
                     )
-                    .map_err(|e| e.to_string())?
-                }
-            } else if let Some(hash) = asof {
-                let view = query
-                    .pin_sh_chain_view_at(&hash)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "asof not on chain".to_string())?;
-                query
-                    .scripthash_listunspent_in(&sh, &view)
-                    .map_err(|e| e.to_string())?
-            } else {
-                crate::unspent::scripthash_utxos_with_mempool_slot(query, mempool, &sh, sh_join)
-                    .map_err(|e| e.to_string())?
-            };
+                    .map_err(|e| e.to_string())
+                },
+                |q, slot| {
+                    crate::unspent::scripthash_utxos_with_mempool_slot(q, mempool, &sh, slot)
+                        .map_err(|e| e.to_string())
+                },
+            )?;
             let arr: Vec<Value> = u
                 .iter()
                 .map(|x| {
