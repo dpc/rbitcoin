@@ -11,6 +11,8 @@ before 1.0).
 
 ### Changed
 
+- **Esplora asof/live scripthash reads share `sh_at_view`:** utxo,
+  chain page, and combined txs no longer copy the pin fork.
 - **Display-order 32-byte hash hex** lives in `rbitcoin-primitives`
   (`display_hash_hex` / `parse_display_hash32`). RPC, Electrum, and Esplora
   call that pair instead of each reversing then encoding.
