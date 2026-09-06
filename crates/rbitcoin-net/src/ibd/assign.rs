@@ -175,13 +175,15 @@ pub(crate) fn assign_work_ordered(
         hub,
         cfg,
         &alive,
-        loop_stats,
-        t0,
-        issued,
-        path_lo,
-        tip_batch_hi,
-        &tip_holes,
-        tip_rate_blocks_per_s,
+        DensifyCtx {
+            loop_stats,
+            t0,
+            issued,
+            path_lo,
+            tip_batch_hi,
+            tip_holes: &tip_holes,
+            tip_rate_blocks_per_s,
+        },
     );
 }
 
@@ -232,19 +234,32 @@ fn assign_reorg_need(
     issued
 }
 
+struct DensifyCtx<'a> {
+    loop_stats: &'a LoopStats,
+    t0: Instant,
+    issued: u64,
+    path_lo: u32,
+    tip_batch_hi: u32,
+    tip_holes: &'a [BlockHash],
+    tip_rate_blocks_per_s: Option<f64>,
+}
+
 fn assign_densify(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     cfg: &IbdConfig,
     alive: &[usize],
-    loop_stats: &LoopStats,
-    t0: Instant,
-    mut issued: u64,
-    path_lo: u32,
-    tip_batch_hi: u32,
-    tip_holes: &[BlockHash],
-    tip_rate_blocks_per_s: Option<f64>,
+    ctx: DensifyCtx<'_>,
 ) {
+    let DensifyCtx {
+        loop_stats,
+        t0,
+        mut issued,
+        path_lo,
+        tip_batch_hi,
+        tip_holes,
+        tip_rate_blocks_per_s,
+    } = ctx;
     let tip_hole = !tip_holes.is_empty();
     let (pack_median, pack_tight) = pack_ewma_bps(&st.slots, alive);
     let caps: HashMap<usize, usize> = alive

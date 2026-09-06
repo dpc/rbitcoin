@@ -135,6 +135,81 @@ pub(crate) fn drain_ready_peer_and_archive_events(
     Ok(true)
 }
 
+fn batch_header_height(
+    st: &IbdWorkState,
+    hub: &ChainHub,
+    prev: BlockHash,
+    batch_prev: Option<(BlockHash, u32)>,
+) -> Option<u32> {
+    parent_height(&st.hash_height, hub, prev)
+        .or_else(|| batch_prev.and_then(|(ph, pht)| (ph == prev).then_some(pht.saturating_add(1))))
+}
+
+fn note_header_path(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    hash: BlockHash,
+    height: u32,
+    prev: BlockHash,
+) {
+    let tip = hub.tip_height().zip(hub.tip_hash());
+    if st.try_set_path_slot(hash, height, prev, tip) {
+        st.max_peer_height = st.max_peer_height.max(height);
+        st.max_ordered_height = st.max_ordered_height.max(height);
+        return;
+    }
+    if let Some(&cur) = st.height_to_hash.get(&height) {
+        if cur != hash {
+            st.reorg.register_explore(std::iter::once(hash), Some(hash));
+        }
+    }
+}
+
+fn try_enqueue_ordered_header(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    hash: BlockHash,
+    prev: BlockHash,
+) -> bool {
+    if hub.has_block(&hash) {
+        st.known_headers.insert(hash);
+        return false;
+    }
+    if st.body.is_rejected(&hash) {
+        return false;
+    }
+    let prev_ok = st.known_headers.contains(&prev)
+        || hub.has_block(&prev)
+        || prev.to_byte_array() == [0u8; 32]
+        || hub.tip_hash() == Some(prev);
+    if !prev_ok && hub.tip_height().is_some() && !st.known_headers.is_empty() {
+        return false;
+    }
+    st.known_headers.insert(hash);
+    let Some(ht) = st.hash_height.get(&hash).copied() else {
+        return false;
+    };
+    if !st.is_on_path(&hash, ht) || st.ordered.len() >= MAX_ORDERED_HEADERS {
+        return false;
+    }
+    if !should_enqueue_header(
+        st.ordered_set.contains(&hash),
+        st.inflight.contains_key(&hash),
+        st.body.is_pending(&hash),
+        st.body.is_rejected(&hash),
+        hub.has_block(&hash),
+        Some(ht),
+        hub.tip_height(),
+    ) {
+        return false;
+    }
+    if st.ordered_set.insert(hash) {
+        st.ordered.push_back(hash);
+        return true;
+    }
+    false
+}
+
 fn on_headers_batch(
     st: &mut IbdWorkState,
     hub: &ChainHub,
@@ -146,77 +221,16 @@ fn on_headers_batch(
         let hash = hdr.block_hash();
         let prev = hdr.prev_blockhash;
         let already_known = st.known_headers.contains(&hash) && st.header_fks.contains_key(&hash);
-        let height = parent_height(&st.hash_height, hub, prev).or_else(|| {
-            batch_prev.and_then(|(ph, pht)| {
-                if ph == prev {
-                    Some(pht.saturating_add(1))
-                } else {
-                    None
-                }
-            })
-        });
-        if let Some(h) = height {
-            let tip = hub.tip_height().zip(hub.tip_hash());
-            let on_path = st.try_set_path_slot(hash, h, prev, tip);
-            if !on_path {
-                if let Some(&cur) = st.height_to_hash.get(&h) {
-                    if cur != hash {
-                        st.reorg.register_explore(std::iter::once(hash), Some(hash));
-                    }
-                }
-            } else {
-                st.max_peer_height = st.max_peer_height.max(h);
-                st.max_ordered_height = st.max_ordered_height.max(h);
-            }
+        if let Some(h) = batch_header_height(st, hub, prev, batch_prev) {
+            note_header_path(st, hub, hash, h, prev);
             batch_prev = Some((hash, h));
         }
-        if !already_known {
-            if !st.header_fks.contains_key(&hash) {
-                if let Ok(fk) = hub.ensure_header_fk(&hdr) {
-                    st.header_fks.insert(hash, fk);
-                }
+        if !already_known && !st.header_fks.contains_key(&hash) {
+            if let Ok(fk) = hub.ensure_header_fk(&hdr) {
+                st.header_fks.insert(hash, fk);
             }
         }
-        if hub.has_block(&hash) {
-            st.known_headers.insert(hash);
-            continue;
-        }
-        if st.body.is_rejected(&hash) {
-            continue;
-        }
-        let prev_ok = st.known_headers.contains(&prev)
-            || hub.has_block(&prev)
-            || prev.to_byte_array() == [0u8; 32]
-            || hub.tip_hash() == Some(prev);
-        if !prev_ok && hub.tip_height().is_some() && !st.known_headers.is_empty() {
-            continue;
-        }
-        st.known_headers.insert(hash);
-        if !st.hash_height.contains_key(&hash) {
-            continue;
-        }
-        let Some(ht) = st.hash_height.get(&hash).copied() else {
-            continue;
-        };
-        if !st.is_on_path(&hash, ht) {
-            continue;
-        }
-        if st.ordered.len() >= MAX_ORDERED_HEADERS {
-            continue;
-        }
-        if !should_enqueue_header(
-            st.ordered_set.contains(&hash),
-            st.inflight.contains_key(&hash),
-            st.body.is_pending(&hash),
-            st.body.is_rejected(&hash),
-            hub.has_block(&hash),
-            st.hash_height.get(&hash).copied(),
-            hub.tip_height(),
-        ) {
-            continue;
-        }
-        if st.ordered_set.insert(hash) {
-            st.ordered.push_back(hash);
+        if try_enqueue_ordered_header(st, hub, hash, prev) {
             added += 1;
         }
     }
