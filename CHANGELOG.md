@@ -11,6 +11,10 @@ before 1.0).
 
 ### Changed
 
+- **Query SH write-behind is `ShWriteBehind`:** same mutexes and condvar as
+  before (confirm enqueue vs Electrum join stay separate). `IndexMode`
+  names the archive-spend and SH-enqueue products. Body-txid head probe is
+  `TxTable::probe_body_match_fk`.
 - **ChainHub holds side bodies in one `HeldBodies` map:** first-seen seq
   lives next to the body (one `RwLock`, cap 320 FIFO). Invalidated hashes,
   header-only tips, and mining knobs are named types. RPC/P2P façades

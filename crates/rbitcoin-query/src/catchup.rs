@@ -31,6 +31,16 @@ impl IndexMode {
     pub fn is_tip(self) -> bool {
         matches!(self, Self::Tip)
     }
+
+    /// Archive writes spend annotations in Tip when `--spendindex` is on.
+    pub fn writes_archive_spends(self, spend_index: bool) -> bool {
+        spend_index && self.is_tip()
+    }
+
+    /// Confirm enqueues SH write-behind in Tip when `--shindex` is on.
+    pub fn enqueues_sh_writebehind(self, sh_index: bool) -> bool {
+        sh_index && self.is_tip()
+    }
     fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Direct,
@@ -60,6 +70,20 @@ impl Query {
     #[inline]
     pub fn sh_index_enabled(&self) -> bool {
         self.sh_index_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Archive spend writes: Tip + spend index on.
+    #[inline]
+    pub fn writes_archive_spends(&self) -> bool {
+        self.index_mode()
+            .writes_archive_spends(self.spend_index_enabled())
+    }
+
+    /// Confirm SH write-behind enqueue: Tip + shindex on.
+    #[inline]
+    pub fn enqueues_sh_writebehind(&self) -> bool {
+        self.index_mode()
+            .enqueues_sh_writebehind(self.sh_index_enabled())
     }
 
     /// Enable or disable scripthash indexing for subsequent Class C / tip work.
@@ -323,7 +347,7 @@ impl Query {
         const CHUNK: u64 = 64_000;
         let mut total = 0u64;
         let mut lo = first;
-        let mut heads = self.sh_heads.lock().unwrap();
+        let mut heads = self.sh.heads.lock().unwrap();
         while lo <= last {
             let hi = lo.saturating_add(CHUNK.saturating_sub(1)).min(last);
             let mut recs = Vec::new();
@@ -381,6 +405,44 @@ mod tests {
 
     fn lock_force_env() -> std::sync::MutexGuard<'static, ()> {
         FORCE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn query_index_products_follow_mode_and_flags() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-q-index-products-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let q = Query::open_or_create(&dir).unwrap();
+        q.set_spend_index(true);
+        q.set_sh_index_enabled(true);
+        assert!(
+            q.writes_archive_spends(),
+            "open default is Tip; spendindex on must write archive spends"
+        );
+        assert!(
+            q.enqueues_sh_writebehind(),
+            "open default is Tip; shindex on must enqueue SH write-behind"
+        );
+        q.set_spend_index(false);
+        q.set_sh_index_enabled(false);
+        assert!(!q.writes_archive_spends());
+        assert!(!q.enqueues_sh_writebehind());
+        q.set_spend_index(true);
+        q.set_sh_index_enabled(true);
+        q.enter_direct_index_mode().unwrap();
+        assert!(
+            !q.writes_archive_spends(),
+            "Direct must not write archive spends even with spendindex on"
+        );
+        assert!(
+            !q.enqueues_sh_writebehind(),
+            "Direct must not enqueue SH write-behind even with shindex on"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn leftover_run_rec(sh0: u8, fk: u64) -> Vec<u8> {
