@@ -1,6 +1,10 @@
 use super::*;
-use rbitcoin_primitives::Network;
+use bitcoin::consensus::{deserialize, encode::serialize_hex};
+use bitcoin::hashes::Hash;
+use bitcoin::{Address, Amount, Network as BtcNetwork, Txid};
+use rbitcoin_primitives::{Height, Network};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn ctx_empty() -> (RpcContext, PathBuf) {

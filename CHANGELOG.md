@@ -11,6 +11,8 @@ before 1.0).
 
 ### Changed
 
+- **RPC handlers live in domain modules:** `methods/{chain,net,mempool,mine}.rs`.
+  `METHOD_LIST` and `dispatch_inner` stay in `methods/mod.rs`.
 - **Electrum session is `ElectrumConn`:** `dispatch_pinned` takes one
   session bag. Tests live in `server_tests.rs`.
 - **RPC `help` / `getrpcinfo.methods` list every dispatched method**,

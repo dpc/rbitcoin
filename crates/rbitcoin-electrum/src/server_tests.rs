@@ -1,4 +1,3 @@
-
 use super::*;
 use rbitcoin_consensus::ChainParams;
 
