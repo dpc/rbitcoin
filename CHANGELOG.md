@@ -11,6 +11,9 @@ before 1.0).
 
 ### Changed
 
+- **CLI / conf share `NodeConfig::apply_kv`:** argv still has its own
+  flag match and help text; conf `key=value` goes through one setter.
+  Parsed flags live in `CliAccum` instead of ~40 `mut` locals.
 - **Code shape:** [`docs/code-shape.md`](docs/code-shape.md) owns control
   flow, naming, and composition (CONTRIBUTING principle 10).
   [`docs/quality.md`](docs/quality.md) **Q-61** is the 0.6.0 readability

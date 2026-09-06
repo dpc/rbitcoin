@@ -436,223 +436,9 @@ impl NodeConfig {
                     )));
                 }
             };
-            let key_l = key.to_ascii_lowercase();
-            match key_l.as_str() {
-                "datadir" => self.datadir = PathBuf::from(val),
-                "datadir-cold" | "datadir_cold" | "datadircold" => {
-                    if val.is_empty() {
-                        return Err(NodeError::Config(
-                            "conf datadir-cold requires a path".into(),
-                        ));
-                    }
-                    self.datadir_cold = Some(PathBuf::from(val));
-                }
-                "network" | "chain" => {
-                    self.network = Network::parse(val)
-                        .map_err(|e| NodeError::Config(format!("conf network: {e}")))?;
-                }
-                "signetchallenge" | "signet_challenge" => {
-                    self.signet_challenge =
-                        Some(parse_signet_challenge(val).map_err(|e| {
-                            NodeError::Config(format!("conf signetchallenge: {e}"))
-                        })?);
-                }
-                "signetblocktime" | "signet_block_time" => {
-                    self.signet_block_time =
-                        Some(val.parse().map_err(|e| {
-                            NodeError::Config(format!("conf signetblocktime: {e}"))
-                        })?);
-                }
-                "listen" => {
-                    self.p2p_listen = Some(
-                        val.parse()
-                            .map_err(|e| NodeError::Config(format!("conf listen: {e}")))?,
-                    );
-                }
-                "connect" => {
-                    self.connect.push(
-                        val.parse()
-                            .map_err(|e| NodeError::Config(format!("conf connect: {e}")))?,
-                    );
-                }
-                "seednode" => {
-                    if !val.is_empty() {
-                        self.seednodes.push(val.to_string());
-                    }
-                }
-                "electrum_listen" | "electrumlisten" => {
-                    self.electrum_listen =
-                        Some(val.parse().map_err(|e| {
-                            NodeError::Config(format!("conf electrum_listen: {e}"))
-                        })?);
-                }
-                "esplora_listen" | "esploralisten" => {
-                    self.esplora_listen = Some(
-                        val.parse()
-                            .map_err(|e| NodeError::Config(format!("conf esplora_listen: {e}")))?,
-                    );
-                }
-                "shindex" => {
-                    self.shindex = parse_conf_bool(val)
-                        .map_err(|e| NodeError::Config(format!("conf shindex: {e}")))?;
-                }
-                "sptweaks" => {
-                    self.sptweaks = parse_conf_bool(val)
-                        .map_err(|e| NodeError::Config(format!("conf sptweaks: {e}")))?;
-                }
-                "rpc_listen" | "rpclisten" => {
-                    self.rpc_listen = Some(
-                        val.parse()
-                            .map_err(|e| NodeError::Config(format!("conf rpc_listen: {e}")))?,
-                    );
-                }
-                "rpcuser" | "rpc_user" => {
-                    self.rpc_user = Some(val.to_string());
-                }
-                "rpcpassword" | "rpc_password" => {
-                    self.rpc_password = Some(val.to_string());
-                }
-                "uacomment" => {
-                    self.uacomments.push(val.to_string());
-                }
-                "testactivationheight" | "test_activation_height" => {
-                    let (name, height) =
-                        ChainParams::parse_test_activation_height(val).map_err(|e| {
-                            NodeError::Config(format!("conf testactivationheight: {e}"))
-                        })?;
-                    self.test_activation_heights
-                        .push((name.to_string(), height));
-                }
-                "persistmempool" | "persist_mempool" => {
-                    self.persist_mempool = parse_conf_bool(val)
-                        .map_err(|e| NodeError::Config(format!("conf persistmempool: {e}")))?;
-                }
-                "whitelist" => {
-                    if !val.is_empty() {
-                        self.whitelist.push(val.to_string());
-                    }
-                }
-                "blocksonly" | "blocks_only" => {
-                    self.blocksonly = parse_conf_bool(val)
-                        .map_err(|e| NodeError::Config(format!("conf blocksonly: {e}")))?;
-                }
-                "minrelaytxfee" | "min_relay_txfee" => {
-                    if val.is_empty() {
-                        return Err(NodeError::Config(
-                            "conf minrelaytxfee requires a value".into(),
-                        ));
-                    }
-                    self.min_relay_fee_btc = Some(val.to_string());
-                }
-                "mempoolexpiry" | "mempool_expiry" => {
-                    let h: u64 = val
-                        .parse()
-                        .map_err(|e| NodeError::Config(format!("conf mempoolexpiry: {e}")))?;
-                    self.mempool_expiry_hours = Some(h.max(1));
-                }
-                "startupnotify" | "startup_notify" => {
-                    if !val.is_empty() {
-                        self.startup_notify = Some(val.to_string());
-                    }
-                }
-                "permitbaremultisig" | "permit_bare_multisig" => {
-                    self.permit_bare_multisig = parse_conf_bool(val)
-                        .map_err(|e| NodeError::Config(format!("conf permitbaremultisig: {e}")))?;
-                }
-                "limitclustercount" | "limit_cluster_count" => {
-                    self.limit_cluster_count =
-                        Some(val.parse().map_err(|e| {
-                            NodeError::Config(format!("conf limitclustercount: {e}"))
-                        })?);
-                }
-                "limitclustersize" | "limit_cluster_size" => {
-                    self.limit_cluster_size_kvb =
-                        Some(val.parse().map_err(|e| {
-                            NodeError::Config(format!("conf limitclustersize: {e}"))
-                        })?);
-                }
-                "externalip" | "external_ip" => {
-                    if val.is_empty() {
-                        return Err(NodeError::Config(
-                            "conf externalip requires an address".into(),
-                        ));
-                    }
-                    let ip: std::net::IpAddr = val
-                        .parse()
-                        .map_err(|e| NodeError::Config(format!("conf externalip: {e}")))?;
-                    self.external_ips.push(ip);
-                }
-                "peertimeout" | "peer_timeout" => {
-                    let n: u64 = val
-                        .parse()
-                        .map_err(|e| NodeError::Config(format!("conf peertimeout: {e}")))?;
-                    if n == 0 {
-                        return Err(NodeError::Config(
-                            "peertimeout must be a positive integer.".into(),
-                        ));
-                    }
-                    self.peer_timeout_secs = Some(n);
-                }
-                "minimumchainwork" | "minimum_chain_work" => {
-                    self.minimum_chain_work =
-                        Some(parse_minimum_chain_work(val).map_err(NodeError::Config)?);
-                }
-                "milestone" | "assumevalid_height" | "assumevalidheight" => {
-                    self.milestone_height = val
-                        .parse()
-                        .map_err(|e| NodeError::Config(format!("conf milestone: {e}")))?;
-                }
-                "maxoutbound" | "max_outbound" => {
-                    self.max_outbound = val
-                        .parse()
-                        .map_err(|e| NodeError::Config(format!("conf maxoutbound: {e}")))?;
-                }
-                "maxinbound" | "max_inbound" => {
-                    self.max_inbound = val
-                        .parse()
-                        .map_err(|e| NodeError::Config(format!("conf maxinbound: {e}")))?;
-                    self.max_inbound_explicit = true;
-                }
-                "maxconnections" => {
-                    let total: u32 = val
-                        .parse()
-                        .map_err(|e| NodeError::Config(format!("conf maxconnections: {e}")))?;
-                    if total == 0 {
-                        return Err(NodeError::Config("conf maxconnections must be >= 1".into()));
-                    }
-                    self.max_inbound = inbound_from_maxconnections(total);
-                    self.max_inbound_explicit = true;
-                }
-                "mempool_size_mb" | "maxmempool" => {
-                    let mb: u64 = val
-                        .parse()
-                        .map_err(|e| NodeError::Config(format!("conf mempool_size_mb: {e}")))?;
-                    if mb == 0 {
-                        return Err(NodeError::Config(
-                            "conf mempool_size_mb must be >= 1".into(),
-                        ));
-                    }
-                    self.mempool_max_weight = mb.saturating_mul(1_000_000);
-                }
-                "log_level" => {
-                    if val.is_empty() {
-                        return Err(NodeError::Config("conf log_level requires a value".into()));
-                    }
-                    self.conf_log_level = Some(val.to_string());
-                }
-                "api_log" | "apilog" => {
-                    if val.is_empty() {
-                        return Err(NodeError::Config("conf api_log requires a path".into()));
-                    }
-                    self.api_log = Some(PathBuf::from(val));
-                }
-                "noseeds" | "no_seeds" => {
-                    self.use_seeds = !is_conf_true(val);
-                }
-                "regtest" if is_conf_true(val) => self.network = Network::Regtest,
-                "signet" if is_conf_true(val) => self.network = Network::Signet,
-                "testnet" if is_conf_true(val) => self.network = Network::Testnet,
-                other => {
+            match self.apply_kv(key, val)? {
+                ConfApply::Applied => {}
+                ConfApply::Unknown(other) => {
                     rbitcoin_log::warn!(
                         "node: conf {}:{}: unknown key `{other}` ignored",
                         path.display(),
@@ -663,6 +449,226 @@ impl NodeConfig {
         }
         Ok(())
     }
+
+    /// Apply one conf / CLI-equivalent `key=value`. Unknown keys are not errors.
+    pub fn apply_kv(&mut self, key: &str, val: &str) -> Result<ConfApply, NodeError> {
+        let key_l = key.to_ascii_lowercase();
+        match key_l.as_str() {
+            "datadir" => self.datadir = PathBuf::from(val),
+            "datadir-cold" | "datadir_cold" | "datadircold" => {
+                if val.is_empty() {
+                    return Err(NodeError::Config(
+                        "conf datadir-cold requires a path".into(),
+                    ));
+                }
+                self.datadir_cold = Some(PathBuf::from(val));
+            }
+            "network" | "chain" => {
+                self.network = Network::parse(val)
+                    .map_err(|e| NodeError::Config(format!("conf network: {e}")))?;
+            }
+            "signetchallenge" | "signet_challenge" => {
+                self.signet_challenge = Some(
+                    parse_signet_challenge(val)
+                        .map_err(|e| NodeError::Config(format!("conf signetchallenge: {e}")))?,
+                );
+            }
+            "signetblocktime" | "signet_block_time" => {
+                self.signet_block_time = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf signetblocktime: {e}")))?,
+                );
+            }
+            "listen" => {
+                self.p2p_listen = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf listen: {e}")))?,
+                );
+            }
+            "connect" => {
+                self.connect.push(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf connect: {e}")))?,
+                );
+            }
+            "seednode" => {
+                if !val.is_empty() {
+                    self.seednodes.push(val.to_string());
+                }
+            }
+            "electrum_listen" | "electrumlisten" => {
+                self.electrum_listen = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf electrum_listen: {e}")))?,
+                );
+            }
+            "esplora_listen" | "esploralisten" => {
+                self.esplora_listen = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf esplora_listen: {e}")))?,
+                );
+            }
+            "shindex" => {
+                self.shindex = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf shindex: {e}")))?;
+            }
+            "sptweaks" => {
+                self.sptweaks = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf sptweaks: {e}")))?;
+            }
+            "rpc_listen" | "rpclisten" => {
+                self.rpc_listen = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf rpc_listen: {e}")))?,
+                );
+            }
+            "rpcuser" | "rpc_user" => self.rpc_user = Some(val.to_string()),
+            "rpcpassword" | "rpc_password" => self.rpc_password = Some(val.to_string()),
+            "uacomment" => self.uacomments.push(val.to_string()),
+            "testactivationheight" | "test_activation_height" => {
+                let (name, height) = ChainParams::parse_test_activation_height(val)
+                    .map_err(|e| NodeError::Config(format!("conf testactivationheight: {e}")))?;
+                self.test_activation_heights
+                    .push((name.to_string(), height));
+            }
+            "persistmempool" | "persist_mempool" => {
+                self.persist_mempool = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf persistmempool: {e}")))?;
+            }
+            "whitelist" => {
+                if !val.is_empty() {
+                    self.whitelist.push(val.to_string());
+                }
+            }
+            "blocksonly" | "blocks_only" => {
+                self.blocksonly = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf blocksonly: {e}")))?;
+            }
+            "minrelaytxfee" | "min_relay_txfee" => {
+                if val.is_empty() {
+                    return Err(NodeError::Config(
+                        "conf minrelaytxfee requires a value".into(),
+                    ));
+                }
+                self.min_relay_fee_btc = Some(val.to_string());
+            }
+            "mempoolexpiry" | "mempool_expiry" => {
+                let h: u64 = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf mempoolexpiry: {e}")))?;
+                self.mempool_expiry_hours = Some(h.max(1));
+            }
+            "startupnotify" | "startup_notify" => {
+                if !val.is_empty() {
+                    self.startup_notify = Some(val.to_string());
+                }
+            }
+            "permitbaremultisig" | "permit_bare_multisig" => {
+                self.permit_bare_multisig = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf permitbaremultisig: {e}")))?;
+            }
+            "limitclustercount" | "limit_cluster_count" => {
+                self.limit_cluster_count = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf limitclustercount: {e}")))?,
+                );
+            }
+            "limitclustersize" | "limit_cluster_size" => {
+                self.limit_cluster_size_kvb = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf limitclustersize: {e}")))?,
+                );
+            }
+            "externalip" | "external_ip" => {
+                if val.is_empty() {
+                    return Err(NodeError::Config(
+                        "conf externalip requires an address".into(),
+                    ));
+                }
+                let ip: std::net::IpAddr = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf externalip: {e}")))?;
+                self.external_ips.push(ip);
+            }
+            "peertimeout" | "peer_timeout" => {
+                let n: u64 = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf peertimeout: {e}")))?;
+                if n == 0 {
+                    return Err(NodeError::Config(
+                        "peertimeout must be a positive integer.".into(),
+                    ));
+                }
+                self.peer_timeout_secs = Some(n);
+            }
+            "minimumchainwork" | "minimum_chain_work" => {
+                self.minimum_chain_work =
+                    Some(parse_minimum_chain_work(val).map_err(NodeError::Config)?);
+            }
+            "milestone" | "assumevalid_height" | "assumevalidheight" => {
+                self.milestone_height = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf milestone: {e}")))?;
+            }
+            "maxoutbound" | "max_outbound" => {
+                self.max_outbound = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf maxoutbound: {e}")))?;
+            }
+            "maxinbound" | "max_inbound" => {
+                self.max_inbound = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf maxinbound: {e}")))?;
+                self.max_inbound_explicit = true;
+            }
+            "maxconnections" => {
+                let total: u32 = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf maxconnections: {e}")))?;
+                if total == 0 {
+                    return Err(NodeError::Config("conf maxconnections must be >= 1".into()));
+                }
+                self.max_inbound = inbound_from_maxconnections(total);
+                self.max_inbound_explicit = true;
+            }
+            "mempool_size_mb" | "maxmempool" => {
+                let mb: u64 = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf mempool_size_mb: {e}")))?;
+                if mb == 0 {
+                    return Err(NodeError::Config(
+                        "conf mempool_size_mb must be >= 1".into(),
+                    ));
+                }
+                self.mempool_max_weight = mb.saturating_mul(1_000_000);
+            }
+            "log_level" => {
+                if val.is_empty() {
+                    return Err(NodeError::Config("conf log_level requires a value".into()));
+                }
+                self.conf_log_level = Some(val.to_string());
+            }
+            "api_log" | "apilog" => {
+                if val.is_empty() {
+                    return Err(NodeError::Config("conf api_log requires a path".into()));
+                }
+                self.api_log = Some(PathBuf::from(val));
+            }
+            "noseeds" | "no_seeds" => self.use_seeds = !is_conf_true(val),
+            "regtest" if is_conf_true(val) => self.network = Network::Regtest,
+            "signet" if is_conf_true(val) => self.network = Network::Signet,
+            "testnet" if is_conf_true(val) => self.network = Network::Testnet,
+            other => return Ok(ConfApply::Unknown(other.to_string())),
+        }
+        Ok(ConfApply::Applied)
+    }
+}
+
+/// Result of [`NodeConfig::apply_kv`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfApply {
+    Applied,
+    Unknown(String),
 }
 
 pub(crate) fn parse_signet_challenge(value: &str) -> Result<ScriptBuf, String> {
@@ -734,6 +740,25 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("rbitcoin-node-cfg-{n}"))
+    }
+
+    #[test]
+    fn apply_kv_is_the_conf_setter_and_unknown_is_not_error() {
+        let mut c = NodeConfig::default();
+        assert_eq!(
+            c.apply_kv("network", "regtest").unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(c.network, Network::Regtest);
+        assert_eq!(
+            c.apply_kv("datadir", "/tmp/rb-apply-kv").unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(c.datadir, PathBuf::from("/tmp/rb-apply-kv"));
+        match c.apply_kv("not-a-real-key", "1").unwrap() {
+            ConfApply::Unknown(k) => assert_eq!(k, "not-a-real-key"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
