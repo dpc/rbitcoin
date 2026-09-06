@@ -189,7 +189,9 @@ fn store_reorg_accept(hub: &ChainHub, block: Block, expect_h: Option<u32>) -> Re
                     return Err(format!("height {height} != {e}"));
                 }
             }
-            store_reorg_check_tip(hub, height, Some(hash))?;
+            // Sibling hold + try_apply_held may connect a heavier archived
+            // path; Accepted height is that tip, not necessarily `hash`.
+            store_reorg_check_tip(hub, height, expect_h.is_some().then_some(hash))?;
             Ok(true)
         }
         Ok(AcceptOutcome::AlreadyHave | AcceptOutcome::IgnoredWeaker) => Ok(true),

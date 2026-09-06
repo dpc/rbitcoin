@@ -17,15 +17,13 @@ pub enum KernelCmp {
 }
 
 pub fn kernel_forks(flags: u8) -> (bool, bool, bool, bool, bool, u32) {
-    let p2sh = flags & 1 != 0;
     let dersig = flags & 2 != 0;
     let cltv = flags & 4 != 0;
     let csv = flags & 8 != 0;
     let tap = flags & 16 != 0;
-    let mut core = VERIFY_NULLDUMMY | VERIFY_WITNESS;
-    if p2sh {
-        core |= VERIFY_P2SH;
-    }
+    // libbitcoinconsensus VerifyScript asserts P2SH whenever WITNESS is set.
+    let p2sh = true;
+    let mut core = VERIFY_NULLDUMMY | VERIFY_WITNESS | VERIFY_P2SH;
     if dersig {
         core |= VERIFY_DERSIG;
     }
