@@ -1,7 +1,8 @@
-/// Shared chain accept path for P2P: tip extension and most-work reorg.
-///
-/// Lock order: `connect_lock` then inner maps (`held_bodies`, `invalidated`,
-/// `header_tips`, …). Never acquire `connect_lock` while holding an inner guard.
+//! Shared chain accept path for P2P: tip extension and most-work reorg.
+//!
+//! Lock order: `connect_lock` then inner maps (`held_bodies`, `invalidated`,
+//! `header_tips`, …). Never acquire `connect_lock` while holding an inner guard.
+
 use crate::cache::BlockCache;
 use crate::error::NetError;
 use bitcoin::block::Header;
@@ -33,8 +34,6 @@ pub struct TipEvent {
     pub reorg_branch_len: u32,
 }
 
-const HELD_BODIES_CAP: usize = 320;
-
 /// Never-confirmed side-branch bodies plus first-seen seq (equal-work FIFO).
 struct HeldBodies {
     by_hash: HashMap<BlockHash, (Block, u64)>,
@@ -42,6 +41,9 @@ struct HeldBodies {
 }
 
 impl HeldBodies {
+    const CAP: usize = 320;
+    const STALE_BELOW: u32 = 288;
+
     fn new() -> Self {
         Self {
             by_hash: HashMap::new(),
@@ -82,7 +84,7 @@ impl HeldBodies {
         if self.by_hash.contains_key(&hash) {
             return;
         }
-        if self.by_hash.len() >= HELD_BODIES_CAP {
+        if self.by_hash.len() >= Self::CAP {
             if let Some(k) = self
                 .by_hash
                 .iter()
@@ -128,18 +130,47 @@ impl HeaderTips {
             by_hash: HashMap::new(),
         }
     }
-}
 
-impl std::ops::Deref for HeaderTips {
-    type Target = HashMap<BlockHash, (BlockHash, u32)>;
-    fn deref(&self) -> &Self::Target {
-        &self.by_hash
+    fn get(&self, hash: &BlockHash) -> Option<(BlockHash, u32)> {
+        self.by_hash.get(hash).copied()
     }
-}
 
-impl std::ops::DerefMut for HeaderTips {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.by_hash
+    fn height_of(&self, hash: &BlockHash) -> Option<u32> {
+        self.get(hash).map(|(_, h)| h)
+    }
+
+    fn contains(&self, hash: &BlockHash) -> bool {
+        self.by_hash.contains_key(hash)
+    }
+
+    fn len(&self) -> usize {
+        self.by_hash.len()
+    }
+
+    fn insert(&mut self, hash: BlockHash, prev: BlockHash, height: u32) {
+        self.by_hash.insert(hash, (prev, height));
+    }
+
+    fn remove(&mut self, hash: &BlockHash) {
+        self.by_hash.remove(hash);
+    }
+
+    fn evict_one(&mut self) {
+        if let Some(k) = self.by_hash.keys().next().copied() {
+            self.by_hash.remove(&k);
+        }
+    }
+
+    fn hashes(&self) -> impl Iterator<Item = BlockHash> + '_ {
+        self.by_hash.keys().copied()
+    }
+
+    fn prevs(&self) -> impl Iterator<Item = BlockHash> + '_ {
+        self.by_hash.values().map(|(prev, _)| *prev)
+    }
+
+    fn entries(&self) -> impl Iterator<Item = (BlockHash, u32)> + '_ {
+        self.by_hash.iter().map(|(hash, (_, h))| (*hash, *h))
     }
 }
 
@@ -389,11 +420,11 @@ impl ChainHub {
             .ok()
             .flatten()
             .map(|h| h.0)
-            .or_else(|| self.header_tips.read().unwrap().get(&prev).map(|(_, h)| *h));
+            .or_else(|| self.header_tips.read().unwrap().height_of(&prev));
         let Some(parent_h) = parent_h else {
             return false;
         };
-        parent_h.saturating_add(1) > tip.saturating_add(Self::HELD_STALE_BELOW)
+        parent_h.saturating_add(1) > tip.saturating_add(HeldBodies::STALE_BELOW)
     }
 
     /// Unrequested body whose header-path work is strictly below the tip.
@@ -644,8 +675,8 @@ impl ChainHub {
             let headers = self.header_tips.read().unwrap();
             // Only header *tips* (a later submitblock of an ancestor must not
             // re-list that ancestor alongside its descendant).
-            let covered: HashSet<BlockHash> = headers.values().map(|(prev, _)| *prev).collect();
-            for hash in headers.keys().copied() {
+            let covered: HashSet<BlockHash> = headers.prevs().collect();
+            for hash in headers.hashes() {
                 if covered.contains(&hash) {
                     continue;
                 }
@@ -714,7 +745,7 @@ impl ChainHub {
             return Some(b.header.prev_blockhash);
         }
         if let Some((prev, _)) = self.header_tips.read().unwrap().get(hash) {
-            return Some(*prev);
+            return Some(prev);
         }
         let (_, rec) = self
             .query
@@ -779,11 +810,11 @@ impl ChainHub {
     pub fn best_header_height(&self) -> u32 {
         let mut best = self.tip_height().unwrap_or(0);
         let headers = self.header_tips.read().unwrap();
-        for (hash, (_, h)) in headers.iter() {
-            if self.header_ancestry_invalid(*hash) {
+        for (hash, h) in headers.entries() {
+            if self.header_ancestry_invalid(hash) {
                 continue;
             }
-            best = best.max(*h);
+            best = best.max(h);
         }
         best
     }
@@ -813,12 +844,10 @@ impl ChainHub {
         };
         let mut tips = self.header_tips.write().unwrap();
         tips.remove(&prev);
-        if tips.len() >= 128 && !tips.contains_key(&hash) {
-            if let Some(k) = tips.keys().next().copied() {
-                tips.remove(&k);
-            }
+        if tips.len() >= 128 && !tips.contains(&hash) {
+            tips.evict_one();
         }
-        tips.insert(hash, (prev, height));
+        tips.insert(hash, prev, height);
     }
 
     /// Persist a header row only (for header-sync → out-of-order body archive).
@@ -837,7 +866,7 @@ impl ChainHub {
         {
             return Some(h.0);
         }
-        self.header_tips.read().unwrap().get(hash).map(|(_, h)| *h)
+        self.header_tips.read().unwrap().height_of(hash)
     }
 
     /// Whether `hash` is marked invalid (`invalidateblock` or rejected `submitblock`).
@@ -855,7 +884,7 @@ impl ChainHub {
     /// Used so we never `getdata` a block inv whose header we have not seen.
     pub fn knows_header(&self, hash: &BlockHash) -> bool {
         self.is_connected(hash)
-            || self.header_tips.read().unwrap().contains_key(hash)
+            || self.header_tips.read().unwrap().contains(hash)
             || self
                 .query
                 .get_header_by_hash(&hash.to_byte_array())
@@ -944,7 +973,7 @@ impl ChainHub {
             .ok()
             .flatten()
             .is_some()
-            || self.header_tips.read().unwrap().contains_key(&hash)
+            || self.header_tips.read().unwrap().contains(&hash)
             || self.is_connected(&hash)
         {
             return Ok(());
@@ -958,7 +987,7 @@ impl ChainHub {
                 .ok()
                 .flatten()
                 .is_some()
-            || self.header_tips.read().unwrap().contains_key(&prev)
+            || self.header_tips.read().unwrap().contains(&prev)
             || self.is_connected(&prev)
             || self.held_body(&prev).is_some();
         if !prev_known {
@@ -1367,7 +1396,7 @@ impl ChainHub {
     fn reconsider_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
         let known = self.is_connected(&hash)
             || self.load_side_body(&hash).is_some()
-            || self.header_tips.read().unwrap().contains_key(&hash)
+            || self.header_tips.read().unwrap().contains(&hash)
             || self
                 .query
                 .get_header_by_hash(&hash.to_byte_array())
@@ -1785,8 +1814,6 @@ impl ChainHub {
         crate::tip_accept::run_on_tip_accept_async(|| self.accept_received_block_inner(block)).await
     }
 
-    const HELD_STALE_BELOW: u32 = 288;
-
     fn held_body_height(&self, block: &Block) -> Option<u32> {
         let prev = block.header.prev_blockhash;
         if prev.to_byte_array() == [0u8; 32] {
@@ -1812,7 +1839,7 @@ impl ChainHub {
             held.entries()
                 .filter_map(|(hash, b)| {
                     let h = self.held_body_height(b)?;
-                    (tip.saturating_sub(h) > Self::HELD_STALE_BELOW).then_some(hash)
+                    (tip.saturating_sub(h) > HeldBodies::STALE_BELOW).then_some(hash)
                 })
                 .collect()
         };
@@ -1841,7 +1868,7 @@ impl ChainHub {
         }
         if let Some(h) = self.held_body_height(&block) {
             if let Some(tip) = self.tip_height() {
-                if tip.saturating_sub(h) > Self::HELD_STALE_BELOW {
+                if tip.saturating_sub(h) > HeldBodies::STALE_BELOW {
                     return;
                 }
             }
