@@ -11,6 +11,8 @@ before 1.0).
 
 ### Changed
 
+- **Electrum session is `ElectrumConn`:** `dispatch_pinned` takes one
+  session bag. Tests live in `server_tests.rs`.
 - **RPC `help` / `getrpcinfo.methods` list every dispatched method**,
   including `generate`, `mockscheduler`, `addpeeraddress`, and
   `getnodeaddresses`. Electrum genesis hex and Esplora WS txid / tip `id`
