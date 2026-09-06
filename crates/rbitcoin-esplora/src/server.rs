@@ -1611,9 +1611,7 @@ mod tests {
 
     fn display_txid(txid: bitcoin::Txid) -> String {
         use bitcoin::hashes::Hash;
-        let mut rev = txid.to_byte_array();
-        rev.reverse();
-        rbitcoin_primitives::hex_encode(rev)
+        rbitcoin_primitives::display_hash_hex(&txid.to_byte_array())
     }
 
     async fn ws_recv_json(

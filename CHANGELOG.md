@@ -11,6 +11,10 @@ before 1.0).
 
 ### Changed
 
+- **RPC `help` / `getrpcinfo.methods` list every dispatched method**,
+  including `generate`, `mockscheduler`, `addpeeraddress`, and
+  `getnodeaddresses`. Electrum genesis hex and Esplora WS txid / tip `id`
+  use `display_hash_hex`.
 - **Node start catch-up is a `CatchUp` enum:** not four independent bools.
   Indexes, IBD, and Electrum/Esplora start are named phases. Electrum and
   Esplora share one hub-tip broadcast bridge.

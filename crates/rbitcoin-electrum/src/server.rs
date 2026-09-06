@@ -135,15 +135,12 @@ pub struct ElectrumConfig {
 impl ElectrumConfig {
     pub fn for_params(listen: SocketAddr, params: &ChainParams) -> Self {
         let genesis = params.genesis_hash.to_byte_array();
-        // Electrum expects internal byte order reversed for display hex of hashes.
-        let mut rev = genesis;
-        rev.reverse();
         Self {
             listen,
             banner: "rbitcoin electrum — libre-relay-class (0.1 sat/vB, no dust ban, full RBF)"
                 .into(),
             donation_address: String::new(),
-            genesis_hash_hex: rbitcoin_primitives::hex_encode(rev),
+            genesis_hash_hex: rbitcoin_primitives::display_hash_hex(&genesis),
             limits: ServeLimits::for_public_proxy(),
             max_scripthash_subs: DEFAULT_MAX_SCRIPTHASH_SUBS,
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
@@ -1857,7 +1854,10 @@ mod tests {
     fn config_helpers_and_param_parsers() {
         let params = ChainParams::regtest();
         let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
-        assert!(!cfg.genesis_hash_hex.is_empty());
+        assert_eq!(
+            cfg.genesis_hash_hex,
+            rbitcoin_primitives::display_hash_hex(&params.genesis_hash.to_byte_array())
+        );
         assert!(cfg.banner.contains("rbitcoin"));
         assert_eq!(cfg.tweaks_chunk, crate::tweaks::SUBSCRIBE_CHUNK);
 
