@@ -58,6 +58,14 @@ before 1.0).
 
 ### Fixed
 
+- **Held consensus-invalid children are not retried on the next sibling:**
+  `try_apply_held` skipped `invalidateblock` hashes but not a missing-prevout
+  child that failed mid-branch. That child stayed in `held_bodies` and the
+  next equal-work `accept_received_block` re-applied it (`side reject` on
+  `block_fork_differential`). Failed branch tips are marked invalid and
+  dropped; `accept_branch` refuses invalidated hashes. Fork-diff `setup_side`
+  parks the sibling without applying held work.
+
 - **Reorg-n differential parks tip on stem after reject:** `compare_fork_n_one`
   left the hub on the side chain when the child was rejected, so the next
   input could fail harness `side extend`. Reject paths now rewind + precious

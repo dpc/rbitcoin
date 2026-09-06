@@ -736,6 +736,7 @@ impl ChainHub {
     /// Remember a consensus-invalid block (not a mutated merkle).
     pub fn note_invalid_block(&self, hash: BlockHash) {
         self.invalidated.write().unwrap().insert(hash);
+        self.drop_held(hash);
     }
 
     /// True if we have a header row (best chain, header-only tip, or held body).
@@ -1173,6 +1174,7 @@ impl ChainHub {
                 if let Some(b) = self.block_at_height(ht)? {
                     let bh = b.block_hash();
                     self.invalidated.write().unwrap().insert(bh);
+                    self.drop_held(bh);
                     path.push(bh);
                 }
             }
@@ -1186,6 +1188,7 @@ impl ChainHub {
             // Side-branch / held header (feature_chain_tiebreaks B10): mark
             // invalid without a tip disconnect.
             self.invalidated.write().unwrap().insert(hash);
+            self.drop_held(hash);
             self.invalidated_paths.write().unwrap().push(vec![hash]);
         } else {
             return Err(NetError::Consensus("Block not found".into()));
@@ -1465,6 +1468,12 @@ impl ChainHub {
         if blocks.is_empty() {
             return Err(NetError::Protocol("empty branch"));
         }
+        if blocks
+            .iter()
+            .any(|b| self.is_block_invalid(&b.block_hash()))
+        {
+            return Err(NetError::Consensus("block is invalidated".into()));
+        }
         for w in blocks.windows(2) {
             if w[1].header.prev_blockhash != w[0].block_hash() {
                 return Err(NetError::Protocol("branch not linked"));
@@ -1708,6 +1717,16 @@ impl ChainHub {
         }
     }
 
+    fn drop_held(&self, hash: BlockHash) {
+        self.held_bodies.write().unwrap().remove(&hash);
+        self.held_seq.write().unwrap().remove(&hash);
+    }
+
+    /// Park a disconnected body without running [`Self::try_apply_held`].
+    pub fn hold_unconnected_body(&self, block: Block) {
+        self.hold_body(block);
+    }
+
     fn hold_body(&self, block: Block) {
         let hash = block.block_hash();
         if self.is_connected(&hash) {
@@ -1834,9 +1853,18 @@ impl ChainHub {
         let tip_seq = |tip: BlockHash| seqs.get(&tip).copied().unwrap_or(u64::MAX);
         let mut best: Option<(Work, u64, Vec<Block>, bool)> = None;
         for start in starts {
+            if self.is_block_invalid(&start) {
+                continue;
+            }
             let Some(branch) = self.assemble_side_branch(start) else {
                 continue;
             };
+            if branch
+                .iter()
+                .any(|b| self.is_block_invalid(&b.block_hash()))
+            {
+                continue;
+            }
             let w = sum_work(branch.iter().map(|b| b.header.work()));
             let tip = branch.last().map(Block::block_hash);
             let is_p = tip == precious;
@@ -1861,7 +1889,16 @@ impl ChainHub {
             Ok(AcceptOutcome::IgnoredWeaker) => Ok(None),
             Ok(other) => Ok(Some(other)),
             Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => Ok(None),
-            Err(e) => Err(e),
+            Err(e) => {
+                if let (NetError::Consensus(s), Some(tip)) =
+                    (&e, branch.last().map(Block::block_hash))
+                {
+                    if !reject_is_mutated(s) && !s.to_ascii_lowercase().contains("not found") {
+                        self.note_invalid_block(tip);
+                    }
+                }
+                Err(e)
+            }
         }
     }
 
@@ -4033,6 +4070,98 @@ mod tests {
             hub.held_body(&far.block_hash()).is_none(),
             "must not hold IgnoredWeaker already >288 below tip"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn missing_prevout_child(prev: BlockHash, time: u32, height: u32) -> Block {
+        let spend = Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x29; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        mine_regtest_paying(
+            prev,
+            time,
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![spend],
+        )
+    }
+
+    #[test]
+    fn invalid_held_child_does_not_poison_later_apply() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_050_000, 1);
+        hub.accept_block(b1.clone()).unwrap();
+        let side = mine_distinct(gen, 1_300_050_001, 1, &[b1.block_hash()]);
+        assert!(matches!(
+            hub.accept_received_block(side.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        assert!(hub.held_body(&side.block_hash()).is_some());
+
+        let bad = missing_prevout_child(side.block_hash(), side.header.time.saturating_add(600), 2);
+        let err = hub
+            .accept_received_block(bad.clone())
+            .expect_err("missing prevout must reject");
+        match err {
+            NetError::Consensus(s) => {
+                assert!(s.contains("bad-txns-inputs-missingorspent"), "got {s}");
+            }
+            other => panic!("expected consensus reject, got {other:?}"),
+        }
+        assert_eq!(hub.tip_hash(), Some(b1.block_hash()));
+        assert!(
+            hub.held_body(&bad.block_hash()).is_none(),
+            "consensus-invalid child must leave held_bodies"
+        );
+        assert!(
+            hub.is_block_invalid(&bad.block_hash()),
+            "missingorspent child is BLOCK_FAILED"
+        );
+
+        assert!(matches!(
+            hub.accept_received_block(side.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker | AcceptOutcome::AlreadyHave
+        ));
+        assert_eq!(
+            hub.tip_hash(),
+            Some(b1.block_hash()),
+            "retrying the sibling must not fail or reorg onto the invalid child"
+        );
+
+        let good = mine(side.block_hash(), side.header.time.saturating_add(601), 2);
+        assert!(matches!(
+            hub.accept_received_block(good.clone()).unwrap(),
+            AcceptOutcome::Accepted { height: 2 }
+        ));
+        assert_eq!(hub.tip_hash(), Some(good.block_hash()));
+
+        hub.note_invalid_block(good.block_hash());
+        let err = hub
+            .accept_branch(&[side.clone(), good.clone()])
+            .expect_err("invalidated tip must not apply");
+        match err {
+            NetError::Consensus(s) => {
+                assert!(s.contains("invalidat"), "got {s}");
+            }
+            other => panic!("expected invalidated refuse, got {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }
