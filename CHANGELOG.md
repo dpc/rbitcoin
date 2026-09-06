@@ -11,6 +11,8 @@ before 1.0).
 
 ### Changed
 
+- **Electrum asof/live scripthash reads share `sh_at_view`:** history,
+  balance, and listunspent no longer copy a 4-way pin fork.
 - **Display-order 32-byte hash hex** lives in `rbitcoin-primitives`
   (`display_hash_hex` / `parse_display_hash32`). RPC, Electrum, and Esplora
   call that pair instead of each reversing then encoding.
