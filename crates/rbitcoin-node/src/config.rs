@@ -127,23 +127,12 @@ impl Default for MempoolOpts {
 }
 
 /// JSON-RPC HTTP listen and auth.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RpcOpts {
     pub listen: Option<SocketAddr>,
     pub user: Option<String>,
     pub password: Option<String>,
     pub work_queue: Option<usize>,
-}
-
-impl Default for RpcOpts {
-    fn default() -> Self {
-        Self {
-            listen: None,
-            user: None,
-            password: None,
-            work_queue: None,
-        }
-    }
 }
 
 /// Node process configuration (CLI + optional conf file).
