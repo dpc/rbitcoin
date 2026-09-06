@@ -2660,6 +2660,66 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn fork_missing_prevout_seed_block() -> Block {
+        let params = diff_regtest_params();
+        let g = genesis_block(&params);
+        let spend = Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x29; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        mine_regtest_paying(
+            g.block_hash(),
+            g.header.time + REGTEST_BLOCK_SPACING,
+            1,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![spend],
+        )
+    }
+
+    #[test]
+    fn compare_fork_one_survives_missing_prevout_then_valid() {
+        let (dir, hub, _g) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
+        let base = mine_diff_stem(&hub, pad).unwrap();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        submit_pad_to_oracle(&mock, &base.bodies).unwrap();
+
+        let bad = serialize(&fork_missing_prevout_seed_block());
+        let mock = MockOracle::new(OracleReply::Reason("inconclusive".into())).queue(vec![
+            OracleReply::Reason("inconclusive".into()),
+            OracleReply::Reason("bad-txns-inputs-missingorspent".into()),
+            OracleReply::Reason("duplicate".into()),
+        ]);
+        match compare_fork_one(&hub, &base, &mock, &bad) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("missing-prevout child: {other:?}"),
+        }
+        assert_eq!(hub.tip_hash(), Some(base.tip.hash));
+
+        let seed = serialize(&fork_child_seed_block());
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_fork_one(&hub, &base, &mock, &seed) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("next fork child after reject: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
+        assert_eq!(hub.tip_hash(), Some(base.tip.hash));
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn compare_fork_n_one_is_deeper_than_two_and_rewinds_stem() {
         let (dir, hub, _g) = tmp_diff_hub();

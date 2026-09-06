@@ -4036,4 +4036,107 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    fn missing_prevout_child(prev: BlockHash, time: u32, height: u32) -> Block {
+        let spend = Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x29; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        mine_regtest_paying(
+            prev,
+            time,
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![spend],
+        )
+    }
+
+    #[test]
+    fn invalid_held_child_does_not_poison_later_apply() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_050_000, 1);
+        hub.accept_block(b1.clone()).unwrap();
+        let side = mine_distinct(gen, 1_300_050_001, 1, &[b1.block_hash()]);
+        assert!(matches!(
+            hub.accept_received_block(side.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        assert!(hub.held_body(&side.block_hash()).is_some());
+
+        let bad = missing_prevout_child(
+            side.block_hash(),
+            side.header.time.saturating_add(600),
+            2,
+        );
+        let err = hub
+            .accept_received_block(bad.clone())
+            .expect_err("missing prevout must reject");
+        match err {
+            NetError::Consensus(s) => {
+                assert!(
+                    s.contains("bad-txns-inputs-missingorspent"),
+                    "got {s}"
+                );
+            }
+            other => panic!("expected consensus reject, got {other:?}"),
+        }
+        assert_eq!(hub.tip_hash(), Some(b1.block_hash()));
+        assert!(
+            hub.held_body(&bad.block_hash()).is_none(),
+            "consensus-invalid child must leave held_bodies"
+        );
+        assert!(
+            hub.is_block_invalid(&bad.block_hash()),
+            "missingorspent child is BLOCK_FAILED"
+        );
+
+        assert!(matches!(
+            hub.accept_received_block(side.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker | AcceptOutcome::AlreadyHave
+        ));
+        assert_eq!(
+            hub.tip_hash(),
+            Some(b1.block_hash()),
+            "retrying the sibling must not fail or reorg onto the invalid child"
+        );
+
+        let good = mine(
+            side.block_hash(),
+            side.header.time.saturating_add(601),
+            2,
+        );
+        assert!(matches!(
+            hub.accept_received_block(good.clone()).unwrap(),
+            AcceptOutcome::Accepted { height: 2 }
+        ));
+        assert_eq!(hub.tip_hash(), Some(good.block_hash()));
+
+        hub.note_invalid_block(good.block_hash());
+        let err = hub
+            .accept_branch(&[side.clone(), good.clone()])
+            .expect_err("invalidated tip must not apply");
+        match err {
+            NetError::Consensus(s) => {
+                assert!(s.contains("invalidat"), "got {s}");
+            }
+            other => panic!("expected invalidated refuse, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
