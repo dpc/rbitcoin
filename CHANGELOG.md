@@ -11,6 +11,10 @@ before 1.0).
 
 ### Changed
 
+- **IBD confirm-event drain is `apply_confirm_events`:** the main loop still
+  drains before assign and after `offer_confirm_ready` (plus the stall tick).
+  Headers apply is named stages; a repeated header window does not grow the
+  header table. Confirm reject no longer clones unused wire.
 - **Workspace version 0.5.99:** in-tree toward 0.6.0. Published GitHub
   Releases remain 0.5.1; 0.5.2 is the 0.5.1 maintenance branch.
 - **`NodeConfig` is composed option groups:** `DatadirOpts` / `ListenOpts` /

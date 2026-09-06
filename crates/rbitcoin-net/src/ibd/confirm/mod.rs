@@ -303,8 +303,6 @@ pub(crate) enum ConfirmEvent {
         height: u32,
         hash: BlockHash,
         err: String,
-        /// Rejected tip+1 wire after `take_raw` (BQ row is already gone).
-        wire: Option<std::sync::Arc<bitcoin::Block>>,
     },
 }
 
@@ -1287,7 +1285,6 @@ pub(crate) fn spawn_confirm_engine(
                             height,
                             hash,
                             err: msg,
-                            wire: None,
                         });
                     }
                 }
@@ -1368,7 +1365,6 @@ pub(crate) fn spawn_confirm_engine(
                         height,
                         hash,
                         err: msg,
-                        wire: None,
                     });
                     true
                 },
@@ -1532,7 +1528,6 @@ pub(crate) fn spawn_confirm_engine(
                             height: expect_h,
                             hash: first_hash,
                             err: log_msg,
-                            wire: Some(std::sync::Arc::clone(&wire_batch[0].2.block)),
                         });
                         std::thread::sleep(Duration::from_millis(50));
                         continue;
@@ -1671,7 +1666,6 @@ pub(crate) fn spawn_confirm_engine(
                                 height: expect_h,
                                 hash: first_hash,
                                 err: msg,
-                                wire: Some(std::sync::Arc::clone(&wire_batch[0].2.block)),
                             })
                             .is_err()
                         {

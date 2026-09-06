@@ -25,7 +25,6 @@ fn confirm_reject_blacklist_surface() {
         "consensus: prevout already spent on best chain",
         None,
         None,
-        None,
     );
     assert!(!st.body.is_rejected(&zero));
 
@@ -40,7 +39,6 @@ fn confirm_reject_blacklist_surface() {
         51,
         hash,
         "consensus: script verification failed: script false",
-        None,
         None,
         None,
     );
@@ -58,7 +56,6 @@ fn confirm_reject_blacklist_surface() {
         219_562,
         hash,
         "consensus: store: corrupt record: invariant: spend annotate missing pin denserels/abs",
-        None,
         None,
         None,
     );
@@ -80,7 +77,6 @@ fn confirm_reject_blacklist_surface() {
         "consensus: store: corrupt record: archive: parent create_fk unresolved (contiguous batch required)",
         None,
         None,
-        None,
     );
     assert!(
         st.body.is_rejected(&hash),
@@ -94,7 +90,6 @@ fn confirm_reject_blacklist_surface() {
         961_468,
         hash,
         "consensus: store: corrupt record: tx put_full_batch fk mismatch (plan not committed in order)",
-        None,
         None,
         None,
     );
@@ -144,7 +139,6 @@ fn confirm_reject_blacklist_surface() {
         "consensus: bad block: merkle root mismatch",
         Some(&q),
         None,
-        None,
     );
     assert!(
         !st.body.is_rejected(&hash),
@@ -173,7 +167,6 @@ fn confirm_reject_blacklist_surface() {
         "consensus: unexpected previous header",
         None,
         None,
-        None,
     );
     assert!(
         !st.body.is_rejected(&hash),
@@ -190,7 +183,6 @@ fn confirm_reject_blacklist_surface() {
         42_285,
         hash,
         "consensus: bad header: missing retarget first header",
-        None,
         None,
         None,
     );
@@ -215,7 +207,6 @@ fn confirm_reject_blacklist_surface() {
         362_595,
         hash,
         "consensus: prevout already spent on best chain",
-        None,
         None,
         None,
     );
@@ -336,7 +327,6 @@ fn bad_prev_gathers_winner_via_bq_by_hash() {
         "consensus: unexpected previous header",
         Some(hub.query.as_ref()),
         Some(&hub),
-        None,
     );
     assert_eq!(hub.tip_height(), Some(0));
     assert_eq!(st.height_to_hash.get(&1), Some(&win.block_hash()));
@@ -585,7 +575,6 @@ fn multi_hop_bad_prev_applies_when_full_path_bodies_ready() {
         "consensus: unexpected previous header",
         Some(hub.query.as_ref()),
         Some(&hub),
-        None,
     );
     assert_eq!(
         hub.tip_height(),
@@ -716,7 +705,6 @@ fn multi_hop_bad_prev_densifies_full_path_and_reorgs() {
         "consensus: unexpected previous header",
         Some(hub.query.as_ref()),
         Some(&hub),
-        None,
     );
     assert_eq!(hub.tip_height(), Some(0), "rewind to LCA");
     assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
@@ -1238,7 +1226,6 @@ fn bad_prev_competing_path_reorgs_via_apply_confirm_reject() {
         "consensus: unexpected previous header",
         Some(hub.query.as_ref()),
         Some(&hub),
-        None,
     );
     assert_eq!(
         hub.tip_height(),
@@ -1356,7 +1343,6 @@ fn bad_prev_awaits_winner_body_then_reorgs_when_held() {
         "consensus: unexpected previous header",
         Some(hub.query.as_ref()),
         Some(&hub),
-        None,
     );
     assert_eq!(
         hub.tip_height(),
@@ -1384,7 +1370,6 @@ fn bad_prev_after_take_raw_classifies() {
     };
     use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_query::Query;
-    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
@@ -1480,7 +1465,6 @@ fn bad_prev_after_take_raw_classifies() {
         "consensus: unexpected previous header",
         Some(hub.query.as_ref()),
         Some(&hub),
-        Some(Arc::new(ext.clone())),
     );
     assert_eq!(
         hub.tip_hash(),
@@ -1509,7 +1493,6 @@ fn bad_prev_evicts_slot_rewinds_taken() {
     };
     use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_query::Query;
-    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
@@ -1599,7 +1582,6 @@ fn bad_prev_evicts_slot_rewinds_taken() {
         "consensus: unexpected previous header",
         Some(hub.query.as_ref()),
         Some(&hub),
-        Some(Arc::new(ext.clone())),
     );
     assert_eq!(
         hub.query.lookup_taken_hi(),
@@ -1865,6 +1847,151 @@ fn apply_peer_event_body_and_control_surface() {
     drop(body_tx);
     drop(ctrl_tx);
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Repeat of the same header window must not `put_header` / grow `header_fks`.
+#[test]
+fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
+    use super::super::peer_io::{PeerEvent, PeerSlot};
+    use super::apply_peer_event;
+    use crate::seeds::AddrMan;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::CompactTarget;
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::Query;
+    use std::collections::HashSet;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicU32, AtomicU64};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    fn dummy_slot() -> PeerSlot {
+        let (cmd_tx, _rx) = mpsc::unbounded_channel();
+        let task = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .spawn(async {});
+        PeerSlot {
+            id: 1,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)), 18444),
+            cmd_tx,
+            in_flight: HashSet::new(),
+            peer_height: 10,
+            connected_ms: 1,
+            first_data_ms: 0,
+            bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
+            alive: true,
+            task,
+        }
+    }
+    fn dummy_header(prev: BlockHash, n: u8) -> Header {
+        Header {
+            version: Version::from_consensus(4),
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([n; 32]),
+            time: 1_300_000_000 + u32::from(n),
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: u32::from(n),
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "rbitcoin-ev-hdr-repeat-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let mut st = IbdWorkState::new(vec![dummy_slot()], Some(gen), Some(0));
+    let write_next = AtomicU32::new(1);
+    let mut book = AddrMan::new();
+    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 99)), 18444);
+    let hdr = dummy_header(gen, 1);
+    let hash = hdr.block_hash();
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::Headers {
+            peer: 1,
+            headers: vec![hdr],
+        },
+        &write_next,
+        &mut book,
+        local,
+        None,
+    );
+    assert!(st.known_headers.contains(&hash));
+    assert!(st.header_fks.contains_key(&hash));
+    let fks = st.header_fks.len();
+    let n_headers = hub.query.store().header_count();
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::Headers {
+            peer: 1,
+            headers: vec![hdr],
+        },
+        &write_next,
+        &mut book,
+        local,
+        None,
+    );
+    assert_eq!(st.header_fks.len(), fks);
+    assert_eq!(hub.query.store().header_count(), n_headers);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn apply_confirm_events_accepted_and_reject() {
+    use super::super::confirm::ConfirmEvent;
+    use super::apply_confirm_events;
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::Query;
+    use std::sync::atomic::AtomicU32;
+    use std::time::Instant;
+
+    let dir = std::env::temp_dir().join(format!(
+        "rbitcoin-ev-confirm-drain-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(0));
+    let acc = h(11);
+    st.ordered.push_back(acc);
+    st.ordered_set.insert(acc);
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(ConfirmEvent::Accepted { hash: acc }).unwrap();
+    tx.send(ConfirmEvent::Reject {
+        height: 1,
+        hash: h(12),
+        err: "consensus: script verification failed: script false".into(),
+    })
+    .unwrap();
+    drop(tx);
+    let archive = AtomicU32::new(1);
+    let max_ready = AtomicU32::new(0);
+    let mut last = Instant::now() - std::time::Duration::from_secs(5);
+    apply_confirm_events(&mut st, &hub, &rx, &archive, &max_ready, &mut last);
+    assert!(!st.ordered_set.contains(&acc));
+    assert!(st.body.is_known_archived(&acc));
+    assert!(st.body.is_rejected(&h(12)));
+    assert!(last.elapsed() < std::time::Duration::from_secs(1));
     let _ = std::fs::remove_dir_all(dir);
 }
 

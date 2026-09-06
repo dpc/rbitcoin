@@ -135,6 +135,161 @@ pub(crate) fn drain_ready_peer_and_archive_events(
     Ok(true)
 }
 
+fn on_headers_batch(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    headers: Vec<bitcoin::block::Header>,
+) -> usize {
+    let mut added = 0usize;
+    let mut batch_prev: Option<(BlockHash, u32)> = None;
+    for hdr in headers {
+        let hash = hdr.block_hash();
+        let prev = hdr.prev_blockhash;
+        let already_known = st.known_headers.contains(&hash) && st.header_fks.contains_key(&hash);
+        let height = parent_height(&st.hash_height, hub, prev).or_else(|| {
+            batch_prev.and_then(|(ph, pht)| {
+                if ph == prev {
+                    Some(pht.saturating_add(1))
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(h) = height {
+            let tip = hub.tip_height().zip(hub.tip_hash());
+            let on_path = st.try_set_path_slot(hash, h, prev, tip);
+            if !on_path {
+                if let Some(&cur) = st.height_to_hash.get(&h) {
+                    if cur != hash {
+                        st.reorg.register_explore(std::iter::once(hash), Some(hash));
+                    }
+                }
+            } else {
+                st.max_peer_height = st.max_peer_height.max(h);
+                st.max_ordered_height = st.max_ordered_height.max(h);
+            }
+            batch_prev = Some((hash, h));
+        }
+        if !already_known {
+            if !st.header_fks.contains_key(&hash) {
+                if let Ok(fk) = hub.ensure_header_fk(&hdr) {
+                    st.header_fks.insert(hash, fk);
+                }
+            }
+        }
+        if hub.has_block(&hash) {
+            st.known_headers.insert(hash);
+            continue;
+        }
+        if st.body.is_rejected(&hash) {
+            continue;
+        }
+        let prev_ok = st.known_headers.contains(&prev)
+            || hub.has_block(&prev)
+            || prev.to_byte_array() == [0u8; 32]
+            || hub.tip_hash() == Some(prev);
+        if !prev_ok && hub.tip_height().is_some() && !st.known_headers.is_empty() {
+            continue;
+        }
+        st.known_headers.insert(hash);
+        if !st.hash_height.contains_key(&hash) {
+            continue;
+        }
+        let Some(ht) = st.hash_height.get(&hash).copied() else {
+            continue;
+        };
+        if !st.is_on_path(&hash, ht) {
+            continue;
+        }
+        if st.ordered.len() >= MAX_ORDERED_HEADERS {
+            continue;
+        }
+        if !should_enqueue_header(
+            st.ordered_set.contains(&hash),
+            st.inflight.contains_key(&hash),
+            st.body.is_pending(&hash),
+            st.body.is_rejected(&hash),
+            hub.has_block(&hash),
+            st.hash_height.get(&hash).copied(),
+            hub.tip_height(),
+        ) {
+            continue;
+        }
+        if st.ordered_set.insert(hash) {
+            st.ordered.push_back(hash);
+            added += 1;
+        }
+    }
+    added
+}
+
+fn on_empty_headers(st: &mut IbdWorkState, hub: &ChainHub) {
+    st.empty_header_streak = st.empty_header_streak.saturating_add(1);
+    let tip_h = hub.tip_height().unwrap_or(0);
+    let lag = header_lag_behind_peers(st, tip_h);
+    let path_idle = st.ordered.is_empty() && st.inflight.is_empty();
+    let peers_n = st.slots.iter().filter(|s| s.alive).count() as u32;
+    if st.empty_header_streak >= peers_n.max(2) && path_idle {
+        st.headers_done = true;
+    } else if lag > 2 {
+        if should_log_empty_headers_lag(st.empty_header_streak) {
+            let known = st
+                .max_ready_height
+                .max(st.hash_height.values().copied().max().unwrap_or(0));
+            if st.ordered_set.is_empty() {
+                warn!(
+                    "ibd: empty headers but lag={lag} behind max_peer_height={} (known≈{known}, tip={tip_h}) — keep header sync",
+                    st.max_peer_height,
+                );
+            } else {
+                trace!(
+                    "ibd: empty headers but lag={lag} behind max_peer_height={} (known≈{known}, tip={tip_h}) — keep header sync",
+                    st.max_peer_height,
+                );
+            }
+        }
+        st.headers_done = false;
+        if should_rerequest_headers_on_empty_lag(st.empty_header_streak) {
+            if should_reseed_work_path_on_empty_lag(
+                st.empty_header_streak,
+                st.ordered_set.is_empty(),
+            ) {
+                super::path::seed_work_path_from_store(st, hub);
+            }
+            let tips = work_path_tips(st);
+            let _ = request_headers(&st.slots, hub, &mut st.header_req_seq, &tips);
+        }
+    } else if st.empty_header_streak < 8 && st.ordered_set.len() < ORDERED_HEADERS_SOFT_CAP {
+        let tips = work_path_tips(st);
+        let _ = request_headers(&st.slots, hub, &mut st.header_req_seq, &tips);
+    } else if st.empty_header_streak >= 8 && lag <= 2 {
+        st.headers_done = true;
+    }
+}
+
+fn on_known_headers_batch(st: &mut IbdWorkState, hub: &ChainHub, peer: usize, batch_len: usize) {
+    let live = st.ordered_set.len();
+    let need_ready_headroom = want_headers_beyond_soft_cap(
+        live,
+        st.body.known_len(),
+        st.max_ordered_height.saturating_sub(st.max_ready_height),
+        4096,
+    );
+    let lag = header_lag_behind_peers(st, hub.tip_height().unwrap_or(0));
+    if live < MAX_ORDERED_HEADERS
+        && (live < ORDERED_HEADERS_SOFT_CAP || need_ready_headroom)
+        && should_advance_locator_after_known_batch(
+            live,
+            lag,
+            batch_len >= MAX_HEADERS_RESULTS,
+            need_ready_headroom,
+        )
+    {
+        let tips = work_path_tips(st);
+        let _ = request_headers_from(&st.slots, peer, hub, &mut st.header_req_seq, &tips);
+    }
+}
+
 pub(crate) fn apply_peer_event(
     st: &mut IbdWorkState,
     hub: &ChainHub,
@@ -147,93 +302,7 @@ pub(crate) fn apply_peer_event(
     match ev {
         PeerEvent::Headers { peer, headers } => {
             let batch_len = headers.len();
-            let mut added = 0usize;
-            // Mid-batch parents are often only the previous header in this message.
-            let mut batch_prev: Option<(BlockHash, u32)> = None;
-            for hdr in headers {
-                let hash = hdr.block_hash();
-                let prev = hdr.prev_blockhash;
-                // Multi-peer overlap re-sends the same 2000-header windows. Full
-                // ensure_header_fk (hash-head lookup + maybe put) on every repeat
-                // made drain cost climb from ~µs to ~ms per event and froze the
-                // main loop for tens of seconds with no status lines.
-                let already_known =
-                    st.known_headers.contains(&hash) && st.header_fks.contains_key(&hash);
-                let height = parent_height(&st.hash_height, hub, prev).or_else(|| {
-                    batch_prev.and_then(|(ph, pht)| {
-                        if ph == prev {
-                            Some(pht.saturating_add(1))
-                        } else {
-                            None
-                        }
-                    })
-                });
-                if let Some(h) = height {
-                    let tip = hub.tip_height().zip(hub.tip_hash());
-                    let on_path = st.try_set_path_slot(hash, h, prev, tip);
-                    if !on_path {
-                        if let Some(&cur) = st.height_to_hash.get(&h) {
-                            if cur != hash {
-                                st.reorg.register_explore(std::iter::once(hash), Some(hash));
-                            }
-                        }
-                    } else {
-                        st.max_peer_height = st.max_peer_height.max(h);
-                        st.max_ordered_height = st.max_ordered_height.max(h);
-                    }
-                    batch_prev = Some((hash, h));
-                }
-                if !already_known {
-                    if !st.header_fks.contains_key(&hash) {
-                        if let Ok(fk) = hub.ensure_header_fk(&hdr) {
-                            st.header_fks.insert(hash, fk);
-                        }
-                    }
-                }
-                if hub.has_block(&hash) {
-                    st.known_headers.insert(hash);
-                    continue;
-                }
-                if st.body.is_rejected(&hash) {
-                    continue;
-                }
-                let prev_ok = st.known_headers.contains(&prev)
-                    || hub.has_block(&prev)
-                    || prev.to_byte_array() == [0u8; 32]
-                    || hub.tip_hash() == Some(prev);
-                if !prev_ok && hub.tip_height().is_some() && !st.known_headers.is_empty() {
-                    continue;
-                }
-                st.known_headers.insert(hash);
-                // Offer needs a height (ht==tip+1); unknown-height used to stall tip silently.
-                if !st.hash_height.contains_key(&hash) {
-                    continue;
-                }
-                let Some(ht) = st.hash_height.get(&hash).copied() else {
-                    continue;
-                };
-                if !st.is_on_path(&hash, ht) {
-                    continue;
-                }
-                if st.ordered.len() >= MAX_ORDERED_HEADERS {
-                    continue;
-                }
-                if !should_enqueue_header(
-                    st.ordered_set.contains(&hash),
-                    st.inflight.contains_key(&hash),
-                    st.body.is_pending(&hash),
-                    st.body.is_rejected(&hash),
-                    hub.has_block(&hash),
-                    st.hash_height.get(&hash).copied(),
-                    hub.tip_height(),
-                ) {
-                    continue;
-                }
-                if st.ordered_set.insert(hash) {
-                    st.ordered.push_back(hash);
-                    added += 1;
-                }
-            }
+            let added = on_headers_batch(st, hub, headers);
             if added > 0 {
                 if super::reorg::consider_disconnected_heavier(st, hub).unwrap_or(false) {
                     let _ = try_complete_awaiting_reorg(st, hub);
@@ -256,78 +325,9 @@ pub(crate) fn apply_peer_event(
                         request_headers_from(&st.slots, peer, hub, &mut st.header_req_seq, &tips);
                 }
             } else if batch_len == 0 {
-                st.empty_header_streak = st.empty_header_streak.saturating_add(1);
-                let tip_h = hub.tip_height().unwrap_or(0);
-                let lag = header_lag_behind_peers(st, tip_h);
-                let path_idle = st.ordered.is_empty() && st.inflight.is_empty();
-                let peers_n = st.slots.iter().filter(|s| s.alive).count() as u32;
-                if st.empty_header_streak >= peers_n.max(2) && path_idle {
-                    // Empty replies with no ordered/inflight work. Extra
-                    // advertised height is not a most-work tip we chase.
-                    st.headers_done = true;
-                } else if lag > 2 {
-                    // On-path remainder still exists (or path not idle): keep
-                    // asking. Do not reset empty_header_streak (re-fires streak==1).
-                    if should_log_empty_headers_lag(st.empty_header_streak) {
-                        let known = st
-                            .max_ready_height
-                            .max(st.hash_height.values().copied().max().unwrap_or(0));
-                        if st.ordered_set.is_empty() {
-                            warn!(
-                                "ibd: empty headers but lag={lag} behind max_peer_height={} (known≈{known}, tip={tip_h}) — keep header sync",
-                                st.max_peer_height,
-                            );
-                        } else {
-                            trace!(
-                                "ibd: empty headers but lag={lag} behind max_peer_height={} (known≈{known}, tip={tip_h}) — keep header sync",
-                                st.max_peer_height,
-                            );
-                        }
-                    }
-                    st.headers_done = false;
-                    if should_rerequest_headers_on_empty_lag(st.empty_header_streak) {
-                        if should_reseed_work_path_on_empty_lag(
-                            st.empty_header_streak,
-                            st.ordered_set.is_empty(),
-                        ) {
-                            super::path::seed_work_path_from_store(st, hub);
-                        }
-                        let tips = work_path_tips(st);
-                        let _ = request_headers(&st.slots, hub, &mut st.header_req_seq, &tips);
-                    }
-                } else if st.empty_header_streak < 8
-                    && st.ordered_set.len() < ORDERED_HEADERS_SOFT_CAP
-                {
-                    let tips = work_path_tips(st);
-                    let _ = request_headers(&st.slots, hub, &mut st.header_req_seq, &tips);
-                } else if st.empty_header_streak >= 8 && lag <= 2 {
-                    st.headers_done = true;
-                }
+                on_empty_headers(st, hub);
             } else {
-                // Non-empty but all already known: advance locator off the work path
-                // (do **not** count toward headers_done — multi-peer overlap was
-                // marking done after one 2000-header window).
-                let live = st.ordered_set.len();
-                let need_ready_headroom = want_headers_beyond_soft_cap(
-                    live,
-                    st.body.known_len(),
-                    st.max_ordered_height.saturating_sub(st.max_ready_height),
-                    4096,
-                );
-                let lag = header_lag_behind_peers(st, hub.tip_height().unwrap_or(0));
-                if live < MAX_ORDERED_HEADERS
-                    && (live < ORDERED_HEADERS_SOFT_CAP || need_ready_headroom)
-                    && should_advance_locator_after_known_batch(
-                        live,
-                        lag,
-                        batch_len >= MAX_HEADERS_RESULTS,
-                        need_ready_headroom,
-                    )
-                {
-                    let tips = work_path_tips(st);
-                    let _ =
-                        request_headers_from(&st.slots, peer, hub, &mut st.header_req_seq, &tips);
-                }
+                on_known_headers_batch(st, hub, peer, batch_len);
             }
         }
         PeerEvent::BlockFramed {
@@ -494,16 +494,39 @@ pub(crate) fn update_confirm_lag(lag: &AtomicU32, tip: Option<u32>, max_ready: u
     lag.store(max_ready.saturating_sub(t), Ordering::Relaxed);
 }
 
+pub(crate) fn apply_confirm_events(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    rx: &std::sync::mpsc::Receiver<super::confirm::ConfirmEvent>,
+    archive_write_next: &AtomicU32,
+    max_ready_shared: &AtomicU32,
+    last_progress: &mut Instant,
+) {
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            super::confirm::ConfirmEvent::Accepted { hash } => {
+                *last_progress = Instant::now();
+                remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
+                st.body.mark_archived(hash);
+                let tip = hub.tip_height().unwrap_or(0);
+                archive_write_next.store(tip.saturating_add(1), Ordering::Relaxed);
+                st.max_ready_height = st.max_ready_height.max(tip);
+                max_ready_shared.store(st.max_ready_height, Ordering::Relaxed);
+            }
+            super::confirm::ConfirmEvent::Reject { height, hash, err } => {
+                apply_confirm_reject(st, height, hash, &err, Some(hub.query.as_ref()), Some(hub));
+            }
+        }
+    }
+}
+
 pub(crate) fn apply_confirm_reject(
     st: &mut IbdWorkState,
     height: u32,
     hash: BlockHash,
     err: &str,
-    // When set, drop bad body-queue payload so densify can re-getdata a good block.
     query: Option<&rbitcoin_query::Query>,
-    // When set, BadPrev may trigger most-work reorg onto a competing path.
     hub: Option<&crate::chain::ChainHub>,
-    _wire: Option<std::sync::Arc<bitcoin::Block>>,
 ) {
     // Never blacklist the all-zero sentinel (write used to emit this on
     // mis-attributed rejects).
