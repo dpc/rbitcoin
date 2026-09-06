@@ -1,0 +1,9 @@
+# Block wire: witness marker, compact sizes, OP_RETURN / OP_TRUE
+"\x00\x01"
+"\x01"
+"\xfd"
+"\xfe"
+"\xff"
+"\x51"
+"\x6a"
+"\xff\xff\x7f\x20"

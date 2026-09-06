@@ -935,6 +935,36 @@ mod tests {
     }
 
     #[test]
+    fn v2_sendcmpct_fixture_matches_encode() {
+        let expected = crate::encode_sendcmpct_hb_v2().unwrap();
+        let path = v2_fixture_path("v2_sendcmpct.bin");
+        let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(raw, expected);
+        parse_v2_regtest(&raw).unwrap();
+    }
+
+    #[test]
+    fn v2_getheaders_fixture_matches_encode() {
+        let expected = crate::encode_getheaders_empty_v2().unwrap();
+        let path = v2_fixture_path("v2_getheaders.bin");
+        let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(raw, expected);
+        parse_v2_regtest(&raw).unwrap();
+    }
+
+    #[test]
+    fn addrv2_empty_and_inv_one_seeds_parse() {
+        let addr = v2_fixture_path("addrv2_empty.bin");
+        let inv = v2_fixture_path("inv_one.bin");
+        let a = std::fs::read(&addr).unwrap_or_else(|e| panic!("read {}: {e}", addr.display()));
+        let i = std::fs::read(&inv).unwrap_or_else(|e| panic!("read {}: {e}", inv.display()));
+        assert_eq!(a, [0u8]);
+        parse_v2_regtest_named("addrv2", &a).unwrap();
+        parse_v2_regtest_named("inv", &i).unwrap();
+        parse_v2_regtest_named("getdata", &i).unwrap();
+    }
+
+    #[test]
     fn parse_v2_regtest_rejects_empty_and_unknown_short_id() {
         assert!(parse_v2_regtest(&[]).is_err());
         assert!(parse_v2_regtest(&[99u8, 1, b'd']).is_err());

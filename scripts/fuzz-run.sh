@@ -6,6 +6,32 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+fuzz_max_total_time() {
+  if [[ -n "${FUZZ_MAX_TOTAL_TIME:-}" ]]; then
+    printf '%s' "$FUZZ_MAX_TOTAL_TIME"
+    return
+  fi
+  local weekday="${FUZZ_WEEKDAY:-$(date +%u)}"
+  if [[ "$weekday" == "7" ]]; then
+    printf '3600'
+  else
+    printf '600'
+  fi
+}
+
+wire_dict_for_bin() {
+  case "$1" in
+    block_wire) printf 'fuzz/dict/block.dict' ;;
+    v2_contents) printf 'fuzz/dict/v2.dict' ;;
+    addrv2_wire) printf 'fuzz/dict/addrv2.dict' ;;
+    inv_getdata_wire) printf 'fuzz/dict/inv.dict' ;;
+    electrum_json) printf 'fuzz/dict/electrum.dict' ;;
+    v2_session) printf 'fuzz/dict/p2p.dict' ;;
+    script_differential|script_verify_differential) printf 'fuzz/dict/script.dict' ;;
+    *) printf '' ;;
+  esac
+}
+
 fail_if_no_comparisons() {
   local log="$1"
   local min_busy="${2:-10}"
@@ -72,6 +98,12 @@ if [[ "${1:-}" == "--copy-crashers" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "--default-time" ]]; then
+  fuzz_max_total_time
+  printf '\n'
+  exit 0
+fi
+
 BIN="${1:-block_wire}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}"
 SEED="${FUZZ_SEED:-$(date +%s)}"
@@ -120,12 +152,13 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "FUZZ_CORPUS_MERGE=1"
   echo "FUZZ_SKIP_RATE=1"
   echo "FUZZ_CRASHERS=$CRASHERS"
-  if [[ "$BIN" == "script_differential" || "$BIN" == "script_verify_differential" ]]; then
-    echo "FUZZ_DICT=fuzz/dict/script.dict"
-    echo "FUZZ_MAX_LEN=2000"
+  echo "FUZZ_MAX_TOTAL_TIME=$(fuzz_max_total_time)"
+  dict="$(wire_dict_for_bin "$BIN")"
+  if [[ -n "$dict" ]]; then
+    echo "FUZZ_DICT=$dict"
   fi
-  if [[ "$BIN" == "v2_session" ]]; then
-    echo "FUZZ_DICT=fuzz/dict/p2p.dict"
+  if [[ "$BIN" == "script_differential" || "$BIN" == "script_verify_differential" ]]; then
+    echo "FUZZ_MAX_LEN=2000"
   fi
   if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
@@ -158,9 +191,10 @@ if [[ "$BIN" == "block_wire" ]]; then
     crates/rbitcoin-consensus/tests/fixtures/signet_block_90719.bin
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" block_wire -- \
-    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=1048576 \
+    -dict=fuzz/dict/block.dict \
     -seed="$SEED"
   st=$?
   set -e
@@ -172,11 +206,14 @@ if [[ "$BIN" == "v2_contents" ]]; then
   merge_seed fuzz/corpus/v2_contents crates/rbitcoin-net/tests/fixtures/v2_ping.bin
   merge_seed fuzz/corpus/v2_contents crates/rbitcoin-net/tests/fixtures/v2_verack.bin
   merge_seed fuzz/corpus/v2_contents crates/rbitcoin-net/tests/fixtures/v2_sendaddrv2.bin
+  merge_seed fuzz/corpus/v2_contents crates/rbitcoin-net/tests/fixtures/v2_sendcmpct.bin
+  merge_seed fuzz/corpus/v2_contents crates/rbitcoin-net/tests/fixtures/v2_getheaders.bin
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_contents -- \
-    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
+    -dict=fuzz/dict/v2.dict \
     -seed="$SEED"
   st=$?
   set -e
@@ -186,14 +223,26 @@ fi
 
 if [[ "$BIN" == "addrv2_wire" || "$BIN" == "inv_getdata_wire" || "$BIN" == "electrum_json" ]]; then
   mkdir -p "fuzz/corpus/$BIN"
-  if [[ "$BIN" == "electrum_json" && ! -e "fuzz/corpus/$BIN/ping.json" ]]; then
-    printf '%s\n' '{"id":1,"method":"server.ping","params":[]}' >"fuzz/corpus/$BIN/ping.json"
+  if [[ "$BIN" == "addrv2_wire" ]]; then
+    merge_seed fuzz/corpus/addrv2_wire \
+      crates/rbitcoin-net/tests/fixtures/addrv2_empty.bin
+  elif [[ "$BIN" == "inv_getdata_wire" ]]; then
+    merge_seed fuzz/corpus/inv_getdata_wire \
+      crates/rbitcoin-net/tests/fixtures/inv_one.bin
+  elif [[ "$BIN" == "electrum_json" ]]; then
+    if [[ ! -e "fuzz/corpus/$BIN/ping.json" ]]; then
+      printf '%s\n' '{"id":1,"method":"server.ping","params":[]}' >"fuzz/corpus/$BIN/ping.json"
+    fi
+    merge_seed fuzz/corpus/electrum_json \
+      crates/rbitcoin-electrum/tests/fixtures/blockchain_scripthash_subscribe.json
   fi
+  dict="$(wire_dict_for_bin "$BIN")"
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" "$BIN" -- \
-    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
+    -dict="$dict" \
     -seed="$SEED"
   st=$?
   set -e
@@ -208,7 +257,7 @@ if [[ "$BIN" == "v2_session" ]]; then
   log="${TMPDIR:-/tmp}/rbtc-fuzz-v2.$$.log"
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_session -- \
-    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
     -dict=fuzz/dict/p2p.dict \
@@ -231,7 +280,7 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
   log="${TMPDIR:-/tmp}/rbtc-fuzz-cmpct.$$.log"
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" cmpct_differential -- \
-    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
     -seed="$SEED" \
@@ -310,7 +359,7 @@ if [[ "$BIN" == "script_differential" || "$BIN" == "script_verify_differential" 
 fi
 set +e
 env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer none "$BIN" -- \
-  -max_total_time="${FUZZ_MAX_TOTAL_TIME:-480}" \
+  -max_total_time="$(fuzz_max_total_time)" \
   -timeout="$timeout" \
   -max_len="$max_len" \
   "${dict_args[@]}" \

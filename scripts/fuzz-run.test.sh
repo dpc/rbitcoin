@@ -21,13 +21,17 @@ assert_ok() {
   fi
 }
 
-out="$(FUZZ_DRY_RUN=1 "$RUN" addrv2_wire)"
+out="$(FUZZ_DRY_RUN=1 FUZZ_WEEKDAY=6 "$RUN" addrv2_wire)"
 assert_ok "addrv2_wire dry-run bin" \
   grep -qx "FUZZ_BIN=addrv2_wire" <<<"$out"
 assert_ok "addrv2_wire dry-run sanitizer address" \
   grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "addrv2_wire dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/addrv2.dict" <<<"$out"
+assert_ok "addrv2_wire dry-run default time 600" \
+  grep -qx "FUZZ_MAX_TOTAL_TIME=600" <<<"$out"
 
-out="$(FUZZ_DRY_RUN=1 "$RUN" v2_contents)"
+out="$(FUZZ_DRY_RUN=1 FUZZ_WEEKDAY=6 "$RUN" v2_contents)"
 assert_ok "v2_contents dry-run bin" \
   grep -qx "FUZZ_BIN=v2_contents" <<<"$out"
 assert_ok "v2_contents dry-run sanitizer address" \
@@ -36,6 +40,10 @@ assert_ok "v2_contents dry-run in-process (no -jobs)" \
   grep -qx "FUZZ_JOBS=in-process" <<<"$out"
 assert_ok "v2_contents dry-run timeout 10" \
   grep -qx "FUZZ_TIMEOUT=10" <<<"$out"
+assert_ok "v2_contents dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/v2.dict" <<<"$out"
+assert_ok "v2_contents dry-run default time 600" \
+  grep -qx "FUZZ_MAX_TOTAL_TIME=600" <<<"$out"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN" v2_session)"
 assert_ok "v2_session dry-run bin" \
@@ -66,6 +74,30 @@ assert_ok "cmpct-differential dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
 assert_ok "cmpct-differential dry-run BITCOIND_LISTEN=1" \
   grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 FUZZ_WEEKDAY=6 "$RUN")"
+assert_ok "block_wire dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/block.dict" <<<"$out"
+assert_ok "block_wire dry-run default time 600" \
+  grep -qx "FUZZ_MAX_TOTAL_TIME=600" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" inv_getdata_wire)"
+assert_ok "inv_getdata_wire dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/inv.dict" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" electrum_json)"
+assert_ok "electrum_json dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/electrum.dict" <<<"$out"
+
+t6="$(FUZZ_WEEKDAY=6 "$RUN" --default-time)"
+assert_ok "FUZZ_WEEKDAY=6 is 600" \
+  test "$t6" = "600"
+t7="$(FUZZ_WEEKDAY=7 "$RUN" --default-time)"
+assert_ok "FUZZ_WEEKDAY=7 is 3600" \
+  test "$t7" = "3600"
+texp="$(FUZZ_MAX_TOTAL_TIME=123 FUZZ_WEEKDAY=7 "$RUN" --default-time)"
+assert_ok "explicit FUZZ_MAX_TOTAL_TIME wins over Sunday" \
+  test "$texp" = "123"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN")"
 assert_ok "dry-run default toolchain is nightly" \
@@ -293,6 +325,26 @@ assert_ok "at least 8 script_fuzz seeds" \
   test "$n_script_seeds" -ge 8
 assert_ok "script opcode dict exists" \
   test -s "$ROOT/fuzz/dict/script.dict"
+assert_ok "block dict exists" \
+  test -s "$ROOT/fuzz/dict/block.dict"
+assert_ok "v2 dict exists" \
+  test -s "$ROOT/fuzz/dict/v2.dict"
+assert_ok "addrv2 dict exists" \
+  test -s "$ROOT/fuzz/dict/addrv2.dict"
+assert_ok "inv dict exists" \
+  test -s "$ROOT/fuzz/dict/inv.dict"
+assert_ok "electrum dict exists" \
+  test -s "$ROOT/fuzz/dict/electrum.dict"
+assert_ok "addrv2 empty seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/addrv2_empty.bin"
+assert_ok "inv one seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/inv_one.bin"
+assert_ok "v2 sendcmpct seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/v2_sendcmpct.bin"
+assert_ok "v2 getheaders seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/v2_getheaders.bin"
+assert_ok "electrum subscribe seed" \
+  test -s "$ROOT/crates/rbitcoin-electrum/tests/fixtures/blockchain_scripthash_subscribe.json"
 
 rm -rf "$WORKDIR"
 
