@@ -1183,6 +1183,8 @@ mod history_filter_tests {
 
     #[test]
     fn sh_join_need_display() {
+        assert_eq!(ShJoinNeed::LISTUNSPENT, ShJoinNeed::BALANCE);
+        assert_eq!(ShJoinNeed::CHAIN_STATS, ShJoinNeed::BALANCE);
         assert_eq!(ShJoinNeed::HISTORY.to_string(), "cs");
         assert_eq!(ShJoinNeed::LISTUNSPENT.to_string(), "-");
         assert_eq!(ShJoinNeed::BALANCE.to_string(), "-");
