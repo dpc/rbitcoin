@@ -40,8 +40,9 @@ use confirm::{offer_confirm_ready, spawn_confirm_engine, ConfirmEvent, ConfirmFe
 use assign::{archive_pipeline_saturated, assign_work_ordered, AssignDepth};
 use cadence::IbdLoopCadence;
 use dial::{
-    apply_dial_result, dial_batch, dial_blocked_addrs, disconnect_relative_slow_block_peers,
-    disconnect_stalled_block_peers, expire_addr_cooldown, request_headers,
+    alive_dial_addrs, apply_dial_result, dial_batch, dial_blocked_addrs,
+    disconnect_relative_slow_block_peers, disconnect_stalled_block_peers, expire_addr_cooldown,
+    request_headers,
 };
 use events::{
     apply_confirm_reject, apply_peer_event, disconnect_all_peers,
@@ -282,6 +283,7 @@ pub async fn ibd_cancellable(
         &next_peer_id,
         initial_dial_n,
         HashSet::new(),
+        &[],
         magic,
         local_addr,
         hub.tip_height(),
@@ -749,6 +751,7 @@ pub async fn ibd_cancellable(
         {
             let want = (target - alive_n).min(8).max(1);
             let already = dial_blocked_addrs(&st.slots, &st.addr_cooldown, Instant::now());
+            let occupied = alive_dial_addrs(&st.slots);
             info!(
                 "ibd: redialing up to {want} peers (alive={alive_n}/{target}, book={}, blocked={})…",
                 peer_sess.book().len(),
@@ -762,8 +765,8 @@ pub async fn ibd_cancellable(
             let cancel_c = cancel.as_ref().map(Arc::clone);
             redial_handle = Some(tokio::spawn(async move {
                 dial_batch(
-                    &book, &next_id, want, already, magic, local_addr, tip_h, sinks_r, cto,
-                    cancel_c,
+                    &book, &next_id, want, already, &occupied, magic, local_addr, tip_h, sinks_r,
+                    cto, cancel_c,
                 )
                 .await
             }));

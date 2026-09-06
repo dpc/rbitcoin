@@ -13,6 +13,10 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
+use std::sync::Arc;
+
+use crate::asmap::AsMap;
+use crate::netgroup::{netgroup, select_diverse};
 
 /// Service bits we advertise and ask DNS seeds for (`NETWORK|WITNESS|P2P_V2` = `0x809`).
 pub fn required_seed_services() -> ServiceFlags {
@@ -267,11 +271,20 @@ pub struct AddrMan {
     /// Insertion-order keys (IPv4 preferred on inject).
     order: Vec<SocketAddr>,
     by_addr: HashMap<SocketAddr, PeerFlags>,
+    asmap: Option<Arc<AsMap>>,
 }
 
 impl AddrMan {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_asmap(&mut self, asmap: Option<Arc<AsMap>>) {
+        self.asmap = asmap;
+    }
+
+    pub fn asmap(&self) -> Option<&AsMap> {
+        self.asmap.as_deref()
     }
 
     /// Populate from DNS seeds and fixed seed hosts.
@@ -384,10 +397,14 @@ impl AddrMan {
     /// `INCOMPATIBLE` is omitted while any other candidate remains so a mixed
     /// book does not burn outbound slots on known-v1. If every remaining addr
     /// is incompatible, those are returned as last-resort.
+    ///
+    /// After ranking, [`select_diverse`] skips netgroups of `occupied` (live
+    /// peers) while unused-group candidates remain, then fills.
     pub fn take_dial_candidates(
         &self,
         max: usize,
         exclude: &HashSet<SocketAddr>,
+        occupied: &[SocketAddr],
     ) -> Vec<SocketAddr> {
         if max == 0 || self.order.is_empty() {
             return Vec::new();
@@ -405,16 +422,28 @@ impl AddrMan {
         if ranked.iter().any(|(_, _, incompat, _)| !*incompat) {
             ranked.retain(|(_, _, incompat, _)| !*incompat);
         }
-        ranked.into_iter().take(max).map(|(_, _, _, a)| a).collect()
+        let ranked: Vec<SocketAddr> = ranked.into_iter().map(|(_, _, _, a)| a).collect();
+        let asmap = self.asmap.as_deref();
+        let occupied_groups: HashSet<u64> = occupied.iter().map(|a| netgroup(*a, asmap)).collect();
+        select_diverse(&ranked, max, &occupied_groups, |a| netgroup(a, asmap))
     }
 
     /// Round-robin-ish: take up to `max` peers starting at `offset` (legacy helper).
     /// Still prefers better dial tiers by walking a ranked list.
     pub fn take_outbound_offset(&self, max: usize, offset: usize) -> Vec<SocketAddr> {
+        self.take_outbound_offset_occupied(max, offset, &[])
+    }
+
+    pub fn take_outbound_offset_occupied(
+        &self,
+        max: usize,
+        offset: usize,
+        occupied: &[SocketAddr],
+    ) -> Vec<SocketAddr> {
         if self.order.is_empty() || max == 0 {
             return Vec::new();
         }
-        let ranked = self.take_dial_candidates(self.order.len(), &HashSet::new());
+        let ranked = self.take_dial_candidates(self.order.len(), &HashSet::new(), occupied);
         if ranked.is_empty() {
             return Vec::new();
         }
@@ -428,7 +457,11 @@ impl AddrMan {
 
     /// Best up-to-`max` outbound candidates (ranked).
     pub fn take_outbound(&self, max: usize) -> Vec<SocketAddr> {
-        self.take_dial_candidates(max, &HashSet::new())
+        self.take_dial_candidates(max, &HashSet::new(), &[])
+    }
+
+    pub fn take_outbound_occupied(&self, max: usize, occupied: &[SocketAddr]) -> Vec<SocketAddr> {
+        self.take_dial_candidates(max, &HashSet::new(), occupied)
     }
 
     /// Snapshot of all entries (for tests / diagnostics).
@@ -600,7 +633,7 @@ mod tests {
         am.note_connect_failed(failed, false);
         am.note_connect_failed(incompat, true);
 
-        let got = am.take_dial_candidates(4, &HashSet::new());
+        let got = am.take_dial_candidates(4, &HashSet::new(), &[]);
         assert_eq!(got.len(), 3);
         assert!(!got.contains(&incompat));
         let tiers: Vec<u8> = got.iter().map(|a| am.flags(a).dial_tier()).collect();
@@ -628,7 +661,7 @@ mod tests {
         am.note_connect_failed(incompat_a, true);
         am.note_connect_failed(incompat_b, true);
 
-        let got = am.take_dial_candidates(48, &HashSet::new());
+        let got = am.take_dial_candidates(48, &HashSet::new(), &[]);
         assert!(
             got.iter().all(|a| !am.flags(a).is_incompatible()),
             "INCOMPATIBLE must not fill the batch while any other addr remains: {got:?}"
@@ -648,7 +681,7 @@ mod tests {
         am.add(b);
         am.note_connect_failed(a, true);
         am.note_connect_failed(b, true);
-        let got = am.take_dial_candidates(48, &HashSet::new());
+        let got = am.take_dial_candidates(48, &HashSet::new(), &[]);
         assert_eq!(got.len(), 2);
         assert!(got.contains(&a));
         assert!(got.contains(&b));
@@ -661,8 +694,44 @@ mod tests {
         am.add(addr(2));
         let mut ex = HashSet::new();
         ex.insert(addr(1));
-        let got = am.take_dial_candidates(10, &ex);
+        let got = am.take_dial_candidates(10, &ex, &[]);
         assert_eq!(got, vec![addr(2)]);
+    }
+
+    fn slash16(a: u8, b: u8, host: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, 0, host)), 8333)
+    }
+
+    #[test]
+    fn take_dial_same_slash16_still_fills() {
+        let mut am = AddrMan::new();
+        for i in 1..=16 {
+            am.add(slash16(1, 2, i));
+        }
+        let got = am.take_dial_candidates(16, &HashSet::new(), &[]);
+        assert_eq!(got.len(), 16);
+    }
+
+    #[test]
+    fn take_dial_mixed_groups_picks_distinct() {
+        let mut am = AddrMan::new();
+        for g in 1u8..=32 {
+            am.add(slash16(g, 0, 1));
+        }
+        let got = am.take_dial_candidates(16, &HashSet::new(), &[]);
+        assert_eq!(got.len(), 16);
+        let groups: HashSet<u64> = got.iter().map(|a| netgroup(*a, None)).collect();
+        assert_eq!(groups.len(), 16);
+    }
+
+    #[test]
+    fn take_dial_skips_occupied_group() {
+        let mut am = AddrMan::new();
+        am.add(slash16(1, 2, 1));
+        am.add(slash16(1, 3, 1));
+        let occupied = [slash16(1, 2, 9)];
+        let got = am.take_dial_candidates(1, &HashSet::new(), &occupied);
+        assert_eq!(got, vec![slash16(1, 3, 1)]);
     }
 
     #[test]
@@ -806,7 +875,7 @@ mod tests {
         let offset = a.take_outbound_offset(3, 1);
         assert_eq!(offset.len(), 3.min(a.len()));
         assert!(a.take_outbound_offset(0, 0).is_empty());
-        assert!(a.take_dial_candidates(0, &HashSet::new()).is_empty());
+        assert!(a.take_dial_candidates(0, &HashSet::new(), &[]).is_empty());
     }
 
     #[test]
