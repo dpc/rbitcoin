@@ -29,6 +29,7 @@ struct Base {
 
 static BASE: OnceLock<Base> = OnceLock::new();
 static COMPARISONS: AtomicU64 = AtomicU64::new(0);
+static PING_SEQ: AtomicU64 = AtomicU64::new(1);
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
 const READ_WAIT: Duration = Duration::from_millis(200);
 
@@ -103,7 +104,7 @@ fn ping_compare(b: &Base) -> bool {
     let Some(sess) = slot.as_mut() else {
         return false;
     };
-    let nonce = 0x1122_3344_5566_7788u64;
+    let nonce = PING_SEQ.fetch_add(1, Ordering::Relaxed);
     let Ok(ping) = encode_ping_v2(nonce) else {
         return false;
     };
