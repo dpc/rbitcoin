@@ -67,6 +67,10 @@ pub(crate) fn peerinfo_json(p: rbitcoin_net::PeerInfo) -> Value {
         "last_block": p.last_block,
         "last_transaction": p.last_transaction,
         "minfeefilter": sat_kvb_to_btc(p.minfeefilter_sat_kvb),
+        "bytesrecv": p.bytesrecv,
+        "bytessent": p.bytessent,
+        "last_inv_sequence": p.last_inv_sequence,
+        "inv_to_send": p.inv_to_send,
         "inflight": p.inflight,
         "permissions": p.permissions,
     });

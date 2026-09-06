@@ -19,5 +19,9 @@ bip324 = { workspace = true }
 tokio = { workspace = true }
 arc-swap = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# POLLRDHUP: peer FIN with unread bytes still in the receive buffer.
+libc = "0.2"
+
 [lints]
 workspace = true

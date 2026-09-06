@@ -2248,8 +2248,9 @@ fn handle_peer_frame_control_and_inv_paths() {
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
 
-        // SendHeaders / SendCmpct / WtxidRelay / SendAddrV2 / Pong / GetAddr / Ping
+        // SendHeaders / SendCmpct / WtxidRelay / Pong / GetAddr / Ping
         // (MemPool disconnects — covered by bloom_disabled_messages_request_disconnect.)
+        // SendAddrV2 after verack disconnects (`p2p_addrv2_relay.py`).
         for msg in [
             NetworkMessage::SendHeaders,
             NetworkMessage::SendCmpct(SendCmpct {
@@ -2257,7 +2258,6 @@ fn handle_peer_frame_control_and_inv_paths() {
                 version: 2,
             }),
             NetworkMessage::WtxidRelay,
-            NetworkMessage::SendAddrV2,
             NetworkMessage::Pong(7),
             NetworkMessage::GetAddr,
             NetworkMessage::Ping(42),
@@ -2800,6 +2800,145 @@ fn handle_peer_frame_control_and_inv_paths() {
     });
 }
 
+/// `p2p_addrv2_relay.py`: sendaddrv2 after verack disconnects.
+#[test]
+fn sendaddrv2_after_verack_disconnects() {
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::Network;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::runtime::Builder;
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        use bitcoin::p2p::message::RawNetworkMessage;
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        let payload = full[24..].to_vec();
+        FramedMessage {
+            magic,
+            command,
+            payload,
+        }
+    }
+
+    assert_eq!(
+        crate::peer::sendaddrv2_after_verack_log(0),
+        "sendaddrv2 received after verack, disconnecting peer=0"
+    );
+    assert_eq!(
+        crate::peer::addrv2_message_size_log(1010),
+        "addrv2 message size = 1010"
+    );
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (dir, q) = tmp_store("sendaddrv2-after");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        let peers = crate::peers::PeerHub::new();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let ver = VersionMessage {
+            version: 70016,
+            services: ServiceFlags::NETWORK,
+            timestamp: 0,
+            receiver: Address::new(&addr, ServiceFlags::NONE),
+            sender: Address::new(&addr, ServiceFlags::NONE),
+            nonce: 1,
+            user_agent: "/rbitcoin:test/".into(),
+            start_height: 0,
+            relay: true,
+        };
+        let sess = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let mut wants_headers = false;
+        let mut wtxid = false;
+        let mut send_cmpct = false;
+        let mut cmpct_ver = 0u32;
+        let mut pending_headers = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut pending_cmpct = HashMap::new();
+        let mut from_peer = HashMap::new();
+        let mut ban = 0u32;
+
+        rbitcoin_log::capture_logs(true);
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::SendAddrV2),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut HashSet::new(),
+            &mut ban,
+            Some(sess.as_ref()),
+        )
+        .await
+        .unwrap();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            ban >= BAN_SCORE_THRESHOLD,
+            "post-verack sendaddrv2 must disconnect"
+        );
+        assert!(
+            logs.iter()
+                .any(|(_, m)| m.contains("sendaddrv2 received after verack, disconnecting peer=0")),
+            "expected sendaddrv2-after-verack log, got {logs:?}"
+        );
+
+        let mut addrs = Vec::new();
+        for i in 0..1010u16 {
+            addrs.push(bitcoin::p2p::address::AddrV2Message {
+                time: 1_700_000_000,
+                services: ServiceFlags::NETWORK,
+                addr: bitcoin::p2p::address::AddrV2::Ipv4(Ipv4Addr::new(123, 123, 123, 1)),
+                port: 8333 + i,
+            });
+        }
+        ban = 0;
+        rbitcoin_log::capture_logs(true);
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::AddrV2(addrs)),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut HashSet::new(),
+            &mut ban,
+            Some(sess.as_ref()),
+        )
+        .await
+        .unwrap();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            ban >= BAN_SCORE_THRESHOLD,
+            "oversized addrv2 must disconnect"
+        );
+        assert!(
+            logs.iter()
+                .any(|(_, m)| m.contains("addrv2 message size = 1010")),
+            "expected oversized addrv2 log, got {logs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
 /// Mempool-backed inv/tx/getdata arms + cmpctblocktxn success.
 #[test]
 fn handle_peer_frame_mempool_tx_and_inv_paths() {
@@ -2902,15 +3041,9 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         .unwrap();
         match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::NotFound(v) => {
-                assert_eq!(v.len(), 1);
+                assert_eq!(v.len(), 2);
             }
-            other => panic!("expected NotFound, got {other:?}"),
-        }
-        match out_rx.try_recv().unwrap().expect_msg() {
-            NetworkMessage::NotFound(v) => {
-                assert_eq!(v.len(), 1);
-            }
-            other => panic!("expected second NotFound, got {other:?}"),
+            other => panic!("expected batched NotFound, got {other:?}"),
         }
         assert!(out_rx.try_recv().is_err());
 
@@ -4151,6 +4284,10 @@ fn handshake_disconnect_log_needles() {
         "version handshake timeout, disconnecting peer=0"
     );
     assert_eq!(
+        crate::peer::v2_handshake_timeout_log(0),
+        "V2 handshake timeout, disconnecting peer=0"
+    );
+    assert_eq!(
         crate::peer::ping_prior_to_verack_log(0),
         "Unsupported message \"ping\" prior to verack from peer=0"
     );
@@ -5086,6 +5223,142 @@ fn catchup_headers_getdata_stays_in_serve_window() {
     });
 }
 
+/// Child-before-parent catch-up bodies must still connect. Dropping the child
+/// and leaving it in `asked_blocks` skipped the hash forever
+/// (`feature_bip68_sequence` activateCSV `sync_blocks` 60s).
+#[test]
+fn catchup_child_before_parent_still_connects() {
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::Network;
+    use rbitcoin_primitives::Height;
+    use tokio::runtime::Builder;
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        use bitcoin::p2p::message::RawNetworkMessage;
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        FramedMessage {
+            magic,
+            command,
+            payload: full[24..].to_vec(),
+        }
+    }
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (src_dir, src_q) = tmp_store("catchup-ooo-src");
+        let src = ChainHub::new(src_q, ChainParams::regtest(), Milestone::NONE);
+        src.ensure_genesis().unwrap();
+        src.generate_to_script(2, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .unwrap();
+        let headers: Vec<bitcoin::block::Header> = (1..=2)
+            .map(|h| src.query.wire_header_at_height(Height(h)).unwrap())
+            .collect();
+        let parent = headers[0].block_hash();
+        let child = headers[1].block_hash();
+
+        let (dir, q) = tmp_store("catchup-ooo-dst");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut pending_headers = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut pending_cmpct = HashMap::new();
+        let mut from_peer = HashMap::new();
+        let mut requested = HashSet::new();
+        let mut wants_headers = false;
+        let mut wtxid = false;
+        let mut send_cmpct = false;
+        let mut cmpct_ver = 2u32;
+        let mut ban = 0u32;
+
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Headers(headers.clone())),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut requested,
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        while out_rx.try_recv().is_ok() {}
+        assert!(requested.contains(&parent) && requested.contains(&child));
+
+        let child_block = src
+            .query
+            .reconstruct_archived_block(&child.to_byte_array())
+            .unwrap()
+            .expect("child body");
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Block(child_block)),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut requested,
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        while out_rx.try_recv().is_ok() {}
+
+        let parent_block = src
+            .query
+            .reconstruct_archived_block(&parent.to_byte_array())
+            .unwrap()
+            .expect("parent body");
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Block(parent_block)),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut requested,
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            hub.tip_hash(),
+            Some(child),
+            "child delivered before parent must connect once the parent does"
+        );
+
+        let _ = std::fs::remove_dir_all(src_dir);
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
 /// Same catch-up as above, but the peer answers with `CmpctBlock` (node-to-node
 /// `sendcmpct` / `MSG_CMPCT_BLOCK` getdata). Accepting compact must drop the
 /// hash from `requested` or drain's serve window stays full.
@@ -5899,10 +6172,14 @@ fn snapshot_omits_peer_after_tcp_fin() {
     let peer = hub.register(addr, addr, &ver, true, PeerConnType::Inbound);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let la = listener.local_addr().unwrap();
-    let client = TcpStream::connect(la).unwrap();
+    let mut client = TcpStream::connect(la).unwrap();
     let (server, _) = listener.accept().unwrap();
     peer.attach_tcp_shutdown(server.try_clone().unwrap());
     assert_eq!(hub.snapshot().len(), 1);
+    {
+        use std::io::Write;
+        client.write_all(&[0xab]).unwrap();
+    }
     client.shutdown(Shutdown::Both).unwrap();
     let mut saw = false;
     for _ in 0..50 {
@@ -5912,7 +6189,7 @@ fn snapshot_omits_peer_after_tcp_fin() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(saw, "cloned fd must see FIN");
+    assert!(saw, "cloned fd must see FIN even with unread bytes");
     assert!(
         hub.snapshot().is_empty(),
         "getpeerinfo must omit a FIN'd session (mempool_reorg disconnect_nodes 5s)"

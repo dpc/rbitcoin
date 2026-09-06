@@ -123,8 +123,15 @@ pub(crate) fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight:
 }
 
 pub(crate) fn getrawmempool(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
-    params.reject_unknown(&["verbose"])?;
+    params.reject_unknown(&["verbose", "mempool_sequence"])?;
     let verbose = params.opt_bool(0, "verbose")?.unwrap_or(false);
+    let want_seq = params.opt_bool(1, "mempool_sequence")?.unwrap_or(false);
+    if verbose && want_seq {
+        return Err(rpc_error(
+            ERR_INVALID_PARAMETER,
+            "Verbose results cannot contain mempool sequence number.",
+        ));
+    }
     let Some(mp) = ctx.mempool.as_ref() else {
         return Ok(if verbose { json!({}) } else { json!([]) });
     };
@@ -134,6 +141,12 @@ pub(crate) fn getrawmempool(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
             .iter()
             .map(|(t, _, _)| hash_hex_display(&t.to_byte_array()))
             .collect();
+        if want_seq {
+            return Ok(json!({
+                "txids": ids,
+                "mempool_sequence": mp.current_relay_seq(),
+            }));
+        }
         return Ok(json!(ids));
     }
     let mut map = serde_json::Map::new();

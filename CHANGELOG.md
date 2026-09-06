@@ -58,6 +58,9 @@ before 1.0).
 
 ### Fixed
 
+- **`getpeerinfo` omits a completed peer after TCP FIN even with unread bytes:**
+  `peek==0` missed the far-side close while the session was still draining
+  (`mempool_reorg` `disconnect_nodes` 5s). Linux uses `POLLRDHUP`.
 - **Held consensus-invalid children are not retried on the next sibling:**
   `try_apply_held` skipped `invalidateblock` hashes but not a missing-prevout
   child that failed mid-branch. That child stayed in `held_bodies` and the
@@ -65,6 +68,14 @@ before 1.0).
   `block_fork_differential`). Failed branch tips are marked invalid and
   dropped; `accept_branch` refuses invalidated hashes. Fork-diff `setup_side`
   parks the sibling without applying held work.
+- **Catch-up child-before-parent bodies connect after the parent:** a
+  child whose parent header was already stored is `gap above tip`, not
+  `unknown parent`, so it was dropped. `asked_blocks` also kept the hash
+  after receive, so drain would not re-ask. Hold that body like an
+  unknown parent, apply held children when the parent connects, and
+  forget `asked_blocks` on successful accept or hold, not on consensus
+  reject (`feature_bip68_sequence` activateCSV `sync_blocks` 60s;
+  `feature_csv_activation` BIP113 must not re-getdata a rejected body).
 
 - **Reorg-n differential parks tip on stem after reject:** `compare_fork_n_one`
   left the hub on the side chain when the child was rejected, so the next
@@ -94,6 +105,13 @@ before 1.0).
   are forgotten and the header path is asked again.
 
 ### Added
+
+- **Core functional `run` 68 → 71:** unmodified `p2p_v2_misbehaving`
+  (EARLY_KEY_RESPONSE holds ellswift until v1-prefix mismatch, V2 handshake
+  timeout, garbage-terminator / decrypt logs), `p2p_addrv2_relay`
+  (post-verack `sendaddrv2` disconnect, addrv2 relay, oversized 1010), and
+  `p2p_leak_tx` (`getpeerinfo.last_inv_sequence` / `inv_to_send`, batched
+  `notfound`, serve an announced tx from the tip block).
 
 - **IBD `getdata` serve reconstructs from Class A spans:** contiguous
   `header_txs` loads `txout.body` + `inwit.body` as libc sequential preads

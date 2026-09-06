@@ -8,7 +8,7 @@ use bitcoin::p2p::ServiceFlags;
 use bitcoin::{BlockHash, Wtxid};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
@@ -136,6 +136,8 @@ pub struct LivePeer {
     announced_wtx: Mutex<HashSet<Wtxid>>,
     /// Mempool sequence at last tx INV (Core `m_last_inv_sequence`, starts at 1).
     last_inv_sequence: AtomicU64,
+    /// Queued tx INV hashes not yet sent (Core `m_tx_inventory_to_send`).
+    inv_to_send: AtomicU32,
     /// Last clock we considered for delayed tx INV (`0` = not initialized).
     last_tx_inv_now: AtomicU64,
     /// Set when mocktime jumps; next ping/tick announces mempool txs.
@@ -181,10 +183,30 @@ pub struct LivePeer {
     tcp_shutdown: Mutex<Option<std::net::TcpStream>>,
     /// VERSION+VERACK finished. Connecting rows stay false (`p2p_timeouts`).
     handshake_complete: AtomicBool,
+    /// BIP324 transport finished. False while EARLY_KEY_RESPONSE / garbage.
+    v2_transport_ready: AtomicBool,
     /// Peer sent BIP155 `sendaddrv2` (use `addrv2` for self-announce / GETADDR).
     wants_addrv2: AtomicBool,
     /// Next self-announce unix seconds (`0` = never sent).
     next_local_addr_send: AtomicU64,
+}
+
+#[cfg(target_os = "linux")]
+fn tcp_has_peer_fin(tcp: &std::net::TcpStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut pfd = libc::pollfd {
+        fd: tcp.as_raw_fd(),
+        events: libc::POLLIN | libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: fd is a live TcpStream as_raw_fd, timeout 0.
+    let n = unsafe { libc::poll(&mut pfd, 1, 0) };
+    n >= 0 && pfd.revents & (libc::POLLHUP | libc::POLLRDHUP | libc::POLLERR) != 0
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tcp_has_peer_fin(_tcp: &std::net::TcpStream) -> bool {
+    false
 }
 
 impl LivePeer {
@@ -258,6 +280,14 @@ impl LivePeer {
 
     pub fn handshake_complete(&self) -> bool {
         self.handshake_complete.load(Ordering::Acquire)
+    }
+
+    pub fn mark_v2_transport_ready(&self) {
+        self.v2_transport_ready.store(true, Ordering::Release);
+    }
+
+    pub fn v2_transport_ready(&self) -> bool {
+        self.v2_transport_ready.load(Ordering::Acquire)
     }
 
     pub fn set_wants_addrv2(&self) {
@@ -343,6 +373,9 @@ impl LivePeer {
         let Some(tcp) = g.as_ref() else {
             return false;
         };
+        if tcp_has_peer_fin(tcp) {
+            return true;
+        }
         let _ = tcp.set_nonblocking(true);
         let mut b = [0u8; 1];
         match tcp.peek(&mut b) {
@@ -489,6 +522,14 @@ impl LivePeer {
 
     pub fn last_inv_sequence(&self) -> u64 {
         self.last_inv_sequence.load(Ordering::Relaxed)
+    }
+
+    pub fn inv_to_send(&self) -> u32 {
+        self.inv_to_send.load(Ordering::Relaxed)
+    }
+
+    pub fn set_inv_to_send(&self, n: u32) {
+        self.inv_to_send.store(n, Ordering::Relaxed);
     }
 
     pub fn note_tx_inv_seq(&self, mempool_seq: u64) {
@@ -691,6 +732,16 @@ impl LivePeer {
 
     fn snapshot(&self, now_secs: u64) -> PeerInfo {
         let (pingtime, minping, pingwait) = self.ping_rpc_fields(now_secs);
+        let bytesrecv_per_msg = self.recv.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let bytessent_per_msg = self.sent.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let (bytesrecv, bytessent) = if self.has_wire() {
+            (self.raw_recv(), self.raw_sent())
+        } else {
+            (
+                bytesrecv_per_msg.values().sum(),
+                bytessent_per_msg.values().sum(),
+            )
+        };
         PeerInfo {
             id: self.id,
             addr: self.addr,
@@ -699,8 +750,8 @@ impl LivePeer {
             inbound: self.inbound,
             services: self.services,
             startingheight: self.startingheight,
-            bytesrecv_per_msg: self.recv.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            bytessent_per_msg: self.sent.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            bytesrecv_per_msg,
+            bytessent_per_msg,
             conn_type: self.conn_type,
             relay: self.relay,
             bip152_hb_to: self.hb_to.load(Ordering::Relaxed),
@@ -711,6 +762,10 @@ impl LivePeer {
             last_block: self.last_block.load(Ordering::Relaxed),
             last_transaction: self.last_transaction.load(Ordering::Relaxed),
             minfeefilter_sat_kvb: self.minfeefilter_sat_kvb.load(Ordering::Relaxed),
+            last_inv_sequence: self.last_inv_sequence(),
+            inv_to_send: self.inv_to_send(),
+            bytesrecv,
+            bytessent,
             inflight: self
                 .inflight
                 .lock()
@@ -787,6 +842,14 @@ pub struct PeerInfo {
     pub last_transaction: u64,
     /// Fee filter they sent us, sat/kvB (`0` = none).
     pub minfeefilter_sat_kvb: u64,
+    /// Core `m_last_inv_sequence` (`getpeerinfo.last_inv_sequence`).
+    pub last_inv_sequence: u64,
+    /// Core `m_tx_inventory_to_send` size (`getpeerinfo.inv_to_send`).
+    pub inv_to_send: u32,
+    /// Raw TCP bytes (`getpeerinfo.bytesrecv`), including BIP324 handshake.
+    pub bytesrecv: u64,
+    /// Raw TCP bytes (`getpeerinfo.bytessent`), including BIP324 handshake.
+    pub bytessent: u64,
     /// Core whitelist permission strings (`relay`, `noban`, …).
     pub permissions: Vec<String>,
     /// Block heights in flight from this peer (`getpeerinfo.inflight`).
@@ -907,6 +970,20 @@ impl PeerHub {
     /// Attach the process addrman so inbound GetAddr can sample peers.
     pub fn set_addrman(&self, am: std::sync::Arc<Mutex<crate::seeds::AddrMan>>) {
         *self.addrman.lock().unwrap_or_else(|e| e.into_inner()) = Some(am);
+    }
+
+    /// Learn IPv4/IPv6 rows from BIP155 `addrv2` (`p2p_addrv2_relay.py`).
+    pub fn learn_addrv2(&self, list: &[bitcoin::p2p::address::AddrV2Message]) {
+        let g = self.addrman.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(am) = g.as_ref() else {
+            return;
+        };
+        let mut book = am.lock().unwrap_or_else(|e| e.into_inner());
+        for a in list {
+            if let Ok(sock) = a.socket_addr() {
+                book.add(sock);
+            }
+        }
     }
 
     /// Core GetAddr reply: per-bind cache (24h) of up to 1000 / 23% of addrman.
@@ -1197,7 +1274,12 @@ impl PeerHub {
         let peers: Vec<Arc<LivePeer>> = self.live_peers();
         for p in peers {
             if self.handshake_timed_out(&p, now) {
-                rbitcoin_log::debug!("{}", crate::peer::version_handshake_timeout_log(p.id));
+                let line = if p.v2_transport_ready() {
+                    crate::peer::version_handshake_timeout_log(p.id)
+                } else {
+                    crate::peer::v2_handshake_timeout_log(p.id)
+                };
+                rbitcoin_log::debug!("{}", line);
                 let _ = self.disconnect_id(p.id);
             }
         }
@@ -1299,6 +1381,7 @@ impl PeerHub {
             awaiting_headers: AtomicBool::new(false),
             announced_wtx: Mutex::new(HashSet::new()),
             last_inv_sequence: AtomicU64::new(1),
+            inv_to_send: AtomicU32::new(0),
             last_tx_inv_now: AtomicU64::new(0),
             tx_inv_requested: AtomicBool::new(false),
             ping_nonce_sent: AtomicU64::new(0),
@@ -1325,6 +1408,7 @@ impl PeerHub {
             session_abort: Mutex::new(None),
             tcp_shutdown: Mutex::new(None),
             handshake_complete: AtomicBool::new(false),
+            v2_transport_ready: AtomicBool::new(false),
             wants_addrv2: AtomicBool::new(false),
             next_local_addr_send: AtomicU64::new(0),
         });
@@ -1372,7 +1456,15 @@ impl PeerHub {
         let g = self.live.read().unwrap_or_else(|e| e.into_inner());
         let mut v: Vec<_> = g
             .values()
-            .filter(|p| !p.tcp_fin())
+            .filter(|p| {
+                if p.stop.load(Ordering::SeqCst) {
+                    return false;
+                }
+                // Connecting rows stay visible during BIP324 (EARLY_KEY_RESPONSE
+                // may FIN the clone while the row is still the getpeerinfo target).
+                // Completed sessions hide on TCP FIN (`mempool_reorg` disconnect_nodes).
+                !p.handshake_complete() || !p.tcp_fin()
+            })
             .map(|p| p.snapshot(now))
             .collect();
         v.sort_by_key(|p| p.id);
@@ -1677,6 +1769,40 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_hides_fin_completed_keeps_connecting() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let local = std::net::TcpStream::connect(addr).unwrap();
+        let (far, _) = listener.accept().unwrap();
+        drop(far);
+        let _ = local.shutdown(std::net::Shutdown::Both);
+
+        let hub = PeerHub::new();
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let connecting = hub.register_connecting(a, a, true, PeerConnType::Inbound);
+        connecting.attach_tcp_shutdown(local.try_clone().unwrap());
+        assert_eq!(
+            hub.snapshot().len(),
+            1,
+            "connecting peer stays in getpeerinfo during v2 handshake"
+        );
+
+        let done = hub.register(a, a, &ver("/rbitcoin:test/"), false, PeerConnType::Inbound);
+        done.attach_tcp_shutdown(local);
+        assert!(
+            hub.snapshot().iter().all(|p| p.id != done.id),
+            "completed FIN'd peer must not appear in getpeerinfo"
+        );
+        connecting.request_disconnect();
+        assert!(
+            hub.snapshot().iter().all(|p| p.id != connecting.id),
+            "stopped connecting peer is omitted"
+        );
+    }
+
+    #[test]
     fn disconnect_id_shuts_down_tcp_so_far_side_sees_eof() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -1746,6 +1872,46 @@ mod tests {
         assert!(
             hub.get(p.id).is_none(),
             "timed-out connecting peer is dropped"
+        );
+    }
+
+    #[test]
+    fn connecting_peer_v2_timeout_log_before_transport() {
+        rbitcoin_log::capture_logs(true);
+        let hub = PeerHub::new();
+        hub.set_peer_timeout_secs(3);
+        hub.set_mock_now(1_700_000_000);
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let p = hub.register_connecting(a, a, true, PeerConnType::Inbound);
+        hub.set_mock_now(1_700_000_003);
+        hub.on_session_heartbeat();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(p.stop.load(Ordering::SeqCst));
+        assert!(
+            logs.iter()
+                .any(|(_, m)| m.contains("V2 handshake timeout, disconnecting peer=0")),
+            "expected V2 handshake timeout, got {logs:?}"
+        );
+    }
+
+    #[test]
+    fn version_handshake_timeout_log_after_v2_ready() {
+        rbitcoin_log::capture_logs(true);
+        let hub = PeerHub::new();
+        hub.set_peer_timeout_secs(3);
+        hub.set_mock_now(1_700_000_000);
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let p = hub.register_connecting(a, a, true, PeerConnType::Inbound);
+        p.mark_v2_transport_ready();
+        hub.set_mock_now(1_700_000_003);
+        hub.on_session_heartbeat();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            logs.iter()
+                .any(|(_, m)| m.contains("version handshake timeout, disconnecting peer=0")),
+            "expected version handshake timeout after v2 ready, got {logs:?}"
         );
     }
 
