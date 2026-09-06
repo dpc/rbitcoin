@@ -189,17 +189,17 @@ fn pending_head_resolve_before_drain() {
         .put_full_batch_indexed(&meta_only_items(&[rec]), /*index=*/ false)
         .unwrap();
     assert!(
-        t.get_fk_by_txid(&txid).unwrap().is_none(),
+        t.probe_body_match_fk(&txid).unwrap().is_none(),
         "durable head must miss before drain"
     );
     t.head_note_pending(&[(txid, fks[0])]);
     assert!(
-        t.get_fk_by_txid(&txid).unwrap().is_none(),
+        t.probe_body_match_fk(&txid).unwrap().is_none(),
         "queued drain list is not a leftover home"
     );
     assert_eq!(t.head_drain_pending().unwrap(), 1);
     assert_eq!(t.pending_head_len(), 0);
-    assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(fks[0]));
+    assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(fks[0]));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -282,7 +282,7 @@ fn pending_head_reopen_backfills_lagging_head() {
     };
     let t = TxTable::open(&dir).unwrap();
     assert_eq!(
-        t.get_fk_by_txid(&txid).unwrap(),
+        t.probe_body_match_fk(&txid).unwrap(),
         Some(Fk(1)),
         "open must backfill head from Class A"
     );
@@ -658,7 +658,7 @@ fn body_txid_thin_prefix_matches_fat_packed_body() {
     let (_off, len) = t.inwit.record_range(fk).unwrap();
     assert!(len > 50_000, "inwit should hold the fat witness");
     // Head resolve still works.
-    assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(fk));
+    assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(fk));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1018,7 +1018,7 @@ fn get_fk_by_txid_batch_matches_single() {
     let batch = t.get_fk_by_txid_batch(&keys).unwrap();
     assert_eq!(batch.len(), 5);
     for (txid, row) in &batch {
-        let single = t.get_fk_by_txid(txid).unwrap();
+        let single = t.probe_body_match_fk(txid).unwrap();
         assert_eq!(row.map(|(f, _)| f), single);
         assert!(row.is_some());
         let (fk, range) = row.unwrap();
@@ -1156,7 +1156,7 @@ fn head_insert_many_tiny_roundtrip() {
     t.head_insert_many(&heads).unwrap();
     assert_eq!(t.head_occupied(), 64);
     for (r, fk) in recs.iter().zip(fks.iter()) {
-        assert_eq!(t.get_fk_by_txid(&r.txid).unwrap(), Some(*fk));
+        assert_eq!(t.probe_body_match_fk(&r.txid).unwrap(), Some(*fk));
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1207,7 +1207,7 @@ fn missing_tx_head_rebuilds_from_bodies_on_open() {
             assert_eq!(t.count(), 20);
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&7u64.to_le_bytes());
-            assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(Fk(7)));
+            assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(7)));
             t.flush().unwrap();
         }
 
@@ -1222,7 +1222,7 @@ fn missing_tx_head_rebuilds_from_bodies_on_open() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
             assert_eq!(
-                t.get_fk_by_txid(&txid).unwrap(),
+                t.probe_body_match_fk(&txid).unwrap(),
                 Some(Fk(i)),
                 "txid {i} missing after head rebuild"
             );
@@ -1309,12 +1309,16 @@ fn head_leading_truncated_class_a_rebuilds_on_open() {
         for i in 1..=15u64 {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
-            assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(Fk(i)), "fk {i}");
+            assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(i)), "fk {i}");
         }
         for i in 16..=20u64 {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
-            assert_eq!(t.get_fk_by_txid(&txid).unwrap(), None, "truncated fk {i}");
+            assert_eq!(
+                t.probe_body_match_fk(&txid).unwrap(),
+                None,
+                "truncated fk {i}"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     });
@@ -2419,7 +2423,7 @@ fn bip30_duplicate_txid_seal_succeeds_and_resolves() {
         "seal must succeed despite BIP30 duplicate fuse keys"
     );
     // Newest BIP30 create wins (deeper probe).
-    let hit = t.get_fk_by_txid(&shared).unwrap();
+    let hit = t.probe_body_match_fk(&shared).unwrap();
     assert_eq!(hit, Some(fks[1]), "newest same-txid create");
     let all = t.get_all_by_txid(&shared).unwrap();
     assert_eq!(all.len(), 2, "both BIP30 creates body-verify");
@@ -2487,7 +2491,7 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
         assert_eq!(
-            t.get_fk_by_txid(&txid).unwrap(),
+            t.probe_body_match_fk(&txid).unwrap(),
             Some(Fk(i)),
             "pre-reopen fk={i} FN after seal"
         );
@@ -2495,7 +2499,7 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
     for i in [401u64, 820, 900] {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
-        assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(Fk(i)), "fk={i}");
+        assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(i)), "fk={i}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2548,7 +2552,7 @@ fn reopen_rewrites_legacy_v1_sealed_fuse_to_v2() {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
         assert_eq!(
-            t.get_fk_by_txid(&txid).unwrap(),
+            t.probe_body_match_fk(&txid).unwrap(),
             Some(Fk(i)),
             "fk={i} after fuse migrate"
         );
@@ -2601,7 +2605,7 @@ fn fat_creates_do_not_roll_head_on_body_soft_span() {
             for i in [1u64, 6, 9, 12] {
                 let mut txid = [0u8; 32];
                 txid[0..8].copy_from_slice(&i.to_le_bytes());
-                assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(Fk(i)));
+                assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(i)));
             }
         });
         let _ = std::fs::remove_dir_all(&dir);
@@ -2643,22 +2647,22 @@ fn segmented_head_roll_and_lookup_via_tx_table() {
     for i in [1u64, 400, 819, 820] {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
-        let fk = t.get_fk_by_txid(&txid).unwrap();
+        let fk = t.probe_body_match_fk(&txid).unwrap();
         assert_eq!(fk, Some(Fk(i)), "i={i}");
     }
     // miss (must not collide with LE u64 ids 1..=820)
     let miss = [0xAAu8; 32];
-    assert_eq!(t.get_fk_by_txid(&miss).unwrap(), None);
+    assert_eq!(t.probe_body_match_fk(&miss).unwrap(), None);
     t.flush().unwrap();
     let t2 = TxTable::open(&dir).unwrap();
     for i in [1u64, 500, 820] {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
-        assert_eq!(t2.get_fk_by_txid(&txid).unwrap(), Some(Fk(i)));
+        assert_eq!(t2.probe_body_match_fk(&txid).unwrap(), Some(Fk(i)));
     }
     // twice
     assert_eq!(
-        t2.get_fk_by_txid(&{
+        t2.probe_body_match_fk(&{
             let mut x = [0u8; 32];
             x[0..8].copy_from_slice(&1u64.to_le_bytes());
             x
@@ -2708,7 +2712,7 @@ fn empty_occupancy_head_open_rebuilds_mphf_not_oa_backfill() {
             assert!(!dir.join("tx.head").join("000000").is_file());
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&65u64.to_le_bytes());
-            assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(Fk(65)));
+            assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(65)));
             let _ = std::fs::remove_dir_all(&dir);
         });
     });
@@ -2776,7 +2780,7 @@ fn rebuild_head_direct_mphf_empty_tail() {
             for i in [1u64, 64, 65] {
                 let mut txid = [0u8; 32];
                 txid[0..8].copy_from_slice(&i.to_le_bytes());
-                assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(Fk(i)), "fk={i}");
+                assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(i)), "fk={i}");
             }
             let _ = std::fs::remove_dir_all(&dir);
         });
@@ -3048,7 +3052,11 @@ fn open_seals_unsealed_nontail_after_copied_roll() {
     for i in [1u64, 100, 204, 205] {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
-        assert_eq!(t2.get_fk_by_txid(&txid).unwrap(), Some(Fk(i)), "fk={i}");
+        assert_eq!(
+            t2.probe_body_match_fk(&txid).unwrap(),
+            Some(Fk(i)),
+            "fk={i}"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&copy);
