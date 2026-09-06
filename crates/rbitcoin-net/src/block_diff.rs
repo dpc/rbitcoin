@@ -2152,6 +2152,17 @@ mod tests {
     }
 
     #[test]
+    fn store_reorg_sibling_accepted_need_not_be_submitted_tip() {
+        // Nightly crash-d6137829: persistent hub + sibling after rewind. The
+        // sibling is held; try_apply_held may connect a heavier archived path
+        // and return Accepted for a hash that is not the submitted sibling.
+        let (dir, hub, _tip) = tmp_diff_hub();
+        store_reorg_apply(&hub, &[0, 0, 0, 1, 2, 2, 1]).expect("sibling apply of held/archive");
+        assert!(hub.tip_height().is_some());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn accept_received_block_random_prev_is_skip() {
         let (dir, hub, _tip) = tmp_diff_hub();
         let params = diff_regtest_params();
