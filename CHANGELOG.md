@@ -11,6 +11,22 @@ before 1.0).
 
 ### Changed
 
+- **`NodeConfig` is composed option groups:** `DatadirOpts` / `ListenOpts` /
+  `MempoolOpts` / `RpcOpts`. CLI flags and `apply_kv` keys unchanged.
+  `config.datadir` still `Deref`s to the process datadir `PathBuf`.
+- **P2P inbound dispatch and session `select!` arms are named functions:**
+  `handle_peer_frame` calls `on_ping` / `serve_getdata` / `on_cmpctblock` / …
+  Session stages are `on_heartbeat` / `on_tip_event` / `run_writer_task`.
+  `LivePeer::peer_hub()` is the `PeerHub` accessor (`hub` in `peer.rs` is
+  `ChainHub`).
+- **RPC handlers live in domain modules:** `methods/{chain,net,mempool,mine}.rs`.
+  `METHOD_LIST` and `dispatch_inner` stay in `methods/mod.rs`.
+- **Electrum session is `ElectrumConn`:** `dispatch_pinned` takes one
+  session bag. Tests live in `server_tests.rs`.
+- **RPC `help` / `getrpcinfo.methods` list every dispatched method**,
+  including `generate`, `mockscheduler`, `addpeeraddress`, and
+  `getnodeaddresses`. Electrum genesis hex and Esplora WS txid / tip `id`
+  use `display_hash_hex`.
 - **Node start catch-up is a `CatchUp` enum:** not four independent bools.
   Indexes, IBD, and Electrum/Esplora start are named phases. Electrum and
   Esplora share one hub-tip broadcast bridge.

@@ -563,10 +563,6 @@ impl LivePeer {
         self.minfeefilter_sat_kvb.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn hub(&self) -> Option<Arc<PeerHub>> {
-        self.owner.upgrade()
-    }
-
     pub fn clock_now(&self) -> u64 {
         self.owner
             .upgrade()

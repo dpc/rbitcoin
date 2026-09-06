@@ -20,6 +20,121 @@ pub fn inbound_from_maxconnections(total: u32) -> u32 {
         .max(1)
 }
 
+/// Process datadir (Class A store, cookie, debug.log, mempool).
+///
+/// `Deref`/`DerefMut` to [`PathBuf`] so `config.datadir.join` / `.display()`
+/// keep working. Cold store is [`Self::cold`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatadirOpts {
+    pub path: PathBuf,
+    /// When set, Class A `inwit.body` / `inwit.idx/` live under `{cold}/store`.
+    pub cold: Option<PathBuf>,
+}
+
+impl std::ops::Deref for DatadirOpts {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
+impl std::ops::DerefMut for DatadirOpts {
+    fn deref_mut(&mut self) -> &mut PathBuf {
+        &mut self.path
+    }
+}
+
+impl From<PathBuf> for DatadirOpts {
+    fn from(path: PathBuf) -> Self {
+        Self { path, cold: None }
+    }
+}
+
+impl PartialEq<PathBuf> for DatadirOpts {
+    fn eq(&self, other: &PathBuf) -> bool {
+        self.path == *other
+    }
+}
+
+impl AsRef<std::path::Path> for DatadirOpts {
+    fn as_ref(&self) -> &std::path::Path {
+        self.path.as_ref()
+    }
+}
+
+/// P2P / Electrum / Esplora listen and peer-count knobs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListenOpts {
+    pub p2p: Option<SocketAddr>,
+    pub p2p_extra: Vec<SocketAddr>,
+    pub electrum: Option<SocketAddr>,
+    pub esplora: Option<SocketAddr>,
+    pub connect: Vec<SocketAddr>,
+    pub seednodes: Vec<String>,
+    pub use_seeds: bool,
+    pub max_outbound: u32,
+    pub max_inbound: u32,
+    pub max_inbound_explicit: bool,
+    pub external_ips: Vec<std::net::IpAddr>,
+    pub peer_timeout_secs: Option<u64>,
+}
+
+impl Default for ListenOpts {
+    fn default() -> Self {
+        Self {
+            p2p: None,
+            p2p_extra: Vec::new(),
+            electrum: None,
+            esplora: None,
+            connect: Vec::new(),
+            seednodes: Vec::new(),
+            use_seeds: true,
+            max_outbound: 16,
+            max_inbound: DEFAULT_MAX_INBOUND,
+            max_inbound_explicit: false,
+            external_ips: Vec::new(),
+            peer_timeout_secs: None,
+        }
+    }
+}
+
+/// Mempool size, persist, and policy overlays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MempoolOpts {
+    pub max_weight: u64,
+    pub persist: bool,
+    pub min_relay_fee_btc: Option<String>,
+    pub expiry_hours: Option<u64>,
+    pub limit_cluster_count: Option<u32>,
+    pub limit_cluster_size_kvb: Option<u32>,
+    pub permit_bare_multisig: bool,
+    pub blocksonly: bool,
+}
+
+impl Default for MempoolOpts {
+    fn default() -> Self {
+        Self {
+            max_weight: 300_000_000,
+            persist: true,
+            min_relay_fee_btc: None,
+            expiry_hours: None,
+            limit_cluster_count: None,
+            limit_cluster_size_kvb: None,
+            permit_bare_multisig: true,
+            blocksonly: false,
+        }
+    }
+}
+
+/// JSON-RPC HTTP listen and auth.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RpcOpts {
+    pub listen: Option<SocketAddr>,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub work_queue: Option<usize>,
+}
+
 /// Node process configuration (CLI + optional conf file).
 ///
 /// Operator-critical knobs live here. Advanced IO/perf tunables may still be
@@ -30,97 +145,43 @@ pub fn inbound_from_maxconnections(total: u32) -> u32 {
 /// once when inbound was not set on CLI/conf. It never writes process env.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeConfig {
-    pub datadir: PathBuf,
-    /// When set, Class A `inwit.body` / `inwit.idx/` live under `{datadir-cold}/store`.
-    /// All other files stay in [`Self::datadir`]. `None` = both hot and cold in datadir.
-    pub datadir_cold: Option<PathBuf>,
+    pub datadir: DatadirOpts,
+    pub listen: ListenOpts,
+    pub mempool: MempoolOpts,
+    pub rpc: RpcOpts,
     pub network: Network,
     /// Custom BIP325 challenge. `None` selects the default global Signet.
     pub signet_challenge: Option<ScriptBuf>,
     /// Custom Signet PoW target spacing in seconds.
     pub signet_block_time: Option<u64>,
-    /// Bind address for P2P listen (`None` = do not listen / default bind later).
-    pub p2p_listen: Option<SocketAddr>,
-    /// Extra P2P listen sockets (Core multi-`-bind`, including onion binds).
-    pub p2p_extra_listens: Vec<SocketAddr>,
-    /// Explicit outbound peers (`--connect`).
-    pub connect: Vec<SocketAddr>,
-    /// Core `-seednode` host or host:port (resolved with chain default port).
-    pub seednodes: Vec<String>,
-    /// Inject fixed/DNS seeds into addrman when connecting without `--connect`.
-    pub use_seeds: bool,
     /// When true, open store and exit (CI / smoke).
     pub smoke: bool,
     /// Cap how long `run_p2p` idles after sync (None = forever). Used by tests.
     pub max_run_secs: Option<u64>,
-    /// Electrum TCP listen (`None` = disabled). Plain TCP; terminate TLS at a
-    /// reverse proxy when public. App DoS limits apply regardless of bind address.
-    /// **Requires** [`Self::shindex`].
-    pub electrum_listen: Option<SocketAddr>,
-    /// Esplora REST HTTP listen (`None` = disabled). Plain HTTP; TLS via proxy.
-    /// **Requires** [`Self::shindex`].
-    pub esplora_listen: Option<SocketAddr>,
     /// Build Class B scripthash index (Electrum/Esplora history). Default **off**.
-    /// When off: tip follow and node JSON-RPC work without SH bulk materialize.
     pub shindex: bool,
     /// Persist / serve BIP-352 tweaks from `sp_tweaks.*`. Default **off**.
-    /// Electrum `blockchain.tweaks.subscribe` still works naive when off.
     pub sptweaks: bool,
-    /// Core-class JSON-RPC HTTP listen (`None` = disabled). Plain HTTP; TLS via proxy.
-    pub rpc_listen: Option<SocketAddr>,
-    /// Optional RPC Basic auth user (with [`Self::rpc_password`]). When both unset
-    /// and `rpc_listen` is set, a cookie file under datadir is used.
-    pub rpc_user: Option<String>,
-    /// Optional RPC Basic auth password.
-    pub rpc_password: Option<String>,
-    /// Core `-rpcworkqueue`. `None` = unlimited.
-    pub rpc_work_queue: Option<usize>,
     /// Skip script/prevout checks for blocks at or below this height (0 = off).
-    /// Analogous to a coarse assumevalid / milestone for IBD speed.
     pub milestone_height: u32,
-    /// How many **live** download peers to keep during IBD / tip follow.
-    pub max_outbound: u32,
-    /// Max concurrent **inbound** P2P sessions (default [`DEFAULT_MAX_INBOUND`]).
-    pub max_inbound: u32,
-    /// True when max_inbound came from CLI or conf (publish to env on apply).
-    pub max_inbound_explicit: bool,
-    /// Mempool weight budget in **WU** (default ~300M WU ≈ plan 300 MiB class).
-    pub mempool_max_weight: u64,
     /// When true, ask systemd (if available) to block automatic suspend/idle.
     pub inhibit_suspend: bool,
     /// Optional conf file path that was loaded (for diagnostics).
     pub conf_path: Option<PathBuf>,
     /// Log level from conf (`log_level=…`), if any. CLI `--log-level` overrides.
-    /// Values: error|warn|info|debug|trace|off (same as CLI).
     pub conf_log_level: Option<String>,
-    /// Optional JSONL API call log (`--api-log` / `api_log=`). Electrum, Esplora, RPC.
+    /// Optional JSONL API call log (`--api-log` / `api_log=`).
     pub api_log: Option<PathBuf>,
     /// Core `-uacomment` fragments (BIP14 parens in subversion).
     pub uacomments: Vec<String>,
-    /// Core `-testactivationheight=name@height` (regtest). Applied in [`Self::chain_params`].
+    /// Core `-testactivationheight=name@height` (regtest).
     pub test_activation_heights: Vec<(String, u32)>,
-    /// Core `-persistmempool` (default true — we already persist under datadir/mempool).
-    pub persist_mempool: bool,
     /// Core `-whitelist=` permission strings (stored; noban honor follows PeerHub).
     pub whitelist: Vec<String>,
-    /// Core `-blocksonly`: do not enable tx relay after catch-up.
-    pub blocksonly: bool,
-    /// Core `-minrelaytxfee` in BTC/kvB (None = Libre default).
-    pub min_relay_fee_btc: Option<String>,
-    /// Core `-mempoolexpiry` hours (`None` = 336).
-    pub mempool_expiry_hours: Option<u64>,
     /// Core `-startupnotify` shell command (run once after start).
     pub startup_notify: Option<String>,
     /// Core `-alertnotify` shell command (`%s` = warning text).
     pub alert_notify: Option<String>,
-    /// Core `-permitbaremultisig` (default true).
-    pub permit_bare_multisig: bool,
-    /// Core `-limitclustercount` overlay (`None` = mempool default 64).
-    pub limit_cluster_count: Option<u32>,
-    /// Core `-limitclustersize` in kvB (`None` = mempool default 101).
-    pub limit_cluster_size_kvb: Option<u32>,
-    /// Core `-peertimeout` seconds (`None` = default).
-    pub peer_timeout_secs: Option<u64>,
     /// Core `-minimumchainwork` (32-byte BE work). `None` = no extra IBD floor.
     pub minimum_chain_work: Option<[u8; 32]>,
     /// Core `-mocktime` at start (`None` = wall clock).
@@ -131,61 +192,40 @@ pub struct NodeConfig {
     pub block_version: Option<i32>,
     /// Core `-blockmintxfee` as BTC/kvB text (`None` = default 1 sat/kvB).
     pub block_min_tx_fee_btc: Option<String>,
-    /// Core `-externalip` (self-announce / `getnetworkinfo.localaddresses`).
-    pub external_ips: Vec<std::net::IpAddr>,
 }
 
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
-            datadir: Self::default_datadir(),
-            datadir_cold: None,
+            datadir: DatadirOpts {
+                path: Self::default_datadir(),
+                cold: None,
+            },
+            listen: ListenOpts::default(),
+            mempool: MempoolOpts::default(),
+            rpc: RpcOpts::default(),
             network: Network::Mainnet,
             signet_challenge: None,
             signet_block_time: None,
-            p2p_listen: None,
-            p2p_extra_listens: Vec::new(),
-            connect: Vec::new(),
-            seednodes: Vec::new(),
-            use_seeds: true,
             smoke: false,
             max_run_secs: None,
-            electrum_listen: None,
-            esplora_listen: None,
             shindex: false,
             sptweaks: false,
-            rpc_listen: None,
-            rpc_user: None,
-            rpc_password: None,
-            rpc_work_queue: None,
             milestone_height: 0,
-            max_outbound: 16,
-            max_inbound: DEFAULT_MAX_INBOUND,
-            max_inbound_explicit: false,
-            mempool_max_weight: 300_000_000,
             inhibit_suspend: false,
             conf_path: None,
             conf_log_level: None,
             api_log: None,
             uacomments: Vec::new(),
             test_activation_heights: Vec::new(),
-            persist_mempool: true,
             whitelist: Vec::new(),
-            blocksonly: false,
-            min_relay_fee_btc: None,
-            mempool_expiry_hours: None,
             startup_notify: None,
             alert_notify: None,
-            permit_bare_multisig: true,
-            limit_cluster_count: None,
-            limit_cluster_size_kvb: None,
-            peer_timeout_secs: None,
             minimum_chain_work: None,
             mock_time: None,
             max_tip_age_secs: None,
             block_version: None,
             block_min_tx_fee_btc: None,
-            external_ips: Vec::new(),
         }
     }
 }
@@ -207,7 +247,7 @@ impl NodeConfig {
     }
 
     pub fn with_datadir(mut self, datadir: impl Into<PathBuf>) -> Self {
-        self.datadir = datadir.into();
+        self.datadir.path = datadir.into();
         self
     }
 
@@ -217,7 +257,7 @@ impl NodeConfig {
     }
 
     pub fn with_p2p_listen(mut self, addr: SocketAddr) -> Self {
-        self.p2p_listen = Some(addr);
+        self.listen.p2p = Some(addr);
         self
     }
 
@@ -227,7 +267,7 @@ impl NodeConfig {
 
     /// Cold store directory (`{datadir-cold}/store`) when `--datadir-cold` is set.
     pub fn store_cold_path(&self) -> Option<PathBuf> {
-        self.datadir_cold.as_ref().map(|p| p.join("store"))
+        self.datadir.cold.as_ref().map(|p| p.join("store"))
     }
 
     pub fn store_layout(&self) -> rbitcoin_store::StoreLayout {
@@ -275,20 +315,20 @@ impl NodeConfig {
         if self.datadir.as_os_str().is_empty() {
             return Err(NodeError::Config("datadir must not be empty".into()));
         }
-        if let Some(cold) = &self.datadir_cold {
+        if let Some(cold) = &self.datadir.cold {
             if cold.as_os_str().is_empty() {
                 return Err(NodeError::Config("datadir-cold must not be empty".into()));
             }
-            if cold == &self.datadir {
+            if cold == &self.datadir.path {
                 return Err(NodeError::Config(
                     "datadir-cold must differ from datadir".into(),
                 ));
             }
         }
-        if self.max_outbound == 0 {
+        if self.listen.max_outbound == 0 {
             return Err(NodeError::Config("max_outbound must be >= 1".into()));
         }
-        if self.max_inbound == 0 {
+        if self.listen.max_inbound == 0 {
             return Err(NodeError::Config("max_inbound must be >= 1".into()));
         }
         if (self.signet_challenge.is_some() || self.signet_block_time.is_some())
@@ -308,19 +348,19 @@ impl NodeConfig {
                 "signetblocktime must be greater than zero".into(),
             ));
         }
-        if self.electrum_listen.is_some() && !self.shindex {
+        if self.listen.electrum.is_some() && !self.shindex {
             return Err(NodeError::Config(
                 "electrum_listen requires shindex=1 (--shindex); Electrum history needs Class B scripthash"
                     .into(),
             ));
         }
-        if self.esplora_listen.is_some() && !self.shindex {
+        if self.listen.esplora.is_some() && !self.shindex {
             return Err(NodeError::Config(
                 "esplora_listen requires shindex=1 (--shindex); Esplora history needs Class B scripthash"
                     .into(),
             ));
         }
-        if self.rpc_listen.is_some() && (self.rpc_user.is_some() ^ self.rpc_password.is_some()) {
+        if self.rpc.listen.is_some() && (self.rpc.user.is_some() ^ self.rpc.password.is_some()) {
             return Err(NodeError::Config(
                 "rpcuser and rpcpassword must both be set (or both unset for cookie auth)".into(),
             ));
@@ -338,7 +378,7 @@ impl NodeConfig {
         self.validate()?;
         let created_root = !self.datadir.exists();
         std::fs::create_dir_all(&self.datadir).map_err(|source| NodeError::Datadir {
-            path: self.datadir.clone(),
+            path: self.datadir.path.clone(),
             source,
         })?;
         if self.datadir.exists() && !self.datadir.is_dir() {
@@ -351,7 +391,7 @@ impl NodeConfig {
             let p = self.datadir.join(sub);
             std::fs::create_dir_all(&p).map_err(|source| NodeError::Datadir { path: p, source })?;
         }
-        if let Some(cold) = &self.datadir_cold {
+        if let Some(cold) = &self.datadir.cold {
             if cold.exists() && !cold.is_dir() {
                 return Err(NodeError::Config(format!(
                     "datadir-cold is not a directory: {}",
@@ -382,7 +422,7 @@ impl NodeConfig {
     ///
     /// Input only — does not publish process env.
     pub fn absorb_inbound_env(&mut self) {
-        if self.max_inbound_explicit {
+        if self.listen.max_inbound_explicit {
             return;
         }
         if let Some(n) = std::env::var("RBITCOIN_P2P_MAX_INBOUND")
@@ -390,7 +430,7 @@ impl NodeConfig {
             .and_then(|s| s.parse().ok())
             .filter(|&n: &u32| n > 0)
         {
-            self.max_inbound = n;
+            self.listen.max_inbound = n;
         }
     }
 
@@ -454,14 +494,14 @@ impl NodeConfig {
     pub fn apply_kv(&mut self, key: &str, val: &str) -> Result<ConfApply, NodeError> {
         let key_l = key.to_ascii_lowercase();
         match key_l.as_str() {
-            "datadir" => self.datadir = PathBuf::from(val),
+            "datadir" => self.datadir.path = PathBuf::from(val),
             "datadir-cold" | "datadir_cold" | "datadircold" => {
                 if val.is_empty() {
                     return Err(NodeError::Config(
                         "conf datadir-cold requires a path".into(),
                     ));
                 }
-                self.datadir_cold = Some(PathBuf::from(val));
+                self.datadir.cold = Some(PathBuf::from(val));
             }
             "network" | "chain" => {
                 self.network = Network::parse(val)
@@ -480,30 +520,30 @@ impl NodeConfig {
                 );
             }
             "listen" => {
-                self.p2p_listen = Some(
+                self.listen.p2p = Some(
                     val.parse()
                         .map_err(|e| NodeError::Config(format!("conf listen: {e}")))?,
                 );
             }
             "connect" => {
-                self.connect.push(
+                self.listen.connect.push(
                     val.parse()
                         .map_err(|e| NodeError::Config(format!("conf connect: {e}")))?,
                 );
             }
             "seednode" => {
                 if !val.is_empty() {
-                    self.seednodes.push(val.to_string());
+                    self.listen.seednodes.push(val.to_string());
                 }
             }
             "electrum_listen" | "electrumlisten" => {
-                self.electrum_listen = Some(
+                self.listen.electrum = Some(
                     val.parse()
                         .map_err(|e| NodeError::Config(format!("conf electrum_listen: {e}")))?,
                 );
             }
             "esplora_listen" | "esploralisten" => {
-                self.esplora_listen = Some(
+                self.listen.esplora = Some(
                     val.parse()
                         .map_err(|e| NodeError::Config(format!("conf esplora_listen: {e}")))?,
                 );
@@ -517,13 +557,13 @@ impl NodeConfig {
                     .map_err(|e| NodeError::Config(format!("conf sptweaks: {e}")))?;
             }
             "rpc_listen" | "rpclisten" => {
-                self.rpc_listen = Some(
+                self.rpc.listen = Some(
                     val.parse()
                         .map_err(|e| NodeError::Config(format!("conf rpc_listen: {e}")))?,
                 );
             }
-            "rpcuser" | "rpc_user" => self.rpc_user = Some(val.to_string()),
-            "rpcpassword" | "rpc_password" => self.rpc_password = Some(val.to_string()),
+            "rpcuser" | "rpc_user" => self.rpc.user = Some(val.to_string()),
+            "rpcpassword" | "rpc_password" => self.rpc.password = Some(val.to_string()),
             "uacomment" => self.uacomments.push(val.to_string()),
             "testactivationheight" | "test_activation_height" => {
                 let (name, height) = ChainParams::parse_test_activation_height(val)
@@ -532,7 +572,7 @@ impl NodeConfig {
                     .push((name.to_string(), height));
             }
             "persistmempool" | "persist_mempool" => {
-                self.persist_mempool = parse_conf_bool(val)
+                self.mempool.persist = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf persistmempool: {e}")))?;
             }
             "whitelist" => {
@@ -541,7 +581,7 @@ impl NodeConfig {
                 }
             }
             "blocksonly" | "blocks_only" => {
-                self.blocksonly = parse_conf_bool(val)
+                self.mempool.blocksonly = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf blocksonly: {e}")))?;
             }
             "minrelaytxfee" | "min_relay_txfee" => {
@@ -550,13 +590,13 @@ impl NodeConfig {
                         "conf minrelaytxfee requires a value".into(),
                     ));
                 }
-                self.min_relay_fee_btc = Some(val.to_string());
+                self.mempool.min_relay_fee_btc = Some(val.to_string());
             }
             "mempoolexpiry" | "mempool_expiry" => {
                 let h: u64 = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf mempoolexpiry: {e}")))?;
-                self.mempool_expiry_hours = Some(h.max(1));
+                self.mempool.expiry_hours = Some(h.max(1));
             }
             "startupnotify" | "startup_notify" => {
                 if !val.is_empty() {
@@ -564,17 +604,17 @@ impl NodeConfig {
                 }
             }
             "permitbaremultisig" | "permit_bare_multisig" => {
-                self.permit_bare_multisig = parse_conf_bool(val)
+                self.mempool.permit_bare_multisig = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf permitbaremultisig: {e}")))?;
             }
             "limitclustercount" | "limit_cluster_count" => {
-                self.limit_cluster_count = Some(
+                self.mempool.limit_cluster_count = Some(
                     val.parse()
                         .map_err(|e| NodeError::Config(format!("conf limitclustercount: {e}")))?,
                 );
             }
             "limitclustersize" | "limit_cluster_size" => {
-                self.limit_cluster_size_kvb = Some(
+                self.mempool.limit_cluster_size_kvb = Some(
                     val.parse()
                         .map_err(|e| NodeError::Config(format!("conf limitclustersize: {e}")))?,
                 );
@@ -588,7 +628,7 @@ impl NodeConfig {
                 let ip: std::net::IpAddr = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf externalip: {e}")))?;
-                self.external_ips.push(ip);
+                self.listen.external_ips.push(ip);
             }
             "peertimeout" | "peer_timeout" => {
                 let n: u64 = val
@@ -599,7 +639,7 @@ impl NodeConfig {
                         "peertimeout must be a positive integer.".into(),
                     ));
                 }
-                self.peer_timeout_secs = Some(n);
+                self.listen.peer_timeout_secs = Some(n);
             }
             "minimumchainwork" | "minimum_chain_work" => {
                 self.minimum_chain_work =
@@ -611,15 +651,15 @@ impl NodeConfig {
                     .map_err(|e| NodeError::Config(format!("conf milestone: {e}")))?;
             }
             "maxoutbound" | "max_outbound" => {
-                self.max_outbound = val
+                self.listen.max_outbound = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf maxoutbound: {e}")))?;
             }
             "maxinbound" | "max_inbound" => {
-                self.max_inbound = val
+                self.listen.max_inbound = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf maxinbound: {e}")))?;
-                self.max_inbound_explicit = true;
+                self.listen.max_inbound_explicit = true;
             }
             "maxconnections" => {
                 let total: u32 = val
@@ -628,8 +668,8 @@ impl NodeConfig {
                 if total == 0 {
                     return Err(NodeError::Config("conf maxconnections must be >= 1".into()));
                 }
-                self.max_inbound = inbound_from_maxconnections(total);
-                self.max_inbound_explicit = true;
+                self.listen.max_inbound = inbound_from_maxconnections(total);
+                self.listen.max_inbound_explicit = true;
             }
             "mempool_size_mb" | "maxmempool" => {
                 let mb: u64 = val
@@ -640,7 +680,7 @@ impl NodeConfig {
                         "conf mempool_size_mb must be >= 1".into(),
                     ));
                 }
-                self.mempool_max_weight = mb.saturating_mul(1_000_000);
+                self.mempool.max_weight = mb.saturating_mul(1_000_000);
             }
             "log_level" => {
                 if val.is_empty() {
@@ -654,7 +694,7 @@ impl NodeConfig {
                 }
                 self.api_log = Some(PathBuf::from(val));
             }
-            "noseeds" | "no_seeds" => self.use_seeds = !is_conf_true(val),
+            "noseeds" | "no_seeds" => self.listen.use_seeds = !is_conf_true(val),
             "regtest" if is_conf_true(val) => self.network = Network::Regtest,
             "signet" if is_conf_true(val) => self.network = Network::Signet,
             "testnet" if is_conf_true(val) => self.network = Network::Testnet,
@@ -794,15 +834,15 @@ mod tests {
         assert_eq!(cfg.store_path(), dir.join("store"));
         assert_eq!(cfg.store_cold_path(), None);
         assert_eq!(cfg.mempool_path(), dir.join("mempool"));
-        assert_eq!(cfg.max_inbound, DEFAULT_MAX_INBOUND);
-        assert!(!cfg.max_inbound_explicit);
+        assert_eq!(cfg.listen.max_inbound, DEFAULT_MAX_INBOUND);
+        assert!(!cfg.listen.max_inbound_explicit);
         cfg.ensure_datadir().unwrap();
         assert!(dir.join("store").is_dir());
         assert!(dir.join("mempool").is_dir());
         cfg.ensure_datadir().unwrap();
         let cold = dir.join("cold");
         let mut split = NodeConfig::default().with_datadir(&dir);
-        split.datadir_cold = Some(cold.clone());
+        split.datadir.cold = Some(cold.clone());
         assert_eq!(
             split.store_cold_path().as_deref(),
             Some(cold.join("store").as_path())
@@ -810,7 +850,7 @@ mod tests {
         split.ensure_datadir().unwrap();
         assert!(cold.join("store").is_dir());
         let mut same = NodeConfig::default().with_datadir(&dir);
-        same.datadir_cold = Some(dir.clone());
+        same.datadir.cold = Some(dir.clone());
         assert!(same.validate().unwrap_err().to_string().contains("differ"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -837,19 +877,19 @@ mod tests {
         let mut cfg = NodeConfig::default().with_datadir(dir.join("data"));
         cfg.merge_conf_file(&conf).unwrap();
         assert_eq!(cfg.network, Network::Signet);
-        assert_eq!(cfg.max_inbound, 40);
-        assert!(cfg.max_inbound_explicit);
-        assert_eq!(cfg.max_outbound, 8);
-        assert_eq!(cfg.mempool_max_weight, 50_000_000);
+        assert_eq!(cfg.listen.max_inbound, 40);
+        assert!(cfg.listen.max_inbound_explicit);
+        assert_eq!(cfg.listen.max_outbound, 8);
+        assert_eq!(cfg.mempool.max_weight, 50_000_000);
         assert_eq!(cfg.milestone_height, 100);
         assert_eq!(cfg.conf_log_level.as_deref(), Some("debug"));
         assert_eq!(
             cfg.api_log.as_deref(),
             Some(std::path::Path::new("/tmp/rbitcoin-api.jsonl"))
         );
-        assert_eq!(cfg.connect.len(), 1);
+        assert_eq!(cfg.listen.connect.len(), 1);
         assert_eq!(
-            cfg.datadir_cold.as_deref(),
+            cfg.datadir.cold.as_deref(),
             Some(std::path::Path::new("/mnt/hdd/rbtc-cold"))
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -864,19 +904,22 @@ mod tests {
         let prev_in = std::env::var_os("RBITCOIN_P2P_MAX_INBOUND");
         std::env::set_var("RBITCOIN_P2P_MAX_INBOUND", "99");
         let mut cfg = NodeConfig::default();
-        assert!(!cfg.max_inbound_explicit);
+        assert!(!cfg.listen.max_inbound_explicit);
         cfg.absorb_inbound_env();
-        assert_eq!(cfg.max_inbound, 99);
+        assert_eq!(cfg.listen.max_inbound, 99);
         assert_eq!(
             std::env::var("RBITCOIN_P2P_MAX_INBOUND").as_deref(),
             Ok("99"),
             "absorb must not rewrite process env"
         );
         let mut explicit = NodeConfig::default();
-        explicit.max_inbound = 12;
-        explicit.max_inbound_explicit = true;
+        explicit.listen.max_inbound = 12;
+        explicit.listen.max_inbound_explicit = true;
         explicit.absorb_inbound_env();
-        assert_eq!(explicit.max_inbound, 12, "explicit CLI/conf wins over env");
+        assert_eq!(
+            explicit.listen.max_inbound, 12,
+            "explicit CLI/conf wins over env"
+        );
         match prev_in {
             Some(v) => std::env::set_var("RBITCOIN_P2P_MAX_INBOUND", v),
             None => std::env::remove_var("RBITCOIN_P2P_MAX_INBOUND"),
@@ -885,13 +928,14 @@ mod tests {
 
     #[test]
     fn operator_knob_defaults_and_fields() {
-        let cfg = NodeConfig {
-            max_inbound: 42,
-            max_inbound_explicit: true,
-            ..NodeConfig::default()
-        };
-        assert_eq!(cfg.max_inbound, 42);
-        assert_eq!(NodeConfig::default().max_inbound, DEFAULT_MAX_INBOUND);
+        let mut cfg = NodeConfig::default();
+        cfg.listen.max_inbound = 42;
+        cfg.listen.max_inbound_explicit = true;
+        assert_eq!(cfg.listen.max_inbound, 42);
+        assert_eq!(
+            NodeConfig::default().listen.max_inbound,
+            DEFAULT_MAX_INBOUND
+        );
     }
 
     #[test]
@@ -907,13 +951,16 @@ mod tests {
         std::fs::write(&conf, "maxconnections=32\n").unwrap();
         let mut cfg = NodeConfig::default().with_datadir(dir.join("d"));
         cfg.merge_conf_file(&conf).unwrap();
-        assert_eq!(cfg.max_inbound, 21);
-        assert!(cfg.max_inbound_explicit);
+        assert_eq!(cfg.listen.max_inbound, 21);
+        assert!(cfg.listen.max_inbound_explicit);
         let conf2 = dir.join("mi.conf");
         std::fs::write(&conf2, "maxinbound=40\n").unwrap();
         let mut cfg2 = NodeConfig::default().with_datadir(dir.join("d2"));
         cfg2.merge_conf_file(&conf2).unwrap();
-        assert_eq!(cfg2.max_inbound, 40, "maxinbound stays explicit inbound");
+        assert_eq!(
+            cfg2.listen.max_inbound, 40,
+            "maxinbound stays explicit inbound"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -987,15 +1034,15 @@ mod tests {
     #[test]
     fn validate_rejects_zero_peer_caps_and_empty_datadir() {
         let mut cfg = NodeConfig::default();
-        cfg.datadir = PathBuf::new();
+        cfg.datadir.path = PathBuf::new();
         assert!(cfg.validate().is_err());
         let mut cfg = NodeConfig::default().with_datadir(tmp());
-        cfg.max_outbound = 0;
+        cfg.listen.max_outbound = 0;
         assert!(cfg.validate().is_err());
-        cfg.max_outbound = 1;
-        cfg.max_inbound = 0;
+        cfg.listen.max_outbound = 1;
+        cfg.listen.max_inbound = 0;
         assert!(cfg.validate().is_err());
-        cfg.max_inbound = 1;
+        cfg.listen.max_inbound = 1;
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.milestone(), Milestone::NONE);
         cfg.milestone_height = 10;
@@ -1019,7 +1066,7 @@ mod tests {
         let mut cfg = NodeConfig::default().with_datadir(dir.join("d"));
         cfg.merge_conf_file(&conf).unwrap();
         assert_eq!(cfg.network, Network::Regtest);
-        assert!(!cfg.use_seeds);
+        assert!(!cfg.listen.use_seeds);
 
         let conf2 = dir.join("signet.conf");
         std::fs::write(&conf2, "signet\n").unwrap();
@@ -1046,7 +1093,7 @@ mod tests {
     #[test]
     fn electrum_without_shindex_fails_validate() {
         let mut cfg = NodeConfig::default().with_datadir(tmp());
-        cfg.electrum_listen = Some("127.0.0.1:50001".parse().unwrap());
+        cfg.listen.electrum = Some("127.0.0.1:50001".parse().unwrap());
         cfg.shindex = false;
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
@@ -1058,7 +1105,7 @@ mod tests {
     #[test]
     fn esplora_without_shindex_fails_validate() {
         let mut cfg = NodeConfig::default().with_datadir(tmp());
-        cfg.esplora_listen = Some("127.0.0.1:3000".parse().unwrap());
+        cfg.listen.esplora = Some("127.0.0.1:3000".parse().unwrap());
         cfg.shindex = false;
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("shindex"), "got {err}");
@@ -1087,7 +1134,7 @@ mod tests {
     fn electrum_with_shindex_validates() {
         let mut cfg = NodeConfig::default().with_datadir(tmp());
         cfg.shindex = true;
-        cfg.electrum_listen = Some("127.0.0.1:50001".parse().unwrap());
+        cfg.listen.electrum = Some("127.0.0.1:50001".parse().unwrap());
         cfg.validate().unwrap();
     }
 
@@ -1117,20 +1164,20 @@ mod tests {
         let mut cfg = NodeConfig::default().with_datadir(dir.join("d"));
         cfg.merge_conf_file(&conf).unwrap();
         assert_eq!(cfg.network, Network::Regtest);
-        assert!(cfg.p2p_listen.is_some());
-        assert_eq!(cfg.connect.len(), 1);
+        assert!(cfg.listen.p2p.is_some());
+        assert_eq!(cfg.listen.connect.len(), 1);
         assert!(cfg.shindex);
         assert!(!cfg.sptweaks);
-        assert!(cfg.electrum_listen.is_some());
-        assert!(cfg.esplora_listen.is_some());
-        assert!(cfg.rpc_listen.is_some());
+        assert!(cfg.listen.electrum.is_some());
+        assert!(cfg.listen.esplora.is_some());
+        assert!(cfg.rpc.listen.is_some());
         assert_eq!(cfg.milestone_height, 100);
-        assert_eq!(cfg.max_outbound, 8);
-        assert_eq!(cfg.max_inbound, 32);
-        assert!(cfg.max_inbound_explicit);
-        assert_eq!(cfg.mempool_max_weight, 50_000_000);
+        assert_eq!(cfg.listen.max_outbound, 8);
+        assert_eq!(cfg.listen.max_inbound, 32);
+        assert!(cfg.listen.max_inbound_explicit);
+        assert_eq!(cfg.mempool.max_weight, 50_000_000);
         assert_eq!(cfg.conf_log_level.as_deref(), Some("info"));
-        assert!(cfg.use_seeds); // noseeds=0 → seeds on
+        assert!(cfg.listen.use_seeds); // noseeds=0 → seeds on
 
         // Error paths: bad listen / electrum / mempool 0 / empty log_level.
         for (body, needle) in [
@@ -1174,9 +1221,9 @@ mod tests {
         assert!(p.csv_active_at(102));
         // Libre defaults when the flag is absent.
         let plain = NodeConfig::default();
-        assert!(plain.persist_mempool);
-        assert!(!plain.blocksonly);
-        assert!(plain.permit_bare_multisig);
+        assert!(plain.mempool.persist);
+        assert!(!plain.mempool.blocksonly);
+        assert!(plain.mempool.permit_bare_multisig);
         assert!(plain.test_activation_heights.is_empty());
         assert_eq!(
             NodeConfig {

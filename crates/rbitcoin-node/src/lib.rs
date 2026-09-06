@@ -8,7 +8,7 @@ mod regtest_rpc;
 mod run;
 
 pub use cli::cli_main;
-pub use config::NodeConfig;
+pub use config::{DatadirOpts, ListenOpts, MempoolOpts, NodeConfig, RpcOpts};
 pub use error::NodeError;
 pub use inhibit::SuspendInhibit;
 pub use regtest_rpc::HubRegtest;

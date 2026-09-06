@@ -14,7 +14,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Network, Transaction, Txid};
 use futures_util::{SinkExt, StreamExt};
 use rbitcoin_net::{MempoolAnnounce, MempoolHub, TipEvent};
-use rbitcoin_primitives::{hex_encode, Height};
+use rbitcoin_primitives::{display_hash_hex, Height};
 use rbitcoin_query::Query;
 use rbitcoin_store::script_hash;
 use serde_json::{json, Value};
@@ -170,10 +170,7 @@ fn parse_txid_hex(s: &str) -> Result<Txid, String> {
 }
 
 fn txid_display_hex(txid: &Txid) -> String {
-    let b = txid.to_byte_array();
-    let mut rev = b;
-    rev.reverse();
-    hex_encode(rev)
+    display_hash_hex(&txid.to_byte_array())
 }
 
 fn scripts_touched(tx: &Transaction) -> HashSet<[u8; 32]> {
@@ -220,12 +217,10 @@ fn tip_push_json(ev: &TipEvent) -> Value {
     let mut header_bytes = Vec::with_capacity(80);
     let _ = ev.header.consensus_encode(&mut header_bytes);
     let hash = ev.hash.to_byte_array();
-    let mut rev = hash;
-    rev.reverse();
     json!({
         "block": {
             "height": ev.height,
-            "id": hex_encode(rev),
+            "id": display_hash_hex(&hash),
             "timestamp": ev.header.time,
         }
     })
@@ -653,6 +648,13 @@ async fn on_tip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn txid_display_hex_matches_primitives_owner() {
+        let b = [0x7au8; 32];
+        let txid = Txid::from_byte_array(b);
+        assert_eq!(txid_display_hex(&txid), display_hash_hex(&b));
+    }
 
     #[test]
     fn parse_want_blocks_and_unknown_tokens() {

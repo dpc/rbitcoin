@@ -54,7 +54,7 @@ fn node_cli_and_surface_smoke() {
 
     // Config errors
     let cfg = NodeConfig {
-        datadir: std::path::PathBuf::from(""),
+        datadir: std::path::PathBuf::from("").into(),
         ..NodeConfig::default()
     };
     assert!(run_node(cfg).is_err());
