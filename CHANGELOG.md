@@ -11,6 +11,10 @@ before 1.0).
 
 ### Changed
 
+- **P2P follow session is `PeerFollowState`:** `handle_peer_frame` takes one
+  session bag instead of twelve mut maps. Compact `sendcmpct` preference is
+  `PendingSendCmpct::{None, Lb, Hb}` (`AtomicU8` payload unchanged). Tx and
+  wtxid GetData share `serve_mempool_getdata`.
 - **Esplora asof/live scripthash reads share `sh_at_view`:** utxo,
   chain page, and combined txs no longer copy the pin fork.
 - **Electrum asof/live scripthash reads share `sh_at_view`:** history,
