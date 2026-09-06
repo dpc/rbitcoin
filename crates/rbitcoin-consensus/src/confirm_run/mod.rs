@@ -58,14 +58,13 @@ pub use bq_resolve::{
 };
 #[cfg(test)]
 use head_drain::{submit_head_drain, HEAD_DRAIN_THREAD_NAME};
+#[cfg(test)]
+use lookup::confirm_archive_kind;
+use lookup::known_create_txid_lookup;
 pub use lookup::lookup_stage_stats;
 pub use lookup::plan_stamp_sub_stats;
 #[cfg(test)]
 use lookup::ConfirmArchiveKind;
-use lookup::{
-    confirm_archive_kind, create_fks_from_header_ranges, known_create_txid_lookup,
-    stamp_parent_pin_archived,
-};
 pub use lookup::{
     confirm_wire_load_from_plan, confirm_wire_lookup_stamp, DenserelsWarmStats, ParentPinStamp,
     PlanStampOutcome,
@@ -218,9 +217,33 @@ pub fn confirm_wire_load_phase(
     confirm_wire_load_phase_pipelined(query, params, milestone, blocks, preverified, None)
 }
 
+fn wire_blocks_to_arcs(
+    query: &Query,
+    blocks: &[(Height, Block)],
+) -> Vec<(
+    Height,
+    Arc<Block>,
+    Option<Arc<[rbitcoin_query::TxPrecompute]>>,
+)> {
+    let t = Instant::now();
+    let arcs = blocks
+        .iter()
+        .map(|(h, b)| {
+            let pres = query.block_queue_resolved(h.0).map(|w| Arc::clone(&w.pres));
+            (*h, Arc::new(b.clone()), pres)
+        })
+        .collect();
+    let ns = t.elapsed().as_nanos() as u64;
+    if ns > 0 {
+        confirm_phase_stats::PREP_WIRE_ARC_NS.fetch_add(ns, Ordering::Relaxed);
+    }
+    arcs
+}
+
 /// Like [`confirm_wire_load_phase`] with optional pipeline caches for load-ahead.
 ///
-/// Single pin path: denserels by body range from lookup stamp (no cold dual path).
+/// One-shot load is stamp + [`confirm_wire_load_from_plan`] (same as IBD after
+/// BQ TipOnly). `Arc` conversion is timed as `PREP_WIRE_ARC_NS`.
 pub fn confirm_wire_load_phase_pipelined(
     query: &Query,
     params: &ChainParams,
@@ -237,259 +260,9 @@ pub fn confirm_wire_load_phase_pipelined(
             return Err(ConsensusError::BadBlock("confirm run not contiguous"));
         }
     }
-
-    let t_work = Instant::now();
-    let t_load = Instant::now();
-    let mut ns_wire_arc = 0u64;
-    let mut ns_struct = 0u64;
-    let mut ns_header = 0u64;
-    let mut ns_prepare = 0u64;
-
-    let mut wire_blocks: Vec<Arc<Block>> = Vec::with_capacity(blocks.len());
-    let mut metas: Vec<BodyMeta> = Vec::with_capacity(blocks.len());
-
-    let tip_h = query.tip_height().map(|h| h.0);
-    let store_path_lo = match tip_h {
-        None => 0u32,
-        Some(t) => t.saturating_add(1),
-    };
-    let path_lo = pipeline.map(|p| p.path_lo).unwrap_or(store_path_lo);
-
-    for (i, (height, block)) in blocks.iter().enumerate() {
-        let t = Instant::now();
-        let block = Arc::new(block.clone());
-        ns_wire_arc = ns_wire_arc.saturating_add(t.elapsed().as_nanos() as u64);
-        let hash = block.block_hash().to_byte_array();
-        let ctx = ValidationContext::at(params, *height, milestone);
-        let t = Instant::now();
-        let stashed = query.block_queue_resolved(height.0);
-        let pres = crate::block::validate_block_structure_with_pres(
-            block.as_ref(),
-            &ctx,
-            stashed.as_ref().map(|w| std::sync::Arc::clone(&w.pres)),
-        )?;
-        let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
-        ns_struct = ns_struct.saturating_add(t.elapsed().as_nanos() as u64);
-        // Later heights in the same batch validate against prior wire, not store tip.
-        let t = Instant::now();
-        if i == 0 {
-            if height.0 != path_lo {
-                return Err(ConsensusError::BadPrev);
-            }
-            if path_lo == store_path_lo {
-                validate_header(query, params, *height, &block.header)?;
-            } else {
-                let expect_prev = pipeline.and_then(|p| p.parent_hash).unwrap_or([0u8; 32]);
-                if block.header.prev_blockhash.to_byte_array() != expect_prev {
-                    return Err(ConsensusError::BadPrev);
-                }
-                let target = bitcoin::Target::from_compact(block.header.bits);
-                if target > params.pow_limit {
-                    return Err(ConsensusError::BadHeader("target above pow limit"));
-                }
-                block
-                    .header
-                    .validate_pow(target)
-                    .map_err(|_| ConsensusError::InvalidPow)?;
-            }
-        } else {
-            // Prev wire hash already stored on metas[i-1] — no rehash.
-            let prev_hash = metas[i - 1].hash;
-            if block.header.prev_blockhash.to_byte_array() != prev_hash {
-                return Err(ConsensusError::BadPrev);
-            }
-            // PoW bits/target (no store retarget mid-batch for regtest).
-            let target = bitcoin::Target::from_compact(block.header.bits);
-            if target > params.pow_limit {
-                return Err(ConsensusError::BadHeader("target above pow limit"));
-            }
-            block
-                .header
-                .validate_pow(target)
-                .map_err(|_| ConsensusError::InvalidPow)?;
-        }
-        ns_header = ns_header.saturating_add(t.elapsed().as_nanos() as u64);
-
-        let t = Instant::now();
-        let prev_fk = if i == 0 {
-            if block.header.prev_blockhash.to_byte_array() == [0u8; 32] {
-                rbitcoin_primitives::Fk::NULL
-            } else {
-                query
-                    .get_header_by_hash(block.header.prev_blockhash.as_byte_array())
-                    .map_err(ConsensusError::from)?
-                    .map(|(fk, _)| fk)
-                    .ok_or(ConsensusError::BadPrev)?
-            }
-        } else {
-            metas[i - 1].header_fk
-        };
-        let header_rec = crate::header_to_record(prev_fk, &block.header);
-        ns_prepare = ns_prepare.saturating_add(t.elapsed().as_nanos() as u64);
-        let t = Instant::now();
-        let header_fk = if let Some((fk, _)) = query
-            .get_header_by_hash(&header_rec.hash)
-            .map_err(ConsensusError::from)?
-        {
-            fk
-        } else {
-            query
-                .store()
-                .put_header(&header_rec)
-                .map_err(ConsensusError::from)?
-        };
-        ns_header = ns_header.saturating_add(t.elapsed().as_nanos() as u64);
-        wire_blocks.push(block);
-        metas.push(BodyMeta {
-            height: *height,
-            hash,
-            header_fk,
-            header_rec,
-            tx_fks: Vec::new(),
-            txids,
-            pres,
-        });
-    }
-
-    let t_fp = Instant::now();
-    let header_fks: Vec<rbitcoin_primitives::Fk> = metas.iter().map(|m| m.header_fk).collect();
-    let need_fks = query
-        .archive_filter_need_header_fks(&header_fks)
-        .map_err(ConsensusError::from)?;
-    confirm_archive_kind(header_fks.len(), need_fks.len())?;
-    let mut plan = if need_fks.is_empty() {
-        for (i, m) in metas.iter_mut().enumerate() {
-            if let Some(list) = query
-                .store()
-                .header_txs
-                .get_list(m.header_fk)
-                .map_err(ConsensusError::from)?
-            {
-                m.tx_fks = list;
-            }
-            // Never rehash wire for lookup — index by batch position.
-            let prev = wire_blocks[i].header.prev_blockhash.to_byte_array();
-            query.confirm_parent_cache().put_header_plan(
-                m.height.0,
-                m.header_fk,
-                m.header_rec.clone(),
-                m.tx_fks.clone(),
-                prev,
-            );
-        }
-        None
-    } else {
-        let mut need = Vec::with_capacity(need_fks.len());
-        for fk in &need_fks {
-            let i = metas
-                .iter()
-                .position(|m| m.header_fk == *fk)
-                .ok_or(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                    "invariant: need-body header_fk not in batch",
-                )))?;
-            need.push((*fk, wire_blocks[i].as_ref(), metas[i].txids.as_slice()));
-        }
-        let plan = match pipeline {
-            Some(p) => query
-                .archive_plan_batch_from_wire(
-                    &need,
-                    p.next_tx_start.max(1),
-                    p.in_flight,
-                    p.skeleton.as_ref(),
-                )
-                .map_err(ConsensusError::from)?,
-            None => query
-                .archive_plan_batch_from_wire(
-                    &need,
-                    query.tx_body_count().saturating_add(1).max(1),
-                    &rbitcoin_query::InFlight::new(),
-                    None,
-                )
-                .map_err(ConsensusError::from)?,
-        };
-        let by_header = create_fks_from_header_ranges(&plan.per_header_ranges);
-        for (i, m) in metas.iter_mut().enumerate() {
-            if let Some(id) = m.header_fk.get() {
-                if let Some(fks) = by_header.get(&id) {
-                    m.tx_fks = fks.clone();
-                }
-            }
-            let prev = wire_blocks[i].header.prev_blockhash.to_byte_array();
-            query.confirm_parent_cache().put_header_plan(
-                m.height.0,
-                m.header_fk,
-                m.header_rec.clone(),
-                m.tx_fks.clone(),
-                prev,
-            );
-        }
-        Some(plan)
-    };
-    let ns_filter_plan = t_fp.elapsed().as_nanos() as u64;
-
-    let inflight = pipeline.map(|p| p.in_flight);
-    let mut parent_pin = match plan.as_mut() {
-        Some(p) => ParentPinStamp::take_from_plan(p),
-        None => stamp_parent_pin_archived(
-            query,
-            params,
-            &metas,
-            &wire_blocks,
-            inflight,
-            pipeline.and_then(|p| p.skeleton.as_ref()),
-        )?,
-    };
-    let (batch_parents, spend_edges, _warm) = pin_for_wire_batch(
-        query,
-        plan.as_ref(),
-        &mut parent_pin,
-        &metas,
-        &wire_blocks,
-        inflight,
-    )?;
-    if let Some(ref mut p) = plan {
-        p.freeze_after_pin();
-    }
-
-    confirm_phase_stats::LOAD_NS.fetch_add(t_load.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    if ns_wire_arc > 0 {
-        confirm_phase_stats::PREP_WIRE_ARC_NS.fetch_add(ns_wire_arc, Ordering::Relaxed);
-    }
-    if ns_struct > 0 {
-        confirm_phase_stats::PREP_STRUCT_NS.fetch_add(ns_struct, Ordering::Relaxed);
-    }
-    if ns_header > 0 {
-        confirm_phase_stats::PREP_HEADER_NS.fetch_add(ns_header, Ordering::Relaxed);
-    }
-    if ns_prepare > 0 {
-        confirm_phase_stats::PREP_PREPARE_NS.fetch_add(ns_prepare, Ordering::Relaxed);
-    }
-    if ns_filter_plan > 0 {
-        confirm_phase_stats::PREP_FILTER_PLAN_NS.fetch_add(ns_filter_plan, Ordering::Relaxed);
-    }
-
-    let prepared = assemble_run(
-        query,
-        params,
-        milestone,
-        metas,
-        &wire_blocks,
-        &batch_parents,
-        &spend_edges,
-    )?;
-    drop(spend_edges);
-
-    let work_ns = t_work.elapsed().as_nanos() as u64;
-    Ok(ConfirmLoadOutcome {
-        batch: LoadedBatch {
-            prepared,
-            wire_blocks,
-            batch_parents,
-            script_preverified: preverified.clone(),
-            archive_plan: plan,
-        },
-        work_ns,
-    })
+    let arcs = wire_blocks_to_arcs(query, blocks);
+    let stamped = confirm_wire_lookup_stamp(query, params, milestone, &arcs, pipeline)?;
+    confirm_wire_load_from_plan(query, params, milestone, stamped, pipeline, preverified)
 }
 
 /// Unified wire → tip (lookup+load + scripts + write). Primary production entry.
@@ -520,14 +293,7 @@ pub fn confirm_wire_run_preverified(
     if blocks.is_empty() {
         return Err(ConsensusError::BadBlock("empty confirm batch"));
     }
-    let arcs: Vec<(
-        Height,
-        Arc<Block>,
-        Option<Arc<[rbitcoin_query::TxPrecompute]>>,
-    )> = blocks
-        .iter()
-        .map(|(h, b)| (*h, Arc::new(b.clone()), None))
-        .collect();
+    let arcs = wire_blocks_to_arcs(query, blocks);
     let stamped = confirm_wire_lookup_stamp(query, params, milestone, &arcs, None)?;
     let mat = confirm_wire_load_from_plan(query, params, milestone, stamped, None, preverified)?;
     let ok = confirm_scripts_phase(mat.batch)?;

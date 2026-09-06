@@ -167,16 +167,16 @@ fn script_jobs_from_same_pres_slice_share_pre() {
         pres[0].txid,
         vec![],
         spend.clone(),
-        true,
-        true,
-        true,
-        true,
-        true,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
     )
     .with_pre_slice(std::sync::Arc::clone(&pres), 0);
-    let job_b =
-        ScriptCheckJob::with_txid(pres[0].txid, vec![], spend, true, true, true, true, true)
-            .with_pre_slice(std::sync::Arc::clone(&pres), 0);
+    let job_b = ScriptCheckJob::with_txid(
+        pres[0].txid,
+        vec![],
+        spend,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+    )
+    .with_pre_slice(std::sync::Arc::clone(&pres), 0);
     assert!(
         std::ptr::eq(job_a.pre(), &pres[0]),
         "job pre must be the slice element, not a cloned TxPrecompute"
@@ -2129,11 +2129,7 @@ fn script_job_shared_tx_is_wire_pointer() {
         }],
         Arc::clone(&block),
         1,
-        true,
-        true,
-        true,
-        true,
-        true,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
     );
     assert!(std::ptr::eq(
         &*job.tx as *const Transaction,

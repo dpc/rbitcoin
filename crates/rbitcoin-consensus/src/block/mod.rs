@@ -801,6 +801,102 @@ impl AsRef<Transaction> for JobTx {
     }
 }
 
+/// Consensus + standardness flags for one script-verify job.
+///
+/// Field reads in the interpreter stay a direct bool test (no extra per-opcode
+/// branch). Production confirm uses [`Self::consensus_at`]; Core JSON fixtures
+/// use [`Self::ALL`] or an explicit struct literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScriptVerifyFlags {
+    pub bip65_active: bool,
+    pub bip112_active: bool,
+    pub bip66_active: bool,
+    pub bip16_active: bool,
+    pub taproot_active: bool,
+    pub minimal_if: bool,
+    pub nullfail: bool,
+    pub low_s: bool,
+    pub strictenc: bool,
+    pub null_dummy: bool,
+    pub minimal_data: bool,
+    pub witness_pubkeytype: bool,
+    pub witness_active: bool,
+    pub discourage_upgradable_witness: bool,
+    pub const_scriptcode: bool,
+}
+
+impl ScriptVerifyFlags {
+    /// Every flag on (Core JSON / fixture jobs that enable the full set).
+    pub const ALL: Self = Self {
+        bip65_active: true,
+        bip112_active: true,
+        bip66_active: true,
+        bip16_active: true,
+        taproot_active: true,
+        minimal_if: true,
+        nullfail: true,
+        low_s: true,
+        strictenc: true,
+        null_dummy: true,
+        minimal_data: true,
+        witness_pubkeytype: true,
+        witness_active: true,
+        discourage_upgradable_witness: true,
+        const_scriptcode: true,
+    };
+
+    /// Buried-fork knobs + production standardness defaults (`from_parts`).
+    pub const fn buried(
+        bip65_active: bool,
+        bip112_active: bool,
+        bip66_active: bool,
+        bip16_active: bool,
+        taproot_active: bool,
+    ) -> Self {
+        Self {
+            bip65_active,
+            bip112_active,
+            bip66_active,
+            bip16_active,
+            taproot_active,
+            minimal_if: false,
+            nullfail: false,
+            low_s: false,
+            strictenc: false,
+            null_dummy: true,
+            minimal_data: false,
+            witness_pubkeytype: false,
+            witness_active: true,
+            discourage_upgradable_witness: false,
+            const_scriptcode: false,
+        }
+    }
+
+    /// Activation + BIP141/147 defaults at `ctx` (BIP16 is caller MTP).
+    #[inline]
+    pub fn consensus_at(ctx: &ValidationContext<'_>, bip16_active: bool) -> Self {
+        let h = ctx.height.0;
+        let segwit = ctx.params.segwit_active_at(h);
+        Self {
+            bip65_active: ctx.params.bip65_active_at(h),
+            bip112_active: ctx.params.csv_active_at(h),
+            bip66_active: ctx.params.bip66_active_at(h),
+            bip16_active,
+            taproot_active: ctx.params.taproot_active_at(h),
+            minimal_if: false,
+            nullfail: false,
+            low_s: false,
+            strictenc: false,
+            null_dummy: segwit,
+            minimal_data: false,
+            witness_pubkeytype: false,
+            witness_active: segwit,
+            discourage_upgradable_witness: false,
+            const_scriptcode: false,
+        }
+    }
+}
+
 /// Script-verify job for one non-coinbase create.
 ///
 /// Confirm assemble attaches the wire [`Arc<Block>`] (no tx deep-clone). `txid`
@@ -812,38 +908,22 @@ pub struct ScriptCheckJob {
     pub(crate) prevouts: Vec<TxOut>,
     /// Owned (tests) or shared wire block + index (confirm path).
     pub(crate) tx: JobTx,
-    /// BIP65 CLTV active (false → OP_CLTV is a no-op, matching pre-activation).
-    pub(crate) bip65_active: bool,
-    /// BIP112 CSV active (false → OP_CSV is a no-op, matching pre-activation).
-    pub(crate) bip112_active: bool,
-    /// BIP66 strict DER active (false → accept historical lax DER encodings).
-    pub(crate) bip66_active: bool,
-    /// BIP16 P2SH active (false → `OP_HASH160 … OP_EQUAL` is bare, not redeem).
-    pub(crate) bip16_active: bool,
-    /// BIP341/342 taproot active (false → v1 witness program is anyone-can-spend).
-    pub(crate) taproot_active: bool,
-    /// SCRIPT_VERIFY_MINIMALIF (standardness / fixture flag; TapScript always on).
-    pub(crate) minimal_if: bool,
-    /// SCRIPT_VERIFY_NULLFAIL.
-    pub(crate) nullfail: bool,
-    /// SCRIPT_VERIFY_LOW_S.
-    pub(crate) low_s: bool,
-    /// SCRIPT_VERIFY_STRICTENC.
-    pub(crate) strictenc: bool,
-    /// SCRIPT_VERIFY_NULLDUMMY (also implied by bip112 on mainnet).
-    pub(crate) null_dummy: bool,
-    /// SCRIPT_VERIFY_MINIMALDATA.
-    pub(crate) minimal_data: bool,
-    /// SCRIPT_VERIFY_WITNESS_PUBKEYTYPE: witness keys must be compressed.
-    pub(crate) witness_pubkeytype: bool,
-    /// SCRIPT_VERIFY_WITNESS active (fixture flag / post-segwit production).
-    pub(crate) witness_active: bool,
-    /// SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM.
-    pub(crate) discourage_upgradable_witness: bool,
-    /// SCRIPT_VERIFY_CONST_SCRIPTCODE: CODESEPARATOR + FindAndDelete hard-fail.
-    pub(crate) const_scriptcode: bool,
+    pub(crate) flags: ScriptVerifyFlags,
     /// Lookup/structure `TxPrecompute`. Set on the confirm path; tests lazy-`from_tx`.
     pub(crate) pre: std::sync::OnceLock<JobPre>,
+}
+
+impl Deref for ScriptCheckJob {
+    type Target = ScriptVerifyFlags;
+    fn deref(&self) -> &Self::Target {
+        &self.flags
+    }
+}
+
+impl DerefMut for ScriptCheckJob {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.flags
+    }
 }
 
 /// Confirm jobs borrow the lookup/structure slice; tests own an `Arc`.
@@ -858,27 +938,10 @@ pub(crate) enum JobPre {
 impl ScriptCheckJob {
     /// Build a job hashing `tx` once for [`Self::txid`] (tests / detached verify).
     #[inline]
-    pub fn new(
-        prevouts: Vec<TxOut>,
-        tx: Transaction,
-        bip65_active: bool,
-        bip112_active: bool,
-        bip66_active: bool,
-        bip16_active: bool,
-        taproot_active: bool,
-    ) -> Self {
+    pub fn new(prevouts: Vec<TxOut>, tx: Transaction, flags: ScriptVerifyFlags) -> Self {
         use bitcoin::hashes::Hash;
         let txid = tx.compute_txid().to_byte_array();
-        Self::with_txid(
-            txid,
-            prevouts,
-            tx,
-            bip65_active,
-            bip112_active,
-            bip66_active,
-            bip16_active,
-            taproot_active,
-        )
+        Self::with_txid(txid, prevouts, tx, flags)
     }
 
     /// Owned-tx path (tests / benches / unit connect): reuse precomputed txid.
@@ -887,22 +950,9 @@ impl ScriptCheckJob {
         txid: [u8; 32],
         prevouts: Vec<TxOut>,
         tx: Transaction,
-        bip65_active: bool,
-        bip112_active: bool,
-        bip66_active: bool,
-        bip16_active: bool,
-        taproot_active: bool,
+        flags: ScriptVerifyFlags,
     ) -> Self {
-        Self::from_parts(
-            txid,
-            prevouts,
-            JobTx::owned(tx),
-            bip65_active,
-            bip112_active,
-            bip66_active,
-            bip16_active,
-            taproot_active,
-        )
+        Self::from_parts(txid, prevouts, JobTx::owned(tx), flags)
     }
 
     /// Confirm assemble: share the wire [`Arc<Block>`] (no `Transaction` clone).
@@ -912,22 +962,9 @@ impl ScriptCheckJob {
         prevouts: Vec<TxOut>,
         block: Arc<Block>,
         tx_index: usize,
-        bip65_active: bool,
-        bip112_active: bool,
-        bip66_active: bool,
-        bip16_active: bool,
-        taproot_active: bool,
+        flags: ScriptVerifyFlags,
     ) -> Self {
-        Self::from_parts(
-            txid,
-            prevouts,
-            JobTx::shared(block, tx_index),
-            bip65_active,
-            bip112_active,
-            bip66_active,
-            bip16_active,
-            taproot_active,
-        )
+        Self::from_parts(txid, prevouts, JobTx::shared(block, tx_index), flags)
     }
 
     /// Single construction site for activation + production standardness defaults.
@@ -936,32 +973,13 @@ impl ScriptCheckJob {
         txid: [u8; 32],
         prevouts: Vec<TxOut>,
         tx: JobTx,
-        bip65_active: bool,
-        bip112_active: bool,
-        bip66_active: bool,
-        bip16_active: bool,
-        taproot_active: bool,
+        flags: ScriptVerifyFlags,
     ) -> Self {
         Self {
             txid,
             prevouts,
             tx,
-            bip65_active,
-            bip112_active,
-            bip66_active,
-            bip16_active,
-            taproot_active,
-            minimal_if: false,
-            nullfail: false,
-            low_s: false,
-            strictenc: false,
-            // Default overwritten by `with_segwit` from `segwit_active_at`.
-            null_dummy: true,
-            minimal_data: false,
-            witness_pubkeytype: false,
-            witness_active: true,
-            discourage_upgradable_witness: false,
-            const_scriptcode: false,
+            flags,
             pre: std::sync::OnceLock::new(),
         }
     }
@@ -991,14 +1009,6 @@ impl ScriptCheckJob {
             JobPre::Owned(a) => a.as_ref(),
             JobPre::Slice { slice, idx } => &slice[*idx],
         }
-    }
-
-    /// BIP141/147: NULLDUMMY + WITNESS rules follow `segwit` (not CSV).
-    #[inline]
-    pub(crate) fn with_segwit(mut self, segwit_active: bool) -> Self {
-        self.null_dummy = segwit_active;
-        self.witness_active = segwit_active;
-        self
     }
 }
 
@@ -1172,12 +1182,7 @@ fn assemble_block_prevouts_mode(
         bip16_active_from_prev_mtp(ctx.params, ctx.height.0, block_hash, prev_mtp)
     );
     let _ = block_hash; // used in debug_assert; release keeps caller contract
-    let bip16_for_jobs = bip16_active;
-    let flag_bip65 = ctx.params.bip65_active_at(ctx.height.0);
-    let flag_csv = ctx.params.csv_active_at(ctx.height.0);
-    let flag_bip66 = ctx.params.bip66_active_at(ctx.height.0);
-    let flag_taproot = ctx.params.taproot_active_at(ctx.height.0);
-    let flag_segwit = ctx.params.segwit_active_at(ctx.height.0);
+    let flags = ScriptVerifyFlags::consensus_at(ctx, bip16_active);
 
     let n_tx = block.txdata.len();
     let mut txid_index: TxidMap<usize> =
@@ -1323,8 +1328,8 @@ fn assemble_block_prevouts_mode(
                     batch_parents,
                     ctx.height.0,
                     mode == AssembleMode::Full,
-                    bip16_for_jobs,
-                    flag_segwit,
+                    bip16_active,
+                    flags.witness_active,
                     build_script_jobs,
                     &mut acc,
                 )?;
@@ -1415,30 +1420,9 @@ fn assemble_block_prevouts_mode(
                 let t_job = Instant::now();
                 // Reuse A1 wire txid — scripts stage must not re-hash for preverified.
                 let mut job = if let Some(w) = wire {
-                    ScriptCheckJob::with_shared_tx(
-                        txid,
-                        prevouts,
-                        Arc::clone(w),
-                        ti,
-                        flag_bip65,
-                        flag_csv,
-                        flag_bip66,
-                        bip16_for_jobs,
-                        flag_taproot,
-                    )
-                    .with_segwit(flag_segwit)
+                    ScriptCheckJob::with_shared_tx(txid, prevouts, Arc::clone(w), ti, flags)
                 } else {
-                    ScriptCheckJob::with_txid(
-                        txid,
-                        prevouts,
-                        tx.clone(),
-                        flag_bip65,
-                        flag_csv,
-                        flag_bip66,
-                        bip16_for_jobs,
-                        flag_taproot,
-                    )
-                    .with_segwit(flag_segwit)
+                    ScriptCheckJob::with_txid(txid, prevouts, tx.clone(), flags)
                 };
                 if let Some(ps) = pres {
                     if ti < ps.len() {

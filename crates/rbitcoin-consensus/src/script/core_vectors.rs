@@ -392,25 +392,26 @@ fn run_script_row(
         txid: spend.compute_txid().to_byte_array(),
         prevouts: vec![prev],
         tx: JobTx::owned(spend),
-        bip65_active: flags.cltv,
-        bip112_active: flags.csv,
-        // STRICTENC/DERSIG → strict DER (bip66).
-        bip66_active: flags.dersig || flags.strictenc || flags.low_s,
-        bip16_active: flags.p2sh,
-        taproot_active: flags.taproot,
-        minimal_if: flags.minimal_if,
-        nullfail: flags.nullfail,
-        low_s: flags.low_s,
-        strictenc: flags.strictenc,
-        null_dummy: flags.null_dummy,
-        minimal_data: flags.minimal_data,
-        witness_pubkeytype: flags.extra.iter().any(|e| e == "WITNESS_PUBKEYTYPE"),
-        witness_active: flags.witness,
-        discourage_upgradable_witness: flags
-            .extra
-            .iter()
-            .any(|e| e == "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"),
-        const_scriptcode: flags.extra.iter().any(|e| e == "CONST_SCRIPTCODE"),
+        flags: crate::block::ScriptVerifyFlags {
+            bip65_active: flags.cltv,
+            bip112_active: flags.csv,
+            bip66_active: flags.dersig || flags.strictenc || flags.low_s,
+            bip16_active: flags.p2sh,
+            taproot_active: flags.taproot,
+            minimal_if: flags.minimal_if,
+            nullfail: flags.nullfail,
+            low_s: flags.low_s,
+            strictenc: flags.strictenc,
+            null_dummy: flags.null_dummy,
+            minimal_data: flags.minimal_data,
+            witness_pubkeytype: flags.extra.iter().any(|e| e == "WITNESS_PUBKEYTYPE"),
+            witness_active: flags.witness,
+            discourage_upgradable_witness: flags
+                .extra
+                .iter()
+                .any(|e| e == "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"),
+            const_scriptcode: flags.extra.iter().any(|e| e == "CONST_SCRIPTCODE"),
+        },
         pre: std::sync::OnceLock::new(),
     };
     verify_job_all_inputs(&job).map_err(|e| format!("{e}"))

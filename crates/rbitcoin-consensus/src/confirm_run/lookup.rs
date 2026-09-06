@@ -149,7 +149,6 @@ pub(super) fn stamp_parent_pin_archived(
     }
     let mut need_external: HashMap<[u8; 32], ()> = HashMap::new();
     for (m, block) in metas.iter().zip(wire_blocks.iter()) {
-        let _ = m;
         for tx in &block.txdata {
             for inp in &tx.input {
                 if inp.previous_output.is_null() {
@@ -316,6 +315,7 @@ pub(super) fn wire_lookup_phase(
     let path_lo = pipeline.map(|p| p.path_lo).unwrap_or(store_path_lo);
 
     let mut struct_ns = 0u64;
+    let mut header_ns = 0u64;
     let mut prepare_ns = 0u64;
 
     for (i, (height, block, caller_pres)) in blocks.iter().enumerate() {
@@ -329,6 +329,8 @@ pub(super) fn wire_lookup_phase(
             caller_pres.as_ref().map(Arc::clone),
         )?;
         let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
+        struct_ns = struct_ns.saturating_add(t_struct.elapsed().as_nanos() as u64);
+        let t_header = Instant::now();
         if i == 0 {
             if height.0 != path_lo {
                 return Err(ConsensusError::BadPrev);
@@ -364,7 +366,7 @@ pub(super) fn wire_lookup_phase(
                 .validate_pow(target)
                 .map_err(|_| ConsensusError::InvalidPow)?;
         }
-        struct_ns = struct_ns.saturating_add(t_struct.elapsed().as_nanos() as u64);
+        header_ns = header_ns.saturating_add(t_header.elapsed().as_nanos() as u64);
 
         let t_prep = Instant::now();
         let prev_fk = if i == 0 {
@@ -381,6 +383,8 @@ pub(super) fn wire_lookup_phase(
             metas[i - 1].header_fk
         };
         let header_rec = crate::header_to_record(prev_fk, &block.header);
+        prepare_ns = prepare_ns.saturating_add(t_prep.elapsed().as_nanos() as u64);
+        let t_put = Instant::now();
         let header_fk = if let Some((fk, _)) = query
             .get_header_by_hash(&header_rec.hash)
             .map_err(ConsensusError::from)?
@@ -392,7 +396,7 @@ pub(super) fn wire_lookup_phase(
                 .put_header(&header_rec)
                 .map_err(ConsensusError::from)?
         };
-        prepare_ns = prepare_ns.saturating_add(t_prep.elapsed().as_nanos() as u64);
+        header_ns = header_ns.saturating_add(t_put.elapsed().as_nanos() as u64);
         wire_blocks.push(block);
         metas.push(BodyMeta {
             height: *height,
@@ -485,6 +489,18 @@ pub(super) fn wire_lookup_phase(
     // plan_ns for HEAD_NS: filter + batch (legacy “lookup wall” without struct/prepare).
     let plan_ns = filter_ns.saturating_add(batch_ns);
     plan_stamp_sub_stats::note(struct_ns, prepare_ns, filter_ns, batch_ns);
+    if struct_ns > 0 {
+        confirm_phase_stats::PREP_STRUCT_NS.fetch_add(struct_ns, Ordering::Relaxed);
+    }
+    if header_ns > 0 {
+        confirm_phase_stats::PREP_HEADER_NS.fetch_add(header_ns, Ordering::Relaxed);
+    }
+    if prepare_ns > 0 {
+        confirm_phase_stats::PREP_PREPARE_NS.fetch_add(prepare_ns, Ordering::Relaxed);
+    }
+    if plan_ns > 0 {
+        confirm_phase_stats::PREP_FILTER_PLAN_NS.fetch_add(plan_ns, Ordering::Relaxed);
+    }
     Ok((plan, metas, wire_blocks, plan_ns))
 }
 

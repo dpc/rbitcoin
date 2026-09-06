@@ -441,11 +441,7 @@ fn verify_scripts_pool_empty_and_anyone_can_spend() {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         },
-        true,
-        true,
-        true,
-        true,
-        true,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
     );
     assert!(verify_scripts_pool(&[job]).is_ok());
 }

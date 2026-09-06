@@ -360,11 +360,7 @@ fn verify_challenge_spend(
     let mut job = ScriptCheckJob::new(
         vec![prevout],
         to_sign.clone(),
-        false,
-        false,
-        true,
-        true,
-        false,
+        crate::block::ScriptVerifyFlags::buried(false, false, true, true, false),
     );
     job.null_dummy = true;
     job.witness_active = true;

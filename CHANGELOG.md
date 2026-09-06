@@ -11,6 +11,10 @@ before 1.0).
 
 ### Changed
 
+- **One-shot confirm load is stamp then pin:** `confirm_wire_load_phase`
+  is `confirm_wire_lookup_stamp` + `confirm_wire_load_from_plan` (same
+  as IBD after BQ TipOnly). Script jobs carry `ScriptVerifyFlags`.
+  CLI flags and IBD cadence unchanged.
 - **Mempool admit/evict helpers:** conflict scan is shared by prepare and the
   write-lock re-check; eviction is one worst-chunk loop; P2P staged admit
   is `admit_staged`. Policy strings and persist order unchanged.

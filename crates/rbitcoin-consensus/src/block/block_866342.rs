@@ -159,11 +159,7 @@ fn block_866342_structure_scripts_and_overweight() {
             prevs,
             Arc::clone(&arc),
             i,
-            true,
-            true,
-            true,
-            true,
-            true,
+            crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
         );
         crate::script::verify_job_all_inputs(&job).unwrap_or_else(|e| {
             panic!(
