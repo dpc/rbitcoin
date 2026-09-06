@@ -228,7 +228,7 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
     copy_crashers fuzz/artifacts "$CRASHERS"
     exit "$st"
   fi
-  fail_if_no_comparisons "$log" 1
+  fail_if_no_comparisons "$log"
   exit 0
 fi
 

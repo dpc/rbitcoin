@@ -239,6 +239,7 @@ pub fn spawn_bitcoind_p2p(
         .spawn()
         .map_err(|e| format!("spawn bitcoind: {e}"))?;
     let rpc = wait_bitcoind_rpc(cookie, rpcport)?;
+    apply_regtest_mocktime(&rpc)?;
     let p2p = std::net::SocketAddr::from(([127, 0, 0, 1], p2pport));
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
@@ -257,6 +258,24 @@ pub fn spawn_bitcoind_p2p(
         },
         p2p,
     ))
+}
+
+pub fn regtest_genesis_time() -> i64 {
+    i64::from(
+        rbitcoin_consensus::genesis_block(&rbitcoin_consensus::ChainParams::regtest())
+            .header
+            .time,
+    )
+}
+
+pub fn setmocktime_params(ts: i64) -> String {
+    format!("[{ts}]")
+}
+
+fn apply_regtest_mocktime(rpc: &CoreRpc) -> Result<(), String> {
+    rpc.call("setmocktime", &setmocktime_params(regtest_genesis_time()))
+        .map(|_| ())
+        .map_err(|e| format!("setmocktime: {e}"))
 }
 
 fn wait_bitcoind_rpc(cookie: PathBuf, rpcport: u16) -> Result<CoreRpc, String> {
@@ -376,6 +395,14 @@ mod tests {
         assert!(args.iter().any(|a| a == "-acceptnonstdtxn=1"));
         assert!(args.iter().any(|a| a == "-regtest"));
         assert!(args.iter().any(|a| a == "-port=18444"));
+    }
+
+    #[test]
+    fn setmocktime_params_wraps_genesis_unix() {
+        let t = regtest_genesis_time();
+        assert!(t > 0);
+        assert_eq!(setmocktime_params(t), format!("[{t}]"));
+        assert_eq!(setmocktime_params(0), "[0]");
     }
 
     #[test]

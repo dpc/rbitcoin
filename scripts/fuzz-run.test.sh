@@ -228,8 +228,8 @@ assert_ok "busy skip-rate (20 compare / 10000 runs) passes" \
   echo "cmpct-differential: comparisons=1"
   echo "Done 139668 runs in 601 second(s)"
 } >"$WORKDIR/cmpct-mute.log"
-assert_ok "skip-heavy cmpct (1 compare / many runs) passes with min 1" \
-  "$RUN" --check-log "$WORKDIR/cmpct-mute.log" 1
+assert_ok "cmpct 1 compare / many runs fails default floor" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/cmpct-mute.log"
 {
   echo "mempool-differential: comparisons=1"
   echo "Done 10000 runs in 120 second(s)"

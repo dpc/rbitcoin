@@ -7,11 +7,12 @@
 use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::block::Header;
 use bitcoin::consensus::encode::deserialize;
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_compact_blocks::{CmpctBlock, SendCmpct};
 use bitcoin::p2p::Magic;
 use bitcoin::{Block, BlockHash, Target, Transaction};
-use rbitcoin_consensus::{genesis_block, ChainParams};
+use rbitcoin_consensus::{genesis_block, grind_regtest_pow, ChainParams, REGTEST_BLOCK_SPACING};
 use std::collections::HashMap;
 
 use crate::error::NetError;
@@ -109,6 +110,23 @@ pub fn cmpct_hsi_regtest_connectable(hsi: &HeaderAndShortIds) -> bool {
     hsi.header
         .validate_pow(Target::from_compact(hsi.header.bits))
         .is_ok()
+}
+
+/// Decode a compact announcement and restamp a unique grinded height-1 header.
+pub fn prepare_cmpct_fuzz_hsi(data: &[u8]) -> Option<HeaderAndShortIds> {
+    let mut hsi = decode_cmpct_hsi(data)?;
+    let genesis = genesis_block(&ChainParams::regtest());
+    hsi.header.prev_blockhash = genesis.block_hash();
+    hsi.header.bits = genesis.header.bits;
+    let mix = sha256::Hash::hash(data);
+    let extra = u32::from_le_bytes(mix.to_byte_array()[..4].try_into().ok()?);
+    hsi.header.time = genesis
+        .header
+        .time
+        .saturating_add(REGTEST_BLOCK_SPACING)
+        .saturating_add(extra % 10_000);
+    grind_regtest_pow(&mut hsi.header);
+    cmpct_hsi_regtest_connectable(&hsi).then_some(hsi)
 }
 
 /// Core: prefilled indexes must decode in-range. Out-of-range is a
@@ -615,6 +633,26 @@ mod tests {
             Some(&[1u64][..])
         );
         encode_cmpctblock_v2(&hsi).unwrap();
+    }
+
+    #[test]
+    fn prepare_cmpct_fuzz_hsi_unique_connectable_headers() {
+        let mut hsi = mined_h1_two_tx_hsi();
+        let raw_a = bitcoin::consensus::encode::serialize(&hsi);
+        hsi.nonce = 0x22;
+        let raw_b = bitcoin::consensus::encode::serialize(&hsi);
+        let a = prepare_cmpct_fuzz_hsi(&raw_a).unwrap();
+        let b = prepare_cmpct_fuzz_hsi(&raw_b).unwrap();
+        assert!(cmpct_hsi_regtest_connectable(&a));
+        assert!(cmpct_hsi_regtest_connectable(&b));
+        let genesis = genesis_block(&ChainParams::regtest());
+        assert_eq!(a.header.prev_blockhash, genesis.block_hash());
+        assert_eq!(b.header.prev_blockhash, genesis.block_hash());
+        assert_ne!(a.header.block_hash(), b.header.block_hash());
+        assert_eq!(
+            cmpct_missing_empty_mempool(&a).as_deref(),
+            Some(&[1u64][..])
+        );
     }
 
     #[test]

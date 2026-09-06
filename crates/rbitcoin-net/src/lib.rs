@@ -45,7 +45,7 @@ pub use codec::{MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ, MAX_PROTOCOL_
 pub use compact::{
     classify_v2_cmpct_peer, cmpct_hsi_regtest_connectable, cmpct_missing_empty_mempool,
     decode_cmpct_hsi, encode_cmpctblock_v2, encode_pong_v2, encode_sendcmpct_hb_v2,
-    prefilled_indexes_ok, try_reconstruct, CmpctPeerFrame,
+    prefilled_indexes_ok, prepare_cmpct_fuzz_hsi, try_reconstruct, CmpctPeerFrame,
 };
 pub use error::NetError;
 pub use eviction::{eviction_netgroup, select_inbound_eviction, InboundEvictCandidate};

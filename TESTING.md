@@ -311,10 +311,13 @@ a test to green by changing production in the harness PR.
 compare `submitblock` verdicts.
 
 `cmpct_differential` sends `sendcmpct(1, 2)` then a fuzzed height-1
-`cmpctblock`. Empty mempool on both sides: our missing indexes must match
-Core `getblocktxn`. Seed is a 2-tx compact (coinbase prefilled, one short-id
-→ missing `[1]`). Disagreement panics. It does not compare accept/reject
-and does not drive a two-node reorg.
+`cmpctblock`. Each input restamps a unique grinded header (prev = genesis)
+so Core treats it as a new compact. Spawn `setmocktime`s Core to regtest
+genesis time (`CanDirectFetch` / not IBD). Empty mempool: our missing
+indexes must match Core `getblocktxn`. After a compared request, Core
+`invalidateblock`s that header. Seed is a 2-tx compact (coinbase prefilled,
+one short-id → missing `[1]`). Disagreement panics. It does not compare
+accept/reject and does not drive a two-node reorg.
 
 `cmpct_reorg_differential` uses the same pad+stem and fork child as
 `block_fork_differential`, but the hub never `accept_received_block`s B or C.
@@ -332,10 +335,10 @@ requires standardness by default) so the OP_TRUE pad spend compares
 consensus instead of bouncing at `IsStandardTx`.
 
 Skip-rate gate: `submitblock` diffs fail when `Done N runs` (N≥1000) and
-comparisons < 10. Skip-heavy jobs (`cmpct_differential`,
-`mempool_differential`, `script_verify_differential`) require ≥1
-comparison (seed proves the oracle); mutations that destroy wire or stay
-policy-skip are expected.
+comparisons < 10. Skip-heavy jobs (`mempool_differential`,
+`script_verify_differential`) require ≥1 comparison (seed proves the
+oracle); mutations that destroy wire or stay policy-skip are expected.
+`cmpct_differential` uses the default floor (unique headers must compare).
 
 ## P2P serve bench (host only)
 
