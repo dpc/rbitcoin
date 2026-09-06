@@ -1047,6 +1047,40 @@ fn restore_stem(
     )
 }
 
+/// After a side-chain build (fork / reorg-n), tip may sit on the side even when
+/// the child was rejected. Park hub + Core back on `stem` so the next fuzz
+/// input can `setup_side` / extend without harness noise.
+fn park_reorg_stem(
+    hub: &ChainHub,
+    oracle: &dyn BlockOracle,
+    pad_height: u32,
+    stem: &Block,
+) -> Result<(), &'static str> {
+    let on_stem = hub.tip_hash() == Some(stem.block_hash());
+    if !on_stem {
+        hub.rewind_to_height(pad_height)
+            .map_err(|_| "rewind failed")?;
+        match hub.accept_received_block(stem.clone()) {
+            Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
+            _ => return Err("stem restore"),
+        }
+    }
+    // Core may still sit on the side tip after a rejected child submit.
+    let _ = oracle.core_precious_block(&stem.block_hash().to_string());
+    match submit_known_block(
+        oracle,
+        stem,
+        CORE_DUPLICATE_SKIP,
+        "stem restore submit",
+        true,
+    ) {
+        Ok(()) => Ok(()),
+        // Hub already on stem: Core submit is best-effort (mock reject queues).
+        Err(_) if on_stem => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn compare_fork_one(
     hub: &ChainHub,
     base: &DiffPad,
@@ -1129,6 +1163,11 @@ pub fn compare_fork_n_one(
     let Some(stem) = base.bodies.last() else {
         return CompareOne::Harness("no stem");
     };
+    if hub.tip_hash() != Some(stem.block_hash()) {
+        if let Err(e) = park_reorg_stem(hub, oracle, base.fork_parent.height, stem) {
+            return CompareOne::Harness(e);
+        }
+    }
     let mut side = mine_regtest_paying(
         base.fork_parent.hash,
         base.fork_parent.time.saturating_add(REGTEST_BLOCK_SPACING),
@@ -1139,17 +1178,19 @@ pub fn compare_fork_n_one(
     if let Err(e) = setup_side_block(hub, oracle, &side) {
         return CompareOne::Harness(e);
     }
+    let mut side_branch = vec![side.clone()];
     for i in 2..n {
         let h = base.fork_parent.height.saturating_add(i);
         let nxt = mine_empty_regtest(
-            side.block_hash(),
-            side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+            side_branch.last().unwrap().block_hash(),
+            side_branch
+                .last()
+                .unwrap()
+                .header
+                .time
+                .saturating_add(REGTEST_BLOCK_SPACING),
             h,
         );
-        match hub.accept_received_block(nxt.clone()) {
-            Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
-            _ => return CompareOne::Harness("side extend"),
-        }
         if submit_known_block(
             oracle,
             &nxt,
@@ -1159,9 +1200,35 @@ pub fn compare_fork_n_one(
         )
         .is_err()
         {
+            let _ = park_reorg_stem(hub, oracle, base.fork_parent.height, stem);
             return CompareOne::Harness("side extend submit");
         }
-        side = nxt;
+        side_branch.push(nxt);
+    }
+    if side_branch.len() > 1 {
+        match hub.accept_branch(&side_branch) {
+            Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
+            Ok(AcceptOutcome::IgnoredWeaker)
+                if hub.tip_hash() == Some(side_branch.last().unwrap().block_hash()) => {}
+            _ => {
+                // One-by-one tip-extend can AlreadyHave a once-seen empty block
+                // without moving tip; fall back for the tip-at-stem case.
+                for nxt in side_branch.iter().skip(1) {
+                    match hub.accept_received_block(nxt.clone()) {
+                        Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
+                        _ => {
+                            let _ = park_reorg_stem(hub, oracle, base.fork_parent.height, stem);
+                            return CompareOne::Harness("side extend");
+                        }
+                    }
+                }
+                if hub.tip_hash() != Some(side_branch.last().unwrap().block_hash()) {
+                    let _ = park_reorg_stem(hub, oracle, base.fork_parent.height, stem);
+                    return CompareOne::Harness("side extend");
+                }
+            }
+        }
+        side = side_branch.last().unwrap().clone();
     }
     let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
     apply_diff_field_mutations(&mut extra, mutation_ctrl(data));
@@ -1178,7 +1245,10 @@ pub fn compare_fork_n_one(
     );
     let ours = match verdict_from_accept(hub.accept_received_block(child.clone())) {
         Ok(v) => v,
-        Err(msg) => return CompareOne::Harness(msg),
+        Err(msg) => {
+            let _ = park_reorg_stem(hub, oracle, base.fork_parent.height, stem);
+            return CompareOne::Harness(msg);
+        }
     };
     let hex = hex_encode(serialize(&child));
     let reply = oracle.submitblock_hex(&hex);
@@ -1324,6 +1394,7 @@ fn finish_reorg_compare(
         }
         Ok(())
     };
+    let park = || park_reorg_stem(hub, oracle, pad_height, stem);
     match (ours, core) {
         (DiffVerdict::Accept, DiffVerdict::Accept) => {
             if let Err(e) = rewind(true) {
@@ -1345,27 +1416,41 @@ fn finish_reorg_compare(
             if !reason.is_empty() {
                 eprintln!("diff: core reject-reason={reason}");
             }
+            let _ = park();
             CompareOne::Disagreed {
                 ours: true,
                 core: false,
                 hex,
             }
         }
-        (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
+        (DiffVerdict::Reject, DiffVerdict::Reject) => {
+            if let Err(e) = park() {
+                return CompareOne::Harness(e);
+            }
+            CompareOne::Agreed { accept: false }
+        }
         (DiffVerdict::Reject, DiffVerdict::Accept) => {
             let _ = core_park_child(oracle, child, stem);
+            let _ = park();
             CompareOne::Disagreed {
                 ours: false,
                 core: true,
                 hex,
             }
         }
-        (DiffVerdict::Reject, DiffVerdict::Skip) => CompareOne::Skipped,
+        (DiffVerdict::Reject, DiffVerdict::Skip) => {
+            let _ = park();
+            CompareOne::Skipped
+        }
         (DiffVerdict::Skip, DiffVerdict::Accept) => {
             let _ = core_park_child(oracle, child, stem);
+            let _ = park();
             CompareOne::Harness("skip+accept")
         }
-        (DiffVerdict::Skip, DiffVerdict::Reject | DiffVerdict::Skip) => CompareOne::Skipped,
+        (DiffVerdict::Skip, DiffVerdict::Reject | DiffVerdict::Skip) => {
+            let _ = park();
+            CompareOne::Skipped
+        }
         (DiffVerdict::Accept, DiffVerdict::Skip) => {
             let _ = rewind(true);
             CompareOne::Skipped
@@ -1478,6 +1563,8 @@ mod tests {
     struct MockOracle {
         reply: OracleReply,
         later: Option<OracleReply>,
+        /// When set, `submitblock_hex` walks this list (last entry repeats).
+        queue: Option<Vec<OracleReply>>,
         rewind: Cell<u32>,
         last_keep: Cell<u32>,
         submits: Cell<u32>,
@@ -1492,6 +1579,7 @@ mod tests {
             Self {
                 reply,
                 later: None,
+                queue: None,
                 rewind: Cell::new(0),
                 last_keep: Cell::new(u32::MAX),
                 submits: Cell::new(0),
@@ -1506,12 +1594,21 @@ mod tests {
             self.later = Some(later);
             self
         }
+
+        fn queue(mut self, replies: Vec<OracleReply>) -> Self {
+            self.queue = Some(replies);
+            self
+        }
     }
 
     impl BlockOracle for MockOracle {
         fn submitblock_hex(&self, _hex: &str) -> OracleReply {
             let n = self.submits.get();
             self.submits.set(n + 1);
+            if let Some(q) = &self.queue {
+                let i = (n as usize).min(q.len().saturating_sub(1));
+                return q[i].clone();
+            }
             if n == 0 {
                 self.reply.clone()
             } else {
@@ -1875,6 +1972,7 @@ mod tests {
         let mock = MockOracle {
             reply: OracleReply::Dead,
             later: None,
+            queue: None,
             rewind: Cell::new(0),
             last_keep: Cell::new(u32::MAX),
             submits: Cell::new(0),
@@ -2297,6 +2395,58 @@ mod tests {
         assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
         assert_eq!(hub.tip_hash(), Some(base.tip.hash));
         assert!(DIFF_REORG_N > 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_fork_n_one_reject_parks_stem_for_next_input() {
+        let (dir, hub, _g) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
+        let base = mine_diff_stem(&hub, pad).unwrap();
+        let stem = base.tip.hash;
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        submit_pad_to_oracle(&mock, &base.bodies).unwrap();
+
+        let bad_tx = Transaction {
+            version: TxVersion::ONE,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![bitcoin::TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let bad = serialize(&Block {
+            header: fork_child_seed_block().header,
+            txdata: vec![fork_child_seed_block().txdata[0].clone(), bad_tx],
+        });
+        // side + extend NullAccept, child reject, then stem-park duplicate.
+        let reject = OracleReply::Reason("bad-txns-vin-empty".into());
+        let dup = OracleReply::Reason("duplicate".into());
+        let mock = MockOracle::new(OracleReply::NullAccept).queue(vec![
+            OracleReply::NullAccept,
+            OracleReply::NullAccept,
+            reject.clone(),
+            dup.clone(),
+        ]);
+        match compare_fork_n_one(&hub, &base, &mock, &bad, DIFF_REORG_N) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("n-reorg reject: {other:?}"),
+        }
+        assert_eq!(hub.tip_hash(), Some(stem), "reject must leave tip on stem");
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
+
+        let mock = MockOracle::new(OracleReply::NullAccept).queue(vec![
+            OracleReply::NullAccept,
+            OracleReply::NullAccept,
+            reject,
+            dup,
+        ]);
+        match compare_fork_n_one(&hub, &base, &mock, &bad, DIFF_REORG_N) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("second n-reorg reject: {other:?}"),
+        }
+        assert_eq!(hub.tip_hash(), Some(stem));
         let _ = fs::remove_dir_all(dir);
     }
 

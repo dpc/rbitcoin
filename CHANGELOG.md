@@ -25,6 +25,11 @@ before 1.0).
 
 ### Fixed
 
+- **Reorg-n differential parks tip on stem after reject:** `compare_fork_n_one`
+  left the hub on the side chain when the child was rejected, so the next
+  input could fail harness `side extend`. Reject paths now rewind + precious
+  the stem; side extend prefers `accept_branch`.
+
 - **Mempool accept no longer panics on overflowing output sums:** fuzzer
   txs can have `u64` output totals that wrap `.sum()` in debug. Checked add
   returns `bad-txns-txouttotal-toolarge`.
