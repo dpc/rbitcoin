@@ -11,6 +11,11 @@ before 1.0).
 
 ### Changed
 
+- **P2P inbound dispatch and session `select!` arms are named functions:**
+  `handle_peer_frame` calls `on_ping` / `serve_getdata` / `on_cmpctblock` / …
+  Session stages are `on_heartbeat` / `on_tip_event` / `run_writer_task`.
+  `LivePeer::peer_hub()` is the `PeerHub` accessor (`hub` in `peer.rs` is
+  `ChainHub`).
 - **RPC handlers live in domain modules:** `methods/{chain,net,mempool,mine}.rs`.
   `METHOD_LIST` and `dispatch_inner` stay in `methods/mod.rs`.
 - **Electrum session is `ElectrumConn`:** `dispatch_pinned` takes one
