@@ -197,6 +197,13 @@ That is **not** the operator binary (`nix build .#rbitcoin-musl`). Details:
    collection are guilty until the inner work is O(what this call needs),
    not O(what exists). Tiny fixtures prove correctness, not cost
    ([`TESTING.md`](./TESTING.md)).
+10. **Control flow is a type problem.** Early return; session state is a
+    struct, not a dozen `mut` parameters; dispatch is a catalog of named
+    handlers; boolean products become enums or methods; compose (has-a)
+    instead of a 30-field god struct; one owner per algorithm. Do not split
+    Core-faithful opcode loops or io_uring machines to beat a line count.
+    Full rules and extract policy: [`docs/code-shape.md`](./docs/code-shape.md).
+    Ranked 0.6.0 work: [`docs/quality.md`](./docs/quality.md) **Q-61**.
 
 ## Workflow
 
@@ -259,3 +266,5 @@ IO; they do not package zips. GitHub Releases:
       production `.rs` or markdown is not a pin).
 - [ ] Hot-path algorithm is O(need) at chain scale, or the RAM/CPU trade is
       named (principle 9).
+- [ ] New control flow follows principle 10 / [`docs/code-shape.md`](./docs/code-shape.md):
+      early return, session structs, named dispatch, no extra boolean flags.

@@ -11,6 +11,10 @@ before 1.0).
 
 ### Changed
 
+- **Code shape:** [`docs/code-shape.md`](docs/code-shape.md) owns control
+  flow, naming, and composition (CONTRIBUTING principle 10).
+  [`docs/quality.md`](docs/quality.md) **Q-61** is the 0.6.0 readability
+  backlog.
 - **Release builds skip store/query IO spies:** `tx_full_gets` /
   `body_ok_reads` increment only under `debug_assertions`, not on the
   operator hot path.
