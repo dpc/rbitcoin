@@ -30,7 +30,7 @@ Core clone, not a soak badge, not a desktop wallet.
 | **IBD** | Typical block connect about **1 s** on a laptop-class SSD. |
 | **RAM** | **2 GiB** process RSS is enough for IBD, SH build, and tip-follow (knobs may trade wall time, e.g. serial SH build). Heap, not “the disk is in page cache.” |
 | **Fees** | The 10-minute inclusion estimate is aimed at txs that actually get in, not Core’s historical estimator. |
-| **P2P** | A single network neighborhood should not own your tip; junk peers / compact-block spam should not knock the node over. Peer diversity aims at **Core asmap utility** (not necessarily the same implementation). |
+| **P2P** | A single network neighborhood should not own your tip; junk peers / compact-block spam should not knock the node over. Outbound peers use **Core asmap** ASN buckets when `ip_asn.dat` is loaded, else IPv4 `/16` / IPv6 `/32`. |
 | **Support** | [`SECURITY.md`](../SECURITY.md) names **1.0.x** with a real window. |
 | **Install** | Still the musl GitHub Release. Useful **libraries** may also be on crates.io. |
 
@@ -154,12 +154,12 @@ so restart does not redraw solely from DNS; compact prefill monotonic +
 in-bounds; `held_seq` FIFO; `requested_blocks` 10 s expire; Electrum/Esplora
 caps always-on.
 
-Still 1.0: outbound set with **asmap-class diversity** (one netgroup must
-not own the tip — not necessarily Core’s asmap file); AddrMan tried/new
-**caps** so the book cannot grow without bound; `announced_wtx` must roll
-instead of `clear()` at 50k (INV burst). Those leftovers are **Q-60**.
-Dedicated Core `anchors.dat` can wait if `{datadir}/peers` already ranks
-last-good outbounds. Tor can wait.
+Still 1.0: AddrMan tried/new **caps** so the book cannot grow without bound;
+`announced_wtx` must roll instead of `clear()` at 50k (INV burst). Those
+leftovers are **Q-60**. Outbound **asmap / prefix diversity** is landed
+(`--asmap` / `{datadir}/ip_asn.dat`; `--connect` bypass). Dedicated Core
+`anchors.dat` can wait if `{datadir}/peers` already ranks last-good
+outbounds. Tor can wait.
 
 | Done | Step |
 |:----:|------|
@@ -167,7 +167,7 @@ last-good outbounds. Tor can wait.
 | [x] | Inbound eviction is not newest-wins (Core protect-then-oldest) |
 | [x] | `{datadir}/peers` persist + rank last-good / fast |
 | [x] | Compact prefill monotonic; held FIFO; getdata retry on unanswered |
-| [ ] | Outbound diversity with asmap utility (**Q-60**) |
+| [x] | Outbound diversity with asmap / prefix netgroups (**Q-60**) |
 | [ ] | AddrMan caps + `announced_wtx` roll (**Q-60**) |
 
 ### Fee estimates that match inclusion

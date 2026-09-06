@@ -24,7 +24,7 @@ mod tx_relay;
 mod v2;
 mod versionbits_warn;
 
-pub use asmap::{interpret, ip16_for_lookup, sanity_check, AsMap};
+pub use asmap::{interpret, ip16_for_lookup, sanity_check, AsMap, TWO_PREFIX_ASMAP};
 pub use block_diff::{
     basic_auth_b64, build_jsonrpc_http_request, check_diff_env, compare_cmpct_reorg_one,
     compare_csv_age_one, compare_fork_n_one, compare_fork_one, compare_mempool_one, compare_one,

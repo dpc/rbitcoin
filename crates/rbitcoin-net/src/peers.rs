@@ -783,7 +783,12 @@ impl LivePeer {
                 }
                 p
             },
-            mapped_as: None,
+            mapped_as: self.owner.upgrade().and_then(|h| {
+                h.asmap().and_then(|m| {
+                    let asn = m.mapped_as(self.addr.ip());
+                    (asn != 0).then_some(asn)
+                })
+            }),
         }
     }
 }
@@ -894,6 +899,7 @@ pub struct PeerHub {
     external_ips: Mutex<Vec<IpAddr>>,
     /// P2P listen port used with `-externalip`.
     listen_port: AtomicU16,
+    asmap: Mutex<Option<Arc<crate::asmap::AsMap>>>,
 }
 
 fn ip_is_advertisable(ip: &IpAddr) -> bool {
@@ -924,7 +930,16 @@ impl PeerHub {
             peer_timeout_secs: AtomicU64::new(60),
             external_ips: Mutex::new(Vec::new()),
             listen_port: AtomicU16::new(0),
+            asmap: Mutex::new(None),
         })
+    }
+
+    pub fn set_asmap(&self, m: Option<Arc<crate::asmap::AsMap>>) {
+        *self.asmap.lock().unwrap_or_else(|e| e.into_inner()) = m;
+    }
+
+    pub fn asmap(&self) -> Option<Arc<crate::asmap::AsMap>> {
+        self.asmap.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn set_peer_timeout_secs(&self, secs: u64) {

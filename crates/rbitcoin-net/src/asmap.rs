@@ -69,6 +69,13 @@ impl AsMap {
     }
 }
 
+/// Two-prefix DecodeAsmap fixture: IPv4 `1.2.0.0/16` → ASN 1, `3.4.0.0/16` → ASN 2.
+pub const TWO_PREFIX_ASMAP: &[u8] = &[
+    0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0, 0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0,
+    0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0, 0xff, 0xff, 0xfe, 0xff, 0xfb, 0x80, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01,
+];
+
 /// IPv4 as `::ffff:0:0/96` + 32 bits; IPv6 as 16 raw bytes.
 pub fn ip16_for_lookup(ip: IpAddr) -> [u8; 16] {
     match ip {
@@ -470,5 +477,10 @@ mod tests {
         let m = AsMap::from_bytes(bytes).expect("RETURN ASN1");
         assert_eq!(m.interpret_ip16(&[0u8; 16]), 1);
         assert_eq!(m.interpret_ip16(&[0xff; 16]), 1);
+    }
+
+    #[test]
+    fn asmap_two_prefix_const_matches_encoder() {
+        assert_eq!(two_prefix_asmap_bytes(), TWO_PREFIX_ASMAP);
     }
 }

@@ -172,6 +172,8 @@ pub struct NodeConfig {
     pub conf_log_level: Option<String>,
     /// Optional JSONL API call log (`--api-log` / `api_log=`).
     pub api_log: Option<PathBuf>,
+    /// Core `-asmap` path. `None` = try `{datadir}/ip_asn.dat` if present.
+    pub asmap: Option<PathBuf>,
     /// Core `-uacomment` fragments (BIP14 parens in subversion).
     pub uacomments: Vec<String>,
     /// Core `-testactivationheight=name@height` (regtest).
@@ -216,6 +218,7 @@ impl Default for NodeConfig {
             conf_path: None,
             conf_log_level: None,
             api_log: None,
+            asmap: None,
             uacomments: Vec::new(),
             test_activation_heights: Vec::new(),
             whitelist: Vec::new(),
@@ -440,7 +443,7 @@ impl NodeConfig {
     /// `milestone` / `assumevalid_height`, `maxoutbound` / `max_outbound`,
     /// `maxinbound` / `max_inbound`, `maxconnections` (Core total → inbound N-11),
     /// `mempool_size_mb` / `maxmempool`,
-    /// `log_level`, `api_log`, `electrum_listen`, `esplora_listen`,
+    /// `log_level`, `api_log`, `asmap`, `electrum_listen`, `esplora_listen`,
     /// `shindex`, `rpc_listen`, `rpcuser`, `rpcpassword`,
     /// `noseeds` / `no_seeds`, `signetchallenge`, and `signetblocktime`.
     pub fn merge_conf_file(&mut self, path: &Path) -> Result<(), NodeError> {
@@ -694,6 +697,12 @@ impl NodeConfig {
                 }
                 self.api_log = Some(PathBuf::from(val));
             }
+            "asmap" => {
+                if val.is_empty() {
+                    return Err(NodeError::Config("conf asmap requires a path".into()));
+                }
+                self.asmap = Some(PathBuf::from(val));
+            }
             "noseeds" | "no_seeds" => self.listen.use_seeds = !is_conf_true(val),
             "regtest" if is_conf_true(val) => self.network = Network::Regtest,
             "signet" if is_conf_true(val) => self.network = Network::Signet,
@@ -870,6 +879,7 @@ mod tests {
              milestone=100\n\
              log_level=debug\n\
              api_log=/tmp/rbitcoin-api.jsonl\n\
+             asmap=/tmp/ip_asn.dat\n\
              connect=127.0.0.1:38333\n\
              datadir-cold=/mnt/hdd/rbtc-cold\n",
         )
@@ -886,6 +896,10 @@ mod tests {
         assert_eq!(
             cfg.api_log.as_deref(),
             Some(std::path::Path::new("/tmp/rbitcoin-api.jsonl"))
+        );
+        assert_eq!(
+            cfg.asmap.as_deref(),
+            Some(std::path::Path::new("/tmp/ip_asn.dat"))
         );
         assert_eq!(cfg.listen.connect.len(), 1);
         assert_eq!(

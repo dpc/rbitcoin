@@ -127,6 +127,7 @@ Routine knobs are **CLI / conf**, not required env vars. Clean smoke:
 | `--conf FILE` | | none |
 | `--log-level LEVEL` | | `info` |
 | `--api-log PATH` | conf `api_log=` | off — JSONL of Electrum / Esplora / RPC calls |
+| `--asmap PATH` | conf `asmap=` | unset — try `{datadir}/ip_asn.dat` if present; else prefix groups |
 | `--no-seeds` | `--noseeds` | seeds on |
 | `--shindex` | conf `shindex=1` | **off** — Class B scripthash (required for Electrum/Esplora) |
 | `--sptweaks` | conf `sptweaks=1` | **off** — thin BIP-352 tweak index (`sp_tweaks.*`) |
@@ -432,6 +433,14 @@ Do **not** wipe `store/` for mempool slot/full errors.
   (plus `NETWORK` or `NETWORK_LIMITED`). Dial ranking omits known-v1
   (`INCOMPATIBLE`) addresses while any better candidate remains. Seed host
   list lives in `dns_seeds()` (`crates/rbitcoin-net/src/seeds.rs`).
+- **Outbound diversity:** live IBD and tip-follow peers prefer unused
+  **netgroups**. With a Core `ip_asn.dat` (DecodeAsmap format) the group is
+  **ASN**; without a file it is IPv4 `/16` or IPv6 `/32`. Place Core’s map at
+  `{datadir}/ip_asn.dat` or pass `--asmap PATH` (relative paths are under
+  datadir). A missing or invalid file logs a warning and falls back to prefix
+  groups; the node still starts. `--connect` is operator-pinned and skips the
+  filter. We do not ship a mainnet map. Core publishes maps from the same
+  `ip_asn.dat` used by `bitcoind -asmap`.
 - Tx inv/getdata/tx relay is **off during IBD**; enabled in tip mode after catch-up.
 - **BIP152 compact blocks v2:** `sendcmpct` high-bandwidth; mempool short-id fill +
   `getblocktxn` / `blocktxn`; full witness getdata fallback. We also **serve** `getblocktxn`.

@@ -7,14 +7,15 @@ use rbitcoin_esplora::{run_esplora, EsploraConfig, EsploraHandle};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, format_serve_perf, format_tip_perf_sizes, netgroup, read_proc_rss,
-    sample_reset_serve_perf, AddrMan, ChainHub, IbdConfig, MempoolHub, P2PNode, PeerConnType,
-    TipEvent, TipPerfSizes,
+    sample_reset_serve_perf, AddrMan, AsMap, ChainHub, IbdConfig, MempoolHub, P2PNode,
+    PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
 use rbitcoin_rpc::{run_rpc, RpcConfig, RpcHandle, RpcRegtest};
 use rbitcoin_store::StoreError;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -362,6 +363,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             AddrMan::new()
         }
     };
+    let asmap = load_asmap(config.datadir.as_ref(), config.asmap.as_deref());
+    addrman.set_asmap(asmap.clone());
+    node.peers.set_asmap(asmap);
     for c in &config.listen.connect {
         addrman.add(*c);
     }
@@ -1507,6 +1511,47 @@ pub(crate) fn tip_follow_wake_kind(wake: &TipFollowWake, last_tip: u32) -> TipFo
     }
 }
 
+/// Load Core asmap bytecode. Missing/invalid file: warn (if a path was
+/// selected) and return `None` so prefix netgroups still work.
+pub(crate) fn load_asmap(datadir: &Path, configured: Option<&Path>) -> Option<Arc<AsMap>> {
+    let path = match configured {
+        Some(p) if p.is_absolute() => p.to_path_buf(),
+        Some(p) => datadir.join(p),
+        None => {
+            let d = datadir.join("ip_asn.dat");
+            if !d.is_file() {
+                return None;
+            }
+            d
+        }
+    };
+    match AsMap::from_path(&path) {
+        Ok(Some(m)) => {
+            info!(
+                "Opened asmap file {} ({} bytes, digest {})",
+                path.display(),
+                m.len(),
+                m.digest_hex8()
+            );
+            Some(Arc::new(m))
+        }
+        Ok(None) => {
+            warn!(
+                "Sanity check of asmap file {} failed — using prefix netgroups",
+                path.display()
+            );
+            None
+        }
+        Err(e) => {
+            warn!(
+                "Failed to open asmap file {}: {e} — using prefix netgroups",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 /// `--connect` is operator-pinned: no netgroup filter. Otherwise rank + diversity.
 pub(crate) fn follow_dial_targets(
     connect: &[SocketAddr],
@@ -1612,6 +1657,59 @@ mod tests {
         let occupied = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 0, 9)), 8333)];
         let got = follow_dial_targets(&[], &am, 1, &occupied);
         assert_eq!(got, vec![other]);
+    }
+
+    #[test]
+    fn load_asmap_missing_configured_is_none() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-asmap-miss-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(load_asmap(&dir, Some(Path::new("no-such-asmap"))).is_none());
+        assert!(load_asmap(&dir, None).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_asmap_valid_tiny_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-asmap-ok-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ip_asn.dat");
+        std::fs::write(&path, rbitcoin_net::TWO_PREFIX_ASMAP).unwrap();
+        let m = load_asmap(&dir, None).expect("default ip_asn.dat");
+        assert_eq!(
+            m.mapped_as(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 2, 0, 0))),
+            1
+        );
+        let rel = load_asmap(&dir, Some(Path::new("ip_asn.dat"))).expect("relative asmap");
+        assert_eq!(rel.len(), m.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_asmap_truncated_is_none() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-asmap-bad-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.dat");
+        std::fs::write(&path, [0u8]).unwrap();
+        assert!(load_asmap(&dir, Some(path.as_path())).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2113,6 +2211,49 @@ mod tests {
         assert!(result.is_ok(), "run_p2p timed out");
         // Incomplete IBD is ok (warn path); should not hang.
         let _ = result.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn run_p2p_missing_asmap_still_starts() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-asmap-miss-{nanos}"));
+        let mut cfg = NodeConfig::default()
+            .with_datadir(&dir)
+            .with_network(rbitcoin_primitives::Network::Regtest)
+            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        cfg.listen.use_seeds = false;
+        cfg.listen.connect.clear();
+        cfg.asmap = Some(dir.join("no-such-asmap"));
+        cfg.max_run_secs = Some(0);
+        let result = tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg)).await;
+        assert!(result.is_ok(), "run_p2p timed out");
+        result.unwrap().expect("missing asmap must not panic");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn run_p2p_valid_asmap_starts() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-asmap-ok-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ip_asn.dat"), rbitcoin_net::TWO_PREFIX_ASMAP).unwrap();
+        let mut cfg = NodeConfig::default()
+            .with_datadir(&dir)
+            .with_network(rbitcoin_primitives::Network::Regtest)
+            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        cfg.listen.use_seeds = false;
+        cfg.listen.connect.clear();
+        cfg.max_run_secs = Some(0);
+        let result = tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg)).await;
+        assert!(result.is_ok(), "run_p2p timed out");
+        result.unwrap().expect("valid asmap start");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
