@@ -1,6 +1,7 @@
 //! Outbound / inbound netgroup key: asmap ASN, or IPv4 `/16` / IPv6 `/32`.
 
 use crate::asmap::AsMap;
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 
 /// Stable neighborhood key. With asmap, the ASN (IPv4 and IPv6 that map to
@@ -10,6 +11,45 @@ pub fn netgroup(addr: SocketAddr, asmap: Option<&AsMap>) -> u64 {
         return u64::from(m.mapped_as(addr.ip()));
     }
     prefix_group(addr.ip())
+}
+
+/// Walk `ranked` and prefer addrs whose group is not in `occupied` or already
+/// picked. Once every unused-group candidate is taken, fill remaining slots
+/// in ranked order (duplicates / occupied groups).
+pub fn select_diverse(
+    ranked: &[SocketAddr],
+    max: usize,
+    occupied_groups: &HashSet<u64>,
+    mut group_of: impl FnMut(SocketAddr) -> u64,
+) -> Vec<SocketAddr> {
+    if max == 0 || ranked.is_empty() {
+        return Vec::new();
+    }
+    let mut picked = Vec::new();
+    let mut used = occupied_groups.clone();
+    for &addr in ranked {
+        if picked.len() >= max {
+            break;
+        }
+        let g = group_of(addr);
+        if used.contains(&g) {
+            continue;
+        }
+        used.insert(g);
+        picked.push(addr);
+    }
+    if picked.len() < max {
+        for &addr in ranked {
+            if picked.len() >= max {
+                break;
+            }
+            if picked.contains(&addr) {
+                continue;
+            }
+            picked.push(addr);
+        }
+    }
+    picked
 }
 
 fn prefix_group(ip: IpAddr) -> u64 {
@@ -78,5 +118,67 @@ mod tests {
             1,
         );
         assert_eq!(netgroup(a, Some(&m)), netgroup(v6, Some(&m)));
+    }
+
+    fn group_octet0(a: SocketAddr) -> u64 {
+        match a.ip() {
+            IpAddr::V4(v) => u64::from(v.octets()[0]),
+            IpAddr::V6(_) => 0,
+        }
+    }
+
+    #[test]
+    fn select_diverse_skips_occupied_asn() {
+        use std::collections::HashSet;
+        let m = AsMap::from_bytes(two_prefix_asmap_bytes()).unwrap();
+        let ranked = vec![v4(1, 2, 0, 1), v4(3, 4, 0, 1), v4(1, 2, 0, 2)];
+        let mut occupied = HashSet::new();
+        occupied.insert(netgroup(v4(1, 2, 0, 9), Some(&m)));
+        let got = select_diverse(&ranked, 2, &occupied, |a| netgroup(a, Some(&m)));
+        assert_eq!(got[0], v4(3, 4, 0, 1));
+        assert_eq!(got[1], v4(1, 2, 0, 1));
+    }
+
+    #[test]
+    fn select_diverse_skips_occupied_then_fills() {
+        use std::collections::HashSet;
+        let ranked: Vec<SocketAddr> = (1..=4).map(|i| v4(i, 0, 0, 1)).collect();
+        let mut occupied = HashSet::new();
+        occupied.insert(1);
+        let got = select_diverse(&ranked, 3, &occupied, group_octet0);
+        assert_eq!(got[0], v4(2, 0, 0, 1));
+        assert_eq!(got[1], v4(3, 0, 0, 1));
+        assert_eq!(got[2], v4(4, 0, 0, 1));
+        assert!(!got.contains(&v4(1, 0, 0, 1)));
+    }
+
+    #[test]
+    fn select_diverse_thin_book_still_fills_max() {
+        use std::collections::HashSet;
+        let ranked = vec![v4(1, 0, 0, 1), v4(1, 0, 0, 2), v4(1, 0, 0, 3)];
+        let occupied = HashSet::new();
+        let got = select_diverse(&ranked, 3, &occupied, group_octet0);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got, ranked);
+    }
+
+    #[test]
+    fn select_diverse_four_groups_max_eight() {
+        use std::collections::HashSet;
+        let mut ranked = Vec::new();
+        for g in 1u8..=4 {
+            ranked.push(v4(g, 0, 0, 1));
+            ranked.push(v4(g, 0, 0, 2));
+        }
+        let got = select_diverse(&ranked, 8, &HashSet::new(), group_octet0);
+        assert_eq!(got.len(), 8);
+        let first4: Vec<u8> = got[..4]
+            .iter()
+            .map(|a| match a.ip() {
+                IpAddr::V4(v) => v.octets()[0],
+                IpAddr::V6(_) => 0,
+            })
+            .collect();
+        assert_eq!(first4, vec![1, 2, 3, 4]);
     }
 }
