@@ -1,5 +1,6 @@
 //! Bitcoin P2P: BIP324 v2 transport, headers/blocks, tip follow, tip-mode **tx relay**.
 
+mod asmap;
 mod block_diff;
 mod cache;
 mod chain;
@@ -10,6 +11,7 @@ mod eviction;
 mod ibd;
 mod most_work;
 mod msg_decode;
+mod netgroup;
 mod peer;
 mod peer_dos;
 mod peers;
@@ -22,6 +24,7 @@ mod tx_relay;
 mod v2;
 mod versionbits_warn;
 
+pub use asmap::{interpret, ip16_for_lookup, sanity_check, AsMap, TWO_PREFIX_ASMAP};
 pub use block_diff::{
     basic_auth_b64, build_jsonrpc_http_request, check_diff_env, compare_cmpct_reorg_one,
     compare_csv_age_one, compare_fork_n_one, compare_fork_one, compare_mempool_one, compare_one,
@@ -59,6 +62,7 @@ pub use most_work::{
     first_best_ancestor, lca_on_best_chain, path_hashes_from_ancestor, select_most_work, sum_work,
     sum_work_for_hashes, work_better, InvalidHashSet, SelectOutcome, WorkCandidate,
 };
+pub use netgroup::{netgroup, select_diverse};
 pub use peer::{flush_tx_invs, force_announce_txid, local_service_flags, V2PlainSession};
 pub use peer_dos::{
     inbound_semaphore, PeerRateLimiter, DEFAULT_MAX_BYTES_PER_SEC, DEFAULT_MAX_INBOUND,

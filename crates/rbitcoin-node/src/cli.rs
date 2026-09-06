@@ -46,6 +46,7 @@ struct CliAccum {
     conf_path: Option<PathBuf>,
     log_level_cli: Option<Option<Level>>,
     api_log: Option<PathBuf>,
+    asmap: Option<PathBuf>,
     uacomments: Vec<String>,
     test_activation_heights: Vec<(String, u32)>,
     persist_mempool: Option<bool>,
@@ -106,6 +107,7 @@ impl Default for CliAccum {
             conf_path: None,
             log_level_cli: None,
             api_log: None,
+            asmap: None,
             uacomments: Vec::new(),
             test_activation_heights: Vec::new(),
             persist_mempool: None,
@@ -156,12 +158,13 @@ where
     [--limitclustercount N] [--limitclustersize KVB] [--peertimeout SECS] \\\n\
     [--externalip IP] \\\n\
     [--minimumchainwork HEX] \\\n\
-    [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--uacomment STR] \\\n\
+    [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--asmap PATH] [--uacomment STR] \\\n\
     [--no-seeds] [--smoke] [--inhibit-suspend]\n\n\
 Networks: mainnet|testnet|signet|regtest\n\
 Custom Signet: --signetchallenge HEX [--signetblocktime SECONDS].\n\
 Log level: error|warn|info|debug|trace|off (CLI > conf log_level > RBITCOIN_LOG / RUST_LOG).\n\
 API log: --api-log PATH writes one JSON line per Electrum/Esplora/RPC call (also TRACE `api:`).\n\
+Asmap: --asmap PATH loads a Core ip_asn.dat (relative to datadir). Unset tries {{datadir}}/ip_asn.dat.\n\
 Milestone / assumevalid-height: skip script/sig checks at/below HEIGHT.\n\
   Defaults: mainnet 840000, signet 2000000, testnet 2500000, regtest 0. Use 0 for full scripts.\n\
 Mempool: --mempool-size-mb / --maxmempool (default ~300 MiB weight budget).\n\
@@ -974,6 +977,15 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 acc.api_log = Some(PathBuf::from(&args[i]));
                 i += 1;
             }
+            "--asmap" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --asmap requires a path");
+                    return ExitCode::from(2);
+                }
+                acc.asmap = Some(PathBuf::from(&args[i]));
+                i += 1;
+            }
             "--log-level" => {
                 i += 1;
                 if i >= args.len() {
@@ -1046,6 +1058,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
 
     if let Some(p) = acc.api_log {
         config.api_log = Some(p);
+    }
+    if let Some(p) = acc.asmap {
+        config.asmap = Some(p);
     }
     if let Some(ref p) = config.api_log {
         if let Err(e) = rbitcoin_log::init_api_log(p) {
@@ -1412,6 +1427,7 @@ mod tests {
             ExitCode::from(2),
         );
         assert_exit(cli_main(["rbitcoin-node", "--api-log"]), ExitCode::from(2));
+        assert_exit(cli_main(["rbitcoin-node", "--asmap"]), ExitCode::from(2));
         assert_exit(
             cli_main(["rbitcoin-node", "--max-outbound", "0"]),
             ExitCode::from(2),

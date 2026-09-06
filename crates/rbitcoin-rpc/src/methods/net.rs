@@ -83,6 +83,9 @@ pub(crate) fn peerinfo_json(p: rbitcoin_net::PeerInfo) -> Value {
     if let Some(v) = p.pingwait {
         row["pingwait"] = json!(v);
     }
+    if let Some(asn) = p.mapped_as {
+        row["mapped_as"] = json!(asn);
+    }
     row
 }
 

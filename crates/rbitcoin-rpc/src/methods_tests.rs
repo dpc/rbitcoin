@@ -2613,6 +2613,7 @@ fn getpeerinfo_lists_registered_session() {
     assert_eq!(arr[0]["inbound"], false);
     assert_eq!(arr[0]["relaytxes"], true);
     assert_eq!(arr[0]["permissions"], json!([]));
+    assert!(arr[0].get("mapped_as").is_none());
     hub.set_relay_perm(true);
     let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     assert_eq!(r.as_array().unwrap()[0]["permissions"], json!(["relay"]));
@@ -2656,6 +2657,40 @@ fn getpeerinfo_lists_registered_session() {
         json!(2)
     );
     drop(inbound);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getpeerinfo_mapped_as_when_asmap() {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use rbitcoin_net::{AsMap, PeerConnType, PeerHub, TWO_PREFIX_ASMAP};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    hub.set_asmap(Some(Arc::new(
+        AsMap::from_bytes(TWO_PREFIX_ASMAP.to_vec()).expect("fixture"),
+    )));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&bind, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:0.1.0(testnode0)/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let _live = hub.register(addr, bind, &ver, false, PeerConnType::OutboundFullRelay);
+    ctx.peers = Some(hub);
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    assert_eq!(r.as_array().unwrap()[0]["mapped_as"], json!(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

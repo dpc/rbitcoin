@@ -107,18 +107,9 @@ fn protect_by_netgroup(cands: &mut Vec<InboundEvictCandidate>, k: usize) {
     cands.retain(|c| !protect_ids.contains(&c.id));
 }
 
-/// Stable netgroup key for eviction (IPv4 /24, else full IP hash).
+/// Stable netgroup key for eviction (IPv4 `/16`, IPv6 `/32`; no asmap).
 pub fn eviction_netgroup(addr: std::net::SocketAddr) -> u64 {
-    match addr.ip() {
-        std::net::IpAddr::V4(v4) => {
-            let o = v4.octets();
-            u64::from(o[0]) << 16 | u64::from(o[1]) << 8 | u64::from(o[2])
-        }
-        std::net::IpAddr::V6(v6) => {
-            let o = v6.octets();
-            u64::from_be_bytes([o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7]])
-        }
-    }
+    crate::netgroup::netgroup(addr, None)
 }
 
 #[cfg(test)]
@@ -182,5 +173,14 @@ mod tests {
         // Fewer than protect budget → nothing to evict.
         let cands: Vec<_> = (0..8).map(|i| cand(i, i, Some(0.1), i, i)).collect();
         assert!(select_inbound_eviction(cands).is_none());
+    }
+
+    #[test]
+    fn eviction_netgroup_ipv4_slash16() {
+        let a: std::net::SocketAddr = "1.2.3.4:1".parse().unwrap();
+        let b: std::net::SocketAddr = "1.2.9.9:1".parse().unwrap();
+        let c: std::net::SocketAddr = "1.3.0.1:1".parse().unwrap();
+        assert_eq!(eviction_netgroup(a), eviction_netgroup(b));
+        assert_ne!(eviction_netgroup(a), eviction_netgroup(c));
     }
 }

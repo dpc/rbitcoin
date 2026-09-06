@@ -222,12 +222,15 @@ pub(crate) struct DialBatchResult {
     pub failed: Vec<(SocketAddr, DialFailKind)>,
 }
 
-/// Dial up to `count` ranked candidates from `book` (excludes `already` + cooldown).
+/// Dial up to `count` ranked candidates from `book`. `already` is exclude
+/// (slots + cooldown). `occupied` is live addrs whose netgroups are skipped
+/// while unused-group candidates remain.
 pub(crate) async fn dial_batch(
     book: &AddrMan,
     next_id: &AtomicUsize,
     count: usize,
     mut already: HashSet<SocketAddr>,
+    occupied: &[SocketAddr],
     magic: Magic,
     local_addr: SocketAddr,
     tip_h: Option<u32>,
@@ -249,7 +252,7 @@ pub(crate) async fn dial_batch(
             .unwrap_or(false)
     };
 
-    let candidates = book.take_dial_candidates(book.len().max(count), &already);
+    let candidates = book.take_dial_candidates(count, &already, occupied);
     let mut handles = Vec::new();
     for addr in candidates {
         if cancelled() {
@@ -420,6 +423,11 @@ pub(crate) fn dial_blocked_addrs(
         }
     }
     blocked
+}
+
+/// Live slot addrs whose netgroups occupy outbound diversity (cooldown is exclude-only).
+pub(crate) fn alive_dial_addrs(slots: &[PeerSlot]) -> Vec<SocketAddr> {
+    slots.iter().filter(|s| s.alive).map(|s| s.addr).collect()
 }
 
 pub(crate) fn expire_addr_cooldown(cooldown: &mut HashMap<SocketAddr, Instant>, now: Instant) {
@@ -831,6 +839,7 @@ mod tests {
             &next,
             0,
             HashSet::new(),
+            &[],
             Magic::REGTEST,
             addr(1),
             Some(0),
@@ -844,6 +853,7 @@ mod tests {
             &next,
             4,
             HashSet::new(),
+            &[],
             Magic::REGTEST,
             addr(1),
             None,
@@ -852,6 +862,14 @@ mod tests {
             None,
         ));
         assert!(r2.slots.is_empty() && r2.failed.is_empty());
+    }
+
+    #[test]
+    fn alive_dial_addrs_skips_dead() {
+        let a = addr(1);
+        let b = addr(2);
+        let slots = vec![dummy_slot(1, a, true), dummy_slot(2, b, false)];
+        assert_eq!(alive_dial_addrs(&slots), vec![a]);
     }
 
     #[test]
