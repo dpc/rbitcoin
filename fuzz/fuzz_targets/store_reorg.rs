@@ -7,9 +7,7 @@ use std::sync::OnceLock;
 use libfuzzer_sys::fuzz_target;
 use rbitcoin_consensus::Milestone;
 use rbitcoin_fuzz::tmp_dir;
-use rbitcoin_net::{
-    check_diff_env, diff_regtest_params, store_reorg_apply, ChainHub,
-};
+use rbitcoin_net::{check_diff_env, diff_regtest_params, store_reorg_apply, ChainHub};
 use rbitcoin_query::Query;
 
 struct Base {
@@ -53,10 +51,7 @@ fn base() -> &'static Base {
         let hub = ChainHub::new(q, diff_regtest_params(), Milestone::NONE);
         hub.ensure_genesis()
             .unwrap_or_else(|e| harness_failure(&format!("genesis: {e}")));
-        Base {
-            hub,
-            _store: store,
-        }
+        Base { hub, _store: store }
     })
 }
 

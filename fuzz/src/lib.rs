@@ -1,5 +1,9 @@
 //! Live Core JSON-RPC + bitcoind spawn for differential and v2 session fuzz.
 
+mod script_kernel;
+
+pub use script_kernel::{compare_script_kernel, kernel_forks, parse_kernel_input, KernelCmp};
+
 use rbitcoin_net::{
     basic_auth_b64, build_jsonrpc_http_request, parse_submitblock_json, split_http_body,
     wait_for_file, BlockOracle, OracleReply,

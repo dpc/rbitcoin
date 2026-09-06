@@ -26,8 +26,29 @@ pub fn verify_tx_scripts_detached(
     prevouts: Vec<bitcoin::TxOut>,
     tx: bitcoin::Transaction,
 ) -> Result<(), ConsensusError> {
+    verify_tx_scripts_detached_forks(prevouts, tx, true, true, true, true, true)
+}
+
+/// Same worker path as [`verify_tx_scripts_detached`] with explicit buried-fork flags.
+pub fn verify_tx_scripts_detached_forks(
+    prevouts: Vec<bitcoin::TxOut>,
+    tx: bitcoin::Transaction,
+    bip65_active: bool,
+    bip112_active: bool,
+    bip66_active: bool,
+    bip16_active: bool,
+    taproot_active: bool,
+) -> Result<(), ConsensusError> {
     script_pool::run_detached_join(move || {
-        let job = ScriptCheckJob::new(prevouts, tx, true, true, true, true, true);
+        let job = ScriptCheckJob::new(
+            prevouts,
+            tx,
+            bip65_active,
+            bip112_active,
+            bip66_active,
+            bip16_active,
+            taproot_active,
+        );
         crate::script::verify_job_all_inputs(&job)
     })
     .unwrap_or_else(|| Err(ConsensusError::BadBlock("script worker disconnected")))
@@ -989,6 +1010,36 @@ mod coverage_tests {
         crate::verify_tx_scripts_detached(prevouts.clone(), tx.clone()).unwrap();
         let job = ScriptCheckJob::new(prevouts, tx, true, true, true, true, true);
         crate::block::verify_scripts_pool(&[job]).unwrap();
+    }
+
+    #[test]
+    fn verify_tx_scripts_detached_forks_op_true_and_op_return() {
+        let spend = |spk: Vec<u8>| {
+            let tx = Transaction {
+                version: TxVersion::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: bitcoin::Txid::from_byte_array([1; 32]),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(1),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                }],
+            };
+            let prevouts = vec![TxOut {
+                value: Amount::from_sat(10),
+                script_pubkey: ScriptBuf::from_bytes(spk),
+            }];
+            crate::verify_tx_scripts_detached_forks(prevouts, tx, true, true, true, true, true)
+        };
+        spend(vec![0x51]).unwrap();
+        assert!(spend(vec![0x6a]).is_err());
     }
 
     #[test]

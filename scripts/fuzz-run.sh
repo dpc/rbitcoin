@@ -27,7 +27,7 @@ wire_dict_for_bin() {
     inv_getdata_wire) printf 'fuzz/dict/inv.dict' ;;
     electrum_json) printf 'fuzz/dict/electrum.dict' ;;
     v2_session) printf 'fuzz/dict/p2p.dict' ;;
-    script_differential|script_verify_differential) printf 'fuzz/dict/script.dict' ;;
+    script_differential|script_verify_differential|script_kernel_differential) printf 'fuzz/dict/script.dict' ;;
     *) printf '' ;;
   esac
 }
@@ -141,6 +141,9 @@ elif [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
 elif [[ "$BIN" == "store_reorg" ]]; then
   sanitizer="address"
   timeout=30
+elif [[ "$BIN" == "script_kernel_differential" ]]; then
+  sanitizer="address"
+  timeout=10
 fi
 
 WRAP="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
@@ -173,6 +176,10 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   if [[ "$BIN" == "store_reorg" ]]; then
     echo "RBITCOIN_HEAD_SCALE=${RBITCOIN_HEAD_SCALE:-tiny}"
     echo "FUZZ_NO_CORE=1"
+  fi
+  if [[ "$BIN" == "script_kernel_differential" ]]; then
+    echo "FUZZ_NO_CORE=1"
+    echo "FUZZ_MAX_LEN=2000"
   fi
   if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "BITCOIND_LISTEN=1"
@@ -317,6 +324,33 @@ if [[ "$BIN" == "store_reorg" ]]; then
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=64 \
+    -seed="$SEED" \
+    2>&1 | tee "$log"
+  st=${PIPESTATUS[0]}
+  set -e
+  if [[ "$st" -ne 0 ]]; then
+    copy_crashers fuzz/artifacts "$CRASHERS"
+    exit "$st"
+  fi
+  fail_if_no_comparisons "$log" 0.01
+  exit 0
+fi
+
+if [[ "$BIN" == "script_kernel_differential" ]]; then
+  merge_seed fuzz/corpus/script_kernel_differential \
+    crates/rbitcoin-consensus/tests/fixtures/script_kernel_op_true.bin
+  merge_seed fuzz/corpus/script_kernel_differential \
+    crates/rbitcoin-consensus/tests/fixtures/script_kernel_op_return.bin
+  for f in crates/rbitcoin-consensus/tests/fixtures/script_fuzz_*.bin; do
+    merge_seed fuzz/corpus/script_kernel_differential "$f"
+  done
+  log="${TMPDIR:-/tmp}/rbtc-fuzz-script-kernel.$$.log"
+  set +e
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" script_kernel_differential -- \
+    -max_total_time="$(fuzz_max_total_time)" \
+    -timeout="$timeout" \
+    -max_len=2000 \
+    -dict=fuzz/dict/script.dict \
     -seed="$SEED" \
     2>&1 | tee "$log"
   st=${PIPESTATUS[0]}

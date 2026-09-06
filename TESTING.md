@@ -255,7 +255,9 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 ## Core differential
 
-Nightly (not a required PR check) `fuzz.yml` runs **16** cargo-fuzz targets:
+Nightly (not a required PR check) `fuzz.yml` runs **16** cargo-fuzz jobs plus
+in-tree extras (`store_reorg`, later `script_kernel_differential` /
+`p2p_sequence_differential`):
 
 | Target | What | Oracle |
 |--------|------|--------|
@@ -276,6 +278,7 @@ Nightly (not a required PR check) `fuzz.yml` runs **16** cargo-fuzz targets:
 | `mempool_differential` | `MempoolHub::test_accept` vs Core `testmempoolaccept`. **Consensus-class only** — Core standardness / fee / RBF / dust is skip (COMPAT) | same tarball, `-acceptnonstdtxn=1` |
 | `script_verify_differential` | `verify_tx_scripts_detached` vs Core `testmempoolaccept` of the parent+spend package. Same policy skip | same tarball, `-acceptnonstdtxn=1` |
 | `store_reorg` | Tiny-hub `{extend, sibling, rewind}` connect churn (ASan, no Core). Store `Corrupt` / probe-exhausted **panics** | none |
+| `script_kernel_differential` | In-process `verify_tx_scripts_detached_forks` vs `bitcoinconsensus::verify_with_flags` (ASan, **fuzz workspace only**) | Core interpreter via `bitcoinconsensus` crate |
 
 ```bash
 ./scripts/fuzz-run.sh                           # block_wire (ASan)
@@ -294,6 +297,8 @@ Nightly (not a required PR check) `fuzz.yml` runs **16** cargo-fuzz targets:
 ./scripts/fuzz-run.sh block_csv_differential    # BIP68 nSequence + version + MTP
 ./scripts/fuzz-run.sh mempool_differential      # test_accept vs testmempoolaccept
 ./scripts/fuzz-run.sh script_verify_differential # detached scripts vs testmempoolaccept package
+./scripts/fuzz-run.sh store_reorg                # tiny hub connect/disconnect, ASan, no Core
+./scripts/fuzz-run.sh script_kernel_differential # ours vs libbitcoinconsensus, ASan, no Core
 ```
 
 `block_differential` prepares every candidate on **regtest genesis** (`prev`

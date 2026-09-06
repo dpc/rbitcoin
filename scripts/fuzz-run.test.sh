@@ -73,6 +73,18 @@ assert_ok "store_reorg dry-run tiny heads" \
 assert_ok "store_reorg ops seed" \
   test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/store_reorg_ops.bin"
 
+out="$(FUZZ_DRY_RUN=1 "$RUN" script_kernel_differential)"
+assert_ok "script_kernel dry-run bin" \
+  grep -qx "FUZZ_BIN=script_kernel_differential" <<<"$out"
+assert_ok "script_kernel dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "script_kernel dry-run no Core" \
+  grep -qx "FUZZ_NO_CORE=1" <<<"$out"
+assert_ok "script_kernel dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/script.dict" <<<"$out"
+assert_ok "script_kernel dry-run max_len 2000" \
+  grep -qx "FUZZ_MAX_LEN=2000" <<<"$out"
+
 out="$(FUZZ_DRY_RUN=1 "$RUN" cmpct_differential)"
 assert_ok "cmpct-differential dry-run bin" \
   grep -qx "FUZZ_BIN=cmpct_differential" <<<"$out"
