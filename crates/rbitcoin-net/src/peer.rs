@@ -950,19 +950,8 @@ pub async fn peer_session_with(
         rbitcoin_log::warn!("p2p: {peer_s} initial getheaders queue failed: {e}");
     }
 
-    let mut peer_wants_headers = false;
-    let mut peer_wtxid_relay = false;
-    let mut peer_send_cmpct = false;
-    // 0 until the peer sends `sendcmpct` v2. Defaulting to 2 made every
-    // relay peer getdata CMPCT and broke tests that only serve `msg_block`.
-    let mut peer_cmpct_version: u32 = 0;
-    let mut pending_headers: HashMap<BlockHash, bitcoin::block::Header> = HashMap::new();
-    let mut pending_blocks = PendingBlocks::new();
-    let mut pending_cmpct: HashMap<BlockHash, PendingCmpct> = HashMap::new();
-    let mut from_this_peer: HashMap<bitcoin::Txid, ()> = HashMap::new();
-    let mut requested_blocks: HashSet<BlockHash> = HashSet::new();
+    let mut follow = PeerFollowState::new();
     let mut requested_since: Option<std::time::Instant> = None;
-    let mut ban_score: u32 = 0;
     let mut rate = PeerRateLimiter::default_limits();
     let mut tx_announce_rx = hub.mempool().map(|m| m.subscribe_announces());
     let mut inv_flush_rx = hub.mempool().map(|m| m.subscribe_inv_flush());
@@ -1013,29 +1002,31 @@ pub async fn peer_session_with(
                         }
                         if maybe_expire_block_requests(
                             hub.as_ref(),
-                            &mut requested_blocks,
+                            &mut follow.requested_blocks,
                             &mut requested_since,
                             std::time::Instant::now(),
                         ) {
                             drain_pending(
                                 hub.as_ref(),
                                 &out_tx,
-                                &mut pending_blocks,
-                                &mut pending_headers,
-                                &mut requested_blocks,
-                                getdata_use_compact(hub.as_ref(), peer_cmpct_version),
+                                &mut follow.pending_blocks,
+                                &mut follow.pending_headers,
+                                &mut follow.requested_blocks,
+                                getdata_use_compact(hub.as_ref(), follow.cmpct_version),
                                 session.as_deref(),
                             )
                             .await?;
-                            if !requested_blocks.is_empty() {
+                            if !follow.requested_blocks.is_empty() {
                                 requested_since = Some(std::time::Instant::now());
                             }
                         }
-                        queue_due_tx_invs(hub.as_ref(), s, &from_this_peer, &out_tx);
+                        queue_due_tx_invs(hub.as_ref(), s, &follow.from_this_peer, &out_tx);
                         let _ = maybe_queue_local_addr(hub.as_ref(), s, &out_tx);
                         let _ = maybe_queue_initial_getheaders(&out_tx, hub.as_ref(), s);
-                        match s.pending_sendcmpct.swap(0, Ordering::Relaxed) {
-                            1 => {
+                        match crate::peers::PendingSendCmpct::from_u8(
+                            s.pending_sendcmpct.swap(0, Ordering::Relaxed),
+                        ) {
+                            crate::peers::PendingSendCmpct::Lb => {
                                 let _ = queue_out(
                                     &out_tx,
                                     NetworkMessage::SendCmpct(SendCmpct {
@@ -1044,7 +1035,7 @@ pub async fn peer_session_with(
                                     }),
                                 );
                             }
-                            2 => {
+                            crate::peers::PendingSendCmpct::Hb => {
                                 let _ = queue_out(
                                     &out_tx,
                                     NetworkMessage::SendCmpct(SendCmpct {
@@ -1053,7 +1044,7 @@ pub async fn peer_session_with(
                                     }),
                                 );
                             }
-                            _ => {}
+                            crate::peers::PendingSendCmpct::None => {}
                         }
                     }
                     continue;
@@ -1078,11 +1069,11 @@ pub async fn peer_session_with(
                     // sendcmpct announce=1: Core sends cmpctblock even
                     // without sendheaders (`p2p_compactblocks` :249).
                     // Skip if NewPoWValidBlock already announced this hash.
-                    if peer_send_cmpct && !from_peer && sent != Some(ev.hash) {
+                    if follow.send_cmpct && !from_peer && sent != Some(ev.hash) {
                         if let Some(msg) = cmpct_announce_msg(
                             hub.as_ref(),
                             &ev.hash,
-                            peer_cmpct_version,
+                            follow.cmpct_version,
                         ) {
                             queue_cmpct_tip_announce(&out_tx, msg)?;
                             if let Some(s) = session.as_ref() {
@@ -1092,7 +1083,7 @@ pub async fn peer_session_with(
                             // sendheaders. Node-to-node always sends
                             // sendheaders; also announce headers so a
                             // longer fork can reorg (`p2p_sendheaders`).
-                            if !peer_wants_headers {
+                            if !follow.wants_headers {
                                 continue;
                             }
                         }
@@ -1100,7 +1091,7 @@ pub async fn peer_session_with(
                     match tip_announce_decision(
                         hub.as_ref(),
                         &ev,
-                        peer_wants_headers,
+                        follow.wants_headers,
                         sent,
                         known,
                         from_peer,
@@ -1151,7 +1142,7 @@ pub async fn peer_session_with(
                         match ann {
                             Ok(ann) => {
                                 let txid = ann.txid;
-                                if from_this_peer.contains_key(&txid) {
+                                if follow.from_this_peer.contains_key(&txid) {
                                     continue;
                                 }
                                 if let Some(mp) = hub.mempool() {
@@ -1224,7 +1215,7 @@ pub async fn peer_session_with(
                     if matches!(flush, Some(Ok(()))) {
                         if let Some(s) = session.as_ref() {
                             s.request_tx_inv();
-                            queue_due_tx_invs(hub.as_ref(), s, &from_this_peer, &out_tx);
+                            queue_due_tx_invs(hub.as_ref(), s, &follow.from_this_peer, &out_tx);
                             // setmocktime also ends a stalling headers-sync.
                             // Restart getheaders here — waiting for the 50ms
                             // tick loses p2p_initial_headers_sync noban
@@ -1244,11 +1235,12 @@ pub async fn peer_session_with(
                         // unregister runs inside the Core disconnect_nodes 5s wait.
                         Err(NetError::Io(_)) => return Ok(()),
                         Err(NetError::MessageTooLarge(n)) => {
-                            ban_score = ban_score.saturating_add(OVERSIZE_BAN_SCORE);
+                            follow.ban_score = follow.ban_score.saturating_add(OVERSIZE_BAN_SCORE);
                             rbitcoin_log::warn!(
-                                "p2p: {peer_s} oversize frame ({n}) ban_score={ban_score}"
+                                "p2p: {peer_s} oversize frame ({n}) ban_score={}",
+                                follow.ban_score
                             );
-                            if ban_score >= BAN_SCORE_THRESHOLD {
+                            if follow.ban_score >= BAN_SCORE_THRESHOLD {
                                 return Err(NetError::Protocol("peer ban score threshold"));
                             }
                             return Err(NetError::MessageTooLarge(n));
@@ -1270,11 +1262,12 @@ pub async fn peer_session_with(
                     }
                     let frame_len = frame.payload_len();
                     if !rate.note(frame_len) {
-                        ban_score = ban_score.saturating_add(RATE_LIMIT_BAN_SCORE);
+                        follow.ban_score = follow.ban_score.saturating_add(RATE_LIMIT_BAN_SCORE);
                         rbitcoin_log::warn!(
-                            "p2p: {peer_s} rate limit exceeded ban_score={ban_score}"
+                            "p2p: {peer_s} rate limit exceeded ban_score={}",
+                            follow.ban_score
                         );
-                        if ban_score >= BAN_SCORE_THRESHOLD {
+                        if follow.ban_score >= BAN_SCORE_THRESHOLD {
                             return Err(NetError::Protocol("peer ban score threshold"));
                         }
                         continue;
@@ -1294,33 +1287,25 @@ pub async fn peer_session_with(
                         }
                         continue;
                     }
-                    let n_req = requested_blocks.len();
+                    let n_req = follow.requested_blocks.len();
                     handle_peer_frame(
                         frame,
                         hub.as_ref(),
                         &out_tx,
-                        &mut peer_wants_headers,
-                        &mut peer_wtxid_relay,
-                        &mut peer_send_cmpct,
-                        &mut peer_cmpct_version,
-                        &mut pending_headers,
-                        &mut pending_blocks,
-                        &mut pending_cmpct,
-                        &mut from_this_peer,
-                        &mut requested_blocks,
-                        &mut ban_score,
+                        &mut follow,
                         session.as_deref(),
                     )
                     .await?;
-                    let n_after = requested_blocks.len();
+                    let n_after = follow.requested_blocks.len();
                     if n_after == 0 {
                         requested_since = None;
                     } else if n_after < n_req || n_req == 0 {
                         requested_since = Some(std::time::Instant::now());
                     }
-                    if ban_score >= BAN_SCORE_THRESHOLD {
+                    if follow.ban_score >= BAN_SCORE_THRESHOLD {
                         rbitcoin_log::warn!(
-                            "p2p: {peer_s} ban score {ban_score} ≥ {BAN_SCORE_THRESHOLD} — disconnect"
+                            "p2p: {peer_s} ban score {} ≥ {BAN_SCORE_THRESHOLD} — disconnect",
+                            follow.ban_score
                         );
                         return Err(NetError::Protocol("peer ban score threshold"));
                     }
@@ -1806,7 +1791,64 @@ fn apply_cmpct_blocktxn(
         .map_err(|_| ())
 }
 
-async fn handle_peer_frame(
+struct PeerFollowState {
+    wants_headers: bool,
+    wtxid_relay: bool,
+    send_cmpct: bool,
+    cmpct_version: u32,
+    pending_headers: HashMap<BlockHash, bitcoin::block::Header>,
+    pending_blocks: PendingBlocks,
+    pending_cmpct: HashMap<BlockHash, PendingCmpct>,
+    from_this_peer: HashMap<bitcoin::Txid, ()>,
+    requested_blocks: HashSet<BlockHash>,
+    ban_score: u32,
+}
+
+impl PeerFollowState {
+    fn new() -> Self {
+        Self {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 0,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0,
+        }
+    }
+}
+
+fn serve_mempool_getdata(
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    session: Option<&crate::peers::LivePeer>,
+    item: bitcoin::p2p::message_blockdata::Inventory,
+    tx: Option<bitcoin::Transaction>,
+) -> Result<(), NetError> {
+    let Some(mp) = hub.mempool() else {
+        return Ok(());
+    };
+    let Some(tx) = tx else {
+        queue_out(out_tx, NetworkMessage::NotFound(vec![item]))?;
+        return Ok(());
+    };
+    let wtxid = tx.compute_wtxid();
+    let announced = session.is_some_and(|s| s.has_announced_wtx(&wtxid));
+    let last_inv = session.map(|s| s.last_inv_sequence()).unwrap_or(1);
+    if announced || mp.is_relay_servable(&wtxid, last_inv) {
+        mp.mark_broadcast(&tx.compute_txid());
+        queue_out(out_tx, NetworkMessage::Tx(tx))?;
+    } else {
+        queue_out(out_tx, NetworkMessage::NotFound(vec![item]))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn handle_peer_frame_for_test(
     frame: FramedMessage,
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -1822,10 +1864,43 @@ async fn handle_peer_frame(
     ban_score: &mut u32,
     session: Option<&crate::peers::LivePeer>,
 ) -> Result<(), NetError> {
+    let mut follow = PeerFollowState {
+        wants_headers: *peer_wants_headers,
+        wtxid_relay: *peer_wtxid_relay,
+        send_cmpct: *peer_send_cmpct,
+        cmpct_version: *peer_cmpct_version,
+        pending_headers: std::mem::take(pending_headers),
+        pending_blocks: std::mem::replace(pending_blocks, PendingBlocks::new()),
+        pending_cmpct: std::mem::take(pending_cmpct),
+        from_this_peer: std::mem::take(from_this_peer),
+        requested_blocks: std::mem::take(requested_blocks),
+        ban_score: *ban_score,
+    };
+    let r = handle_peer_frame(frame, hub, out_tx, &mut follow, session).await;
+    *peer_wants_headers = follow.wants_headers;
+    *peer_wtxid_relay = follow.wtxid_relay;
+    *peer_send_cmpct = follow.send_cmpct;
+    *peer_cmpct_version = follow.cmpct_version;
+    *pending_headers = follow.pending_headers;
+    *pending_blocks = follow.pending_blocks;
+    *pending_cmpct = follow.pending_cmpct;
+    *from_this_peer = follow.from_this_peer;
+    *requested_blocks = follow.requested_blocks;
+    *ban_score = follow.ban_score;
+    r
+}
+
+async fn handle_peer_frame(
+    frame: FramedMessage,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+) -> Result<(), NetError> {
     let msg = match decode_framed_offload(frame).await {
         Ok(m) => m,
         Err(NetError::MessageTooLarge(n)) => {
-            *ban_score = ban_score.saturating_add(OVERSIZE_BAN_SCORE);
+            follow.ban_score = follow.ban_score.saturating_add(OVERSIZE_BAN_SCORE);
             return Err(NetError::MessageTooLarge(n));
         }
         Err(e) => return Err(e),
@@ -1847,7 +1922,7 @@ async fn handle_peer_frame(
         }
         NetworkMessage::Ping(n) => {
             if let Some(s) = session {
-                queue_due_tx_invs(hub, s, from_this_peer, out_tx);
+                queue_due_tx_invs(hub, s, &mut follow.from_this_peer, out_tx);
                 let _ = maybe_queue_local_addr(hub, s, out_tx);
                 // Noban headers-timeout reset: Core re-issues getheaders in the
                 // same SendMessages turn; hook the ping so the official test
@@ -1863,14 +1938,14 @@ async fn handle_peer_frame(
             }
         }
         NetworkMessage::SendHeaders => {
-            *peer_wants_headers = true;
+            follow.wants_headers = true;
         }
         NetworkMessage::SendCmpct(sc) => {
             // Segwit networks: only version 2 (wtxid short-ids) enables HB.
             // Version 1 and version > 2 are ignored (p2p_compactblocks).
             if sc.version == 2 {
-                *peer_send_cmpct = sc.send_compact;
-                *peer_cmpct_version = 2;
+                follow.send_cmpct = sc.send_compact;
+                follow.cmpct_version = 2;
                 if let Some(sess) = session {
                     sess.set_hb_from(sc.send_compact);
                 }
@@ -1878,7 +1953,7 @@ async fn handle_peer_frame(
         }
         NetworkMessage::WtxidRelay => {
             // BIP339 mutual: we already sent wtxidrelay pre-verack; remember theirs.
-            *peer_wtxid_relay = true;
+            follow.wtxid_relay = true;
         }
         NetworkMessage::SendAddrV2 => {
             if let Some(s) = session {
@@ -1889,7 +1964,7 @@ async fn handle_peer_frame(
             if session.is_some_and(|s| {
                 s.conn_type == crate::peers::PeerConnType::AddrFetch && list.len() > 1
             }) {
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
         }
@@ -1897,13 +1972,13 @@ async fn handle_peer_frame(
             if session.is_some_and(|s| {
                 s.conn_type == crate::peers::PeerConnType::AddrFetch && list.len() > 1
             }) {
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
         }
         NetworkMessage::GetHeaders(gh) => {
             if gh.locator_hashes.len() > MAX_LOCATOR_SZ {
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
             let headers = headers_reply_for_getheaders(hub, gh)?;
@@ -1925,7 +2000,7 @@ async fn handle_peer_frame(
         }
         NetworkMessage::GetBlocks(gb) => {
             if gb.locator_hashes.len() > MAX_LOCATOR_SZ {
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
             let headers = headers_for_peer(
@@ -1995,7 +2070,7 @@ async fn handle_peer_frame(
                                     NetworkMessage::Block(block),
                                 )?;
                             } else {
-                                let ver = (*peer_cmpct_version).max(1).min(2);
+                                let ver = (follow.cmpct_version).max(1).min(2);
                                 if let Ok(hsi) =
                                     HeaderAndShortIds::from_block(&block, rand_nonce(), ver, &[0])
                                 {
@@ -2017,52 +2092,15 @@ async fn handle_peer_frame(
                         }
                     }
                     Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
-                        if let Some(mp) = hub.mempool() {
-                            if let Some(tx) = mp.try_get_tx(txid) {
-                                let w = tx.compute_wtxid();
-                                let announced = session.is_some_and(|s| s.has_announced_wtx(&w));
-                                let last_inv = session.map(|s| s.last_inv_sequence()).unwrap_or(1);
-                                // Core FindTxForGetData: info_for_relay (seq < last
-                                // INV) plus announced-to-this-peer. Reorg-reaccept
-                                // uses seq=0 (servable while last_inv starts at 1);
-                                // do not keep a sticky reorg set — a later regular
-                                // accept of the same wtxid must notfound
-                                // (mempool_reorg.py:122).
-                                if announced || mp.is_relay_servable(&w, last_inv) {
-                                    mp.mark_broadcast(txid);
-                                    queue_out(out_tx, NetworkMessage::Tx(tx))?;
-                                } else {
-                                    queue_out(
-                                        out_tx,
-                                        NetworkMessage::NotFound(vec![item.clone()]),
-                                    )?;
-                                }
-                            } else {
-                                queue_out(out_tx, NetworkMessage::NotFound(vec![item.clone()]))?;
-                            }
-                        }
+                        let tx = hub.mempool().and_then(|mp| mp.try_get_tx(txid));
+                        serve_mempool_getdata(hub, out_tx, session, item.clone(), tx)?;
                     }
                     Inventory::WTx(wtxid) => {
                         if let Some(s) = session {
                             rbitcoin_log::trace!("{}", received_getdata_wtx_log(wtxid, s.id));
                         }
-                        if let Some(mp) = hub.mempool() {
-                            if let Some(tx) = mp.try_get_tx_by_wtxid(wtxid) {
-                                let announced = session.is_some_and(|s| s.has_announced_wtx(wtxid));
-                                let last_inv = session.map(|s| s.last_inv_sequence()).unwrap_or(1);
-                                if announced || mp.is_relay_servable(wtxid, last_inv) {
-                                    mp.mark_broadcast(&tx.compute_txid());
-                                    queue_out(out_tx, NetworkMessage::Tx(tx))?;
-                                } else {
-                                    queue_out(
-                                        out_tx,
-                                        NetworkMessage::NotFound(vec![item.clone()]),
-                                    )?;
-                                }
-                            } else {
-                                queue_out(out_tx, NetworkMessage::NotFound(vec![item.clone()]))?;
-                            }
-                        }
+                        let tx = hub.mempool().and_then(|mp| mp.try_get_tx_by_wtxid(wtxid));
+                        serve_mempool_getdata(hub, out_tx, session, item.clone(), tx)?;
                     }
                     _ => {}
                 }
@@ -2094,7 +2132,7 @@ async fn handle_peer_frame(
                 if bad {
                     rbitcoin_log::info!("getblocktxn with out-of-bounds tx indices");
                     // Core Misbehaving: disconnect (p2p_compactblocks :643).
-                    *ban_score = ban_score.saturating_add(BAN_SCORE_THRESHOLD);
+                    follow.ban_score = follow.ban_score.saturating_add(BAN_SCORE_THRESHOLD);
                     if let Some(s) = session {
                         s.request_disconnect();
                     }
@@ -2141,7 +2179,7 @@ async fn handle_peer_frame(
                             s.note_best_known(*h);
                         }
                         if !hub.is_connected(h) {
-                            if !hub.knows_header(h) && !pending_headers.contains_key(h) {
+                            if !hub.knows_header(h) && !follow.pending_headers.contains_key(h) {
                                 if session.is_none_or(|s| {
                                     s.hub()
                                         .is_some_and(|ph| ph.should_getheaders_for_inv(s, *h))
@@ -2206,7 +2244,7 @@ async fn handle_peer_frame(
                     rbitcoin_log::info!(
                         "transaction ({hx}) inv sent in violation of protocol, disconnecting peer"
                     );
-                    punish_disconnect(ban_score, session);
+                    punish_disconnect(&mut follow.ban_score, session);
                     return Ok(());
                 }
             }
@@ -2232,22 +2270,23 @@ async fn handle_peer_frame(
                 {
                     // Headers on a cached-invalid chain: disconnect
                     // (`p2p_unrequested_blocks` step 8 follow-up header).
-                    punish_disconnect(ban_score, session);
+                    punish_disconnect(&mut follow.ban_score, session);
                     return Ok(());
                 }
-                let connecting = header_announcement_connects(hub, pending_headers, prev);
+                let connecting =
+                    header_announcement_connects(hub, &mut follow.pending_headers, prev);
                 for hdr in headers.iter().take(n) {
                     let hash = hdr.block_hash();
                     if let Some(s) = session {
                         s.note_block_from_peer(hash);
                         s.note_best_known(hash);
                     }
-                    if pending_headers.len() >= MAX_PENDING_HEADERS
-                        && !pending_headers.contains_key(&hash)
+                    if follow.pending_headers.len() >= MAX_PENDING_HEADERS
+                        && !follow.pending_headers.contains_key(&hash)
                     {
-                        pending_headers.clear();
+                        follow.pending_headers.clear();
                     }
-                    pending_headers.insert(hash, *hdr);
+                    follow.pending_headers.insert(hash, *hdr);
                 }
                 if !connecting {
                     if n < MAX_HEADERS_RESULTS {
@@ -2256,11 +2295,12 @@ async fn handle_peer_frame(
                 } else {
                     let last = headers[n - 1].block_hash();
                     // Core `chain_start.nHeight + headers.size()`. One-header
-                    // tip announces still accumulate via `pending_headers`
+                    // tip announces still accumulate via `follow.pending_headers`
                     // (`p2p_headers_sync_with_minchainwork` height=14).
-                    let announced_h = announced_headers_height(hub, pending_headers, last);
+                    let announced_h =
+                        announced_headers_height(hub, &mut follow.pending_headers, last);
                     let noban = session.is_some_and(|s| s.hub().is_some_and(|ph| ph.is_noban()));
-                    let work_cmp = announced_work_cmp(hub, pending_headers, last);
+                    let work_cmp = announced_work_cmp(hub, &mut follow.pending_headers, last);
                     let our_tip = hub.tip_height().unwrap_or(0);
                     if announced_tip_is_hopeless(our_tip, announced_h, work_cmp) && !noban {
                         rbitcoin_log::info!(
@@ -2271,9 +2311,9 @@ async fn handle_peer_frame(
                         }
                         return Ok(());
                     }
-                    if !header_path_meets_minwork(hub, pending_headers, last) {
+                    if !header_path_meets_minwork(hub, &mut follow.pending_headers, last) {
                         if noban {
-                            persist_pending_header_path(hub, pending_headers, last);
+                            persist_pending_header_path(hub, &mut follow.pending_headers, last);
                             rbitcoin_log::info!("{}", synchronizing_blockheaders_log(announced_h));
                         } else {
                             rbitcoin_log::info!("{}", ignoring_low_work_chain_log(announced_h));
@@ -2281,22 +2321,24 @@ async fn handle_peer_frame(
                         // Core: do not download bodies until the chain meets
                         // `-minimumchainwork` (`p2p_headers_sync_with_minchainwork`).
                     } else {
-                        persist_pending_header_path(hub, pending_headers, last);
+                        persist_pending_header_path(hub, &mut follow.pending_headers, last);
                         rbitcoin_log::info!("{}", synchronizing_blockheaders_log(announced_h));
                         let mut want = fetchable_header_path_bodies(
                             hub,
-                            pending_headers,
+                            &follow.pending_headers,
                             last,
-                            pending_blocks,
-                            requested_blocks,
+                            &follow.pending_blocks,
+                            &follow.requested_blocks,
                         );
-                        want.truncate(MAX_SERVE_BLOCKS.saturating_sub(requested_blocks.len()));
+                        want.truncate(
+                            MAX_SERVE_BLOCKS.saturating_sub(follow.requested_blocks.len()),
+                        );
                         queue_block_getdata(
                             hub,
                             out_tx,
-                            requested_blocks,
+                            &mut follow.requested_blocks,
                             &want,
-                            getdata_use_compact(hub, *peer_cmpct_version),
+                            getdata_use_compact(hub, follow.cmpct_version),
                         )?;
                     }
                 }
@@ -2310,7 +2352,7 @@ async fn handle_peer_frame(
             let hash = block.block_hash();
             if !block.check_merkle_root() {
                 rbitcoin_log::info!("Block mutated: bad-txnmrklroot, hashMerkleRoot mismatch");
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
             if let Some(s) = session {
@@ -2318,7 +2360,7 @@ async fn handle_peer_frame(
                 s.note_best_known(hash);
                 s.note_last_block();
             }
-            if !requested_blocks.contains(&hash) {
+            if !follow.requested_blocks.contains(&hash) {
                 if hub.header_below_minwork(&block.header) {
                     rbitcoin_log::info!("{}", accept_block_header_nodos_log(hash));
                     return Ok(());
@@ -2326,10 +2368,10 @@ async fn handle_peer_frame(
                 let prev = block.header.prev_blockhash;
                 if prev.to_byte_array() != [0u8; 32]
                     && !hub.knows_header(&prev)
-                    && !pending_headers.contains_key(&prev)
+                    && !follow.pending_headers.contains_key(&prev)
                 {
                     rbitcoin_log::info!("AcceptBlock FAILED (prev-blk-not-found)");
-                    punish_disconnect(ban_score, session);
+                    punish_disconnect(&mut follow.ban_score, session);
                     return Ok(());
                 }
                 if hub.unrequested_weaker_than_tip(&block.header) {
@@ -2342,54 +2384,54 @@ async fn handle_peer_frame(
                 }
             }
             let _ = hub.ensure_header(&block.header);
-            pending_cmpct.remove(&hash);
-            requested_blocks.remove(&hash);
-            pending_headers.entry(hash).or_insert(block.header);
-            if !any_header_path_meets_minwork(hub, pending_headers, hash) {
-                pending_blocks.insert(hash, block.clone());
+            follow.pending_cmpct.remove(&hash);
+            follow.requested_blocks.remove(&hash);
+            follow.pending_headers.entry(hash).or_insert(block.header);
+            if !any_header_path_meets_minwork(hub, &mut follow.pending_headers, hash) {
+                follow.pending_blocks.insert(hash, block.clone());
                 return Ok(());
             }
             relay_new_pow_valid_block(hub, block, session);
             match hub.accept_received_block_async(block.clone()).await {
                 Ok(AcceptOutcome::Accepted { .. }) => {
-                    pending_blocks.remove(&hash);
-                    pending_headers.remove(&hash);
+                    follow.pending_blocks.remove(&hash);
+                    follow.pending_headers.remove(&hash);
                     maybe_select_hb_if_relay(hub, session);
                     drain_pending(
                         hub,
                         out_tx,
-                        pending_blocks,
-                        pending_headers,
-                        requested_blocks,
-                        getdata_use_compact(hub, *peer_cmpct_version),
+                        &mut follow.pending_blocks,
+                        &mut follow.pending_headers,
+                        &mut follow.requested_blocks,
+                        getdata_use_compact(hub, follow.cmpct_version),
                         session,
                     )
                     .await?;
                 }
                 Ok(AcceptOutcome::AlreadyHave) => {
-                    pending_blocks.remove(&hash);
-                    pending_headers.remove(&hash);
+                    follow.pending_blocks.remove(&hash);
+                    follow.pending_headers.remove(&hash);
                     drain_pending(
                         hub,
                         out_tx,
-                        pending_blocks,
-                        pending_headers,
-                        requested_blocks,
-                        getdata_use_compact(hub, *peer_cmpct_version),
+                        &mut follow.pending_blocks,
+                        &mut follow.pending_headers,
+                        &mut follow.requested_blocks,
+                        getdata_use_compact(hub, follow.cmpct_version),
                         session,
                     )
                     .await?;
                 }
                 Ok(AcceptOutcome::IgnoredWeaker) => {
-                    pending_blocks.remove(&hash);
-                    pending_headers.remove(&hash);
+                    follow.pending_blocks.remove(&hash);
+                    follow.pending_headers.remove(&hash);
                     drain_pending(
                         hub,
                         out_tx,
-                        pending_blocks,
-                        pending_headers,
-                        requested_blocks,
-                        getdata_use_compact(hub, *peer_cmpct_version),
+                        &mut follow.pending_blocks,
+                        &mut follow.pending_headers,
+                        &mut follow.requested_blocks,
+                        getdata_use_compact(hub, follow.cmpct_version),
                         session,
                     )
                     .await?;
@@ -2418,14 +2460,14 @@ async fn handle_peer_frame(
             }
             if !crate::compact::prefilled_indexes_ok(&hsi) {
                 rbitcoin_log::info!("invalid index in cmpctblock message");
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
             // Child of a cached-invalid block: Core `BLOCK_INVALID_PREV`.
             // Same-hash cached invalid via compact stays connected
             // (`p2p_compactblocks` `test_invalid_tx_in_compactblock`).
             if hub.is_block_invalid(&hsi.header.prev_blockhash) {
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
             if hub.is_block_invalid(&hash) {
@@ -2439,50 +2481,50 @@ async fn handle_peer_frame(
                 // header path before reconstruct.
                 let _ = queue_getheaders(out_tx, hub, session, true, None);
             }
-            pending_headers.entry(hash).or_insert(hsi.header);
-            if !any_header_path_meets_minwork(hub, pending_headers, hash) {
+            follow.pending_headers.entry(hash).or_insert(hsi.header);
+            if !any_header_path_meets_minwork(hub, &mut follow.pending_headers, hash) {
                 // Below -minimumchainwork: keep header, do not reconstruct/accept.
             } else {
                 let mut ancestors: Vec<BlockHash> = fetchable_header_path_bodies(
                     hub,
-                    pending_headers,
+                    &follow.pending_headers,
                     hash,
-                    pending_blocks,
-                    requested_blocks,
+                    &follow.pending_blocks,
+                    &follow.requested_blocks,
                 )
                 .into_iter()
                 .filter(|h| *h != hash)
                 .collect();
-                ancestors.truncate(MAX_SERVE_BLOCKS.saturating_sub(requested_blocks.len()));
+                ancestors.truncate(MAX_SERVE_BLOCKS.saturating_sub(follow.requested_blocks.len()));
                 queue_block_getdata(
                     hub,
                     out_tx,
-                    requested_blocks,
+                    &mut follow.requested_blocks,
                     &ancestors,
-                    getdata_use_compact(hub, *peer_cmpct_version),
+                    getdata_use_compact(hub, follow.cmpct_version),
                 )?;
                 if compact_header_low_work(hub, &hsi.header) {
                     let id = session.map(|s| s.id).unwrap_or(0);
                     rbitcoin_log::info!("Ignoring low-work compact block from peer {id}");
                 } else if hub.tip_hash() != Some(hsi.header.prev_blockhash)
                     && hub.tip_hash() != Some(hash)
-                    && !requested_blocks.contains(&hash)
+                    && !follow.requested_blocks.contains(&hash)
                     && hub.unrequested_weaker_than_tip(&hsi.header)
                 {
                     // Unsolicited weaker compact that does not extend our tip:
                     // header-only (fingerprint / stale). A better-work fork
                     // must reconstruct (`p2p_sendheaders` mine_reorg).
                     let prev = hsi.header.prev_blockhash;
-                    if hub.knows_header(&prev) || pending_headers.contains_key(&prev) {
+                    if hub.knows_header(&prev) || follow.pending_headers.contains_key(&prev) {
                         let _ = hub.ensure_header(&hsi.header);
                     } else {
                         let _ = queue_getheaders(out_tx, hub, session, false, None);
                     }
                 } else if hub.has_block(&hash) {
-                    requested_blocks.remove(&hash);
+                    follow.requested_blocks.remove(&hash);
                 } else if let Some(block) = try_fill_cmpct(hub, &hsi, 2) {
-                    requested_blocks.remove(&hash);
-                    pending_cmpct.remove(&hash);
+                    follow.requested_blocks.remove(&hash);
+                    follow.pending_cmpct.remove(&hash);
                     relay_new_pow_valid_block(hub, &block, session);
                     let accepted = matches!(
                         hub.accept_received_block_async(block).await,
@@ -2498,10 +2540,10 @@ async fn handle_peer_frame(
                     drain_pending(
                         hub,
                         out_tx,
-                        pending_blocks,
-                        pending_headers,
-                        requested_blocks,
-                        getdata_use_compact(hub, *peer_cmpct_version),
+                        &mut follow.pending_blocks,
+                        &mut follow.pending_headers,
+                        &mut follow.requested_blocks,
+                        getdata_use_compact(hub, follow.cmpct_version),
                         session,
                     )
                     .await?;
@@ -2511,10 +2553,10 @@ async fn handle_peer_frame(
                             out_tx,
                             NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
                         )?;
-                    } else if pending_cmpct.len() >= MAX_PENDING_CMPCT
-                        && !pending_cmpct.contains_key(&hash)
+                    } else if follow.pending_cmpct.len() >= MAX_PENDING_CMPCT
+                        && !follow.pending_cmpct.contains_key(&hash)
                     {
-                        *ban_score = ban_score.saturating_add(10);
+                        follow.ban_score = follow.ban_score.saturating_add(10);
                         queue_out(
                             out_tx,
                             NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
@@ -2528,7 +2570,7 @@ async fn handle_peer_frame(
                             // Parallel inbound slot already taken
                             // (`p2p_compactblocks` :929).
                         } else {
-                            pending_cmpct.insert(
+                            follow.pending_cmpct.insert(
                                 hash,
                                 PendingCmpct {
                                     hsi: hsi.clone(),
@@ -2568,16 +2610,16 @@ async fn handle_peer_frame(
             let hash = bt.block_hash;
             if session.is_some_and(|s| s.has_failed_cmpct(&hash)) {
                 rbitcoin_log::info!("previous compact block reconstruction attempt failed");
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
-            if let Some(pc) = pending_cmpct.remove(&hash) {
+            if let Some(pc) = follow.pending_cmpct.remove(&hash) {
                 match apply_cmpct_blocktxn(hub, &pc, bt) {
                     Ok(block) => {
                         relay_new_pow_valid_block(hub, &block, session);
                         match hub.accept_received_block_async(block).await {
                             Ok(AcceptOutcome::Accepted { .. }) => {
-                                requested_blocks.remove(&hash);
+                                follow.requested_blocks.remove(&hash);
                                 maybe_select_hb_if_relay(hub, session);
                                 if let Some(s) = session {
                                     if let Some(h) = hub.tip_height() {
@@ -2590,23 +2632,23 @@ async fn handle_peer_frame(
                                 drain_pending(
                                     hub,
                                     out_tx,
-                                    pending_blocks,
-                                    pending_headers,
-                                    requested_blocks,
-                                    getdata_use_compact(hub, *peer_cmpct_version),
+                                    &mut follow.pending_blocks,
+                                    &mut follow.pending_headers,
+                                    &mut follow.requested_blocks,
+                                    getdata_use_compact(hub, follow.cmpct_version),
                                     session,
                                 )
                                 .await?;
                             }
                             Ok(_) => {
-                                requested_blocks.remove(&hash);
+                                follow.requested_blocks.remove(&hash);
                                 drain_pending(
                                     hub,
                                     out_tx,
-                                    pending_blocks,
-                                    pending_headers,
-                                    requested_blocks,
-                                    getdata_use_compact(hub, *peer_cmpct_version),
+                                    &mut follow.pending_blocks,
+                                    &mut follow.pending_headers,
+                                    &mut follow.requested_blocks,
+                                    getdata_use_compact(hub, follow.cmpct_version),
                                     session,
                                 )
                                 .await?;
@@ -2621,7 +2663,7 @@ async fn handle_peer_frame(
                                 if let Some(s) = session {
                                     s.note_failed_cmpct(hash);
                                 }
-                                *ban_score = ban_score.saturating_add(10);
+                                follow.ban_score = follow.ban_score.saturating_add(10);
                                 queue_out(
                                     out_tx,
                                     NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
@@ -2634,7 +2676,7 @@ async fn handle_peer_frame(
                         if let Some(s) = session {
                             s.note_failed_cmpct(hash);
                         }
-                        *ban_score = ban_score.saturating_add(10);
+                        follow.ban_score = follow.ban_score.saturating_add(10);
                         queue_out(
                             out_tx,
                             NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
@@ -2643,7 +2685,7 @@ async fn handle_peer_frame(
                 }
             } else {
                 // Unsolicited or late blocktxn — mild penalty.
-                *ban_score = ban_score.saturating_add(5);
+                follow.ban_score = follow.ban_score.saturating_add(5);
             }
         }
         NetworkMessage::Tx(tx) => {
@@ -2656,7 +2698,7 @@ async fn handle_peer_frame(
                 rbitcoin_log::info!(
                     "transaction sent in violation of protocol, disconnecting peer={id}"
                 );
-                punish_disconnect(ban_score, session);
+                punish_disconnect(&mut follow.ban_score, session);
                 return Ok(());
             }
             if let Some(mp) = hub.mempool() {
@@ -2664,7 +2706,7 @@ async fn handle_peer_frame(
                     || session.is_some_and(|s| s.hub().is_some_and(|ph| ph.is_relay_perm()))
                 {
                     let txid = tx.compute_txid();
-                    insert_capped_txid(from_this_peer, txid, FROM_THIS_PEER_CAP);
+                    insert_capped_txid(&mut follow.from_this_peer, txid, FROM_THIS_PEER_CAP);
                     match mp.accept_tx_async(tx.clone()).await {
                         Ok(r) => {
                             if let Some(s) = session {
@@ -2706,7 +2748,7 @@ async fn handle_peer_frame(
         | NetworkMessage::FilterLoad(_)
         | NetworkMessage::FilterAdd(_)
         | NetworkMessage::FilterClear => {
-            punish_disconnect(ban_score, session);
+            punish_disconnect(&mut follow.ban_score, session);
             return Ok(());
         }
         NetworkMessage::GetAddr => {

@@ -11,6 +11,10 @@ before 1.0).
 
 ### Changed
 
+- **P2P follow session is `PeerFollowState`:** `handle_peer_frame` takes one
+  session bag instead of twelve mut maps. Compact `sendcmpct` preference is
+  `PendingSendCmpct::{None, Lb, Hb}` (`AtomicU8` payload unchanged). Tx and
+  wtxid GetData share `serve_mempool_getdata`.
 - **Code shape:** [`docs/code-shape.md`](docs/code-shape.md) owns control
   flow, naming, and composition (CONTRIBUTING principle 10).
   [`docs/quality.md`](docs/quality.md) **Q-61** is the 0.6.0 readability

@@ -77,6 +77,25 @@ pub struct DialRequest {
     pub typ: PeerConnType,
 }
 
+/// Queued `sendcmpct` to write on the next heartbeat (`AtomicU8` payload).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PendingSendCmpct {
+    None = 0,
+    Lb = 1,
+    Hb = 2,
+}
+
+impl PendingSendCmpct {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Lb,
+            2 => Self::Hb,
+            _ => Self::None,
+        }
+    }
+}
+
 /// One live session (RPC snapshot + disconnect flag + byte counters).
 pub struct LivePeer {
     pub id: u64,
@@ -96,7 +115,7 @@ pub struct LivePeer {
     pub hb_to: AtomicBool,
     /// They announce new tips as `cmpctblock` to us (`sendcmpct` they sent).
     pub hb_from: AtomicBool,
-    /// Session should send `sendcmpct`: 0 = none, 1 = off, 2 = on.
+    /// Session should send `sendcmpct` (`PendingSendCmpct` as u8).
     pub pending_sendcmpct: std::sync::atomic::AtomicU8,
     /// Last header we announced to this peer (Core `pindexBestHeaderSent`).
     best_header_sent: Mutex<Option<BlockHash>>,
@@ -1450,13 +1469,15 @@ impl PeerHub {
                 let evicted = sel.remove(evict_at);
                 if let Some(p) = self.get(evicted) {
                     p.set_hb_to(false);
-                    p.pending_sendcmpct.store(1, Ordering::Relaxed);
+                    p.pending_sendcmpct
+                        .store(PendingSendCmpct::Lb as u8, Ordering::Relaxed);
                 }
             }
         }
         sel.push(id);
         peer.set_hb_to(true);
-        peer.pending_sendcmpct.store(2, Ordering::Relaxed);
+        peer.pending_sendcmpct
+            .store(PendingSendCmpct::Hb as u8, Ordering::Relaxed);
     }
 
     pub fn addconnection(&self, addr: SocketAddr, typ: PeerConnType) -> Result<(), String> {
@@ -1603,6 +1624,18 @@ mod tests {
             start_height: 0,
             relay: true,
         }
+    }
+
+    #[test]
+    fn pending_sendcmpct_from_u8_maps_wire_payload() {
+        assert_eq!(PendingSendCmpct::from_u8(0), PendingSendCmpct::None);
+        assert_eq!(PendingSendCmpct::from_u8(1), PendingSendCmpct::Lb);
+        assert_eq!(PendingSendCmpct::from_u8(2), PendingSendCmpct::Hb);
+        assert_eq!(PendingSendCmpct::from_u8(3), PendingSendCmpct::None);
+        assert_eq!(PendingSendCmpct::from_u8(255), PendingSendCmpct::None);
+        assert_eq!(PendingSendCmpct::None as u8, 0);
+        assert_eq!(PendingSendCmpct::Lb as u8, 1);
+        assert_eq!(PendingSendCmpct::Hb as u8, 2);
     }
 
     #[test]
