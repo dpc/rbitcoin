@@ -11,6 +11,9 @@ before 1.0).
 
 ### Changed
 
+- **Mempool admit/evict helpers:** conflict scan is shared by prepare and the
+  write-lock re-check; eviction is one worst-chunk loop; P2P staged admit
+  is `admit_staged`. Policy strings and persist order unchanged.
 - **Query SH write-behind is `ShWriteBehind`:** same mutexes and condvar as
   before (confirm enqueue vs Electrum join stay separate). `IndexMode`
   names the archive-spend and SH-enqueue products. Body-txid head probe is

@@ -269,9 +269,18 @@ pub struct PreparedAdmit {
     pub weight: u64,
     pub prevouts: Vec<TxOut>,
     pub chain_coins: Vec<Option<Coin>>,
-    pub parent_txids: BTreeSet<Txid>,
-    pub direct_conflicts: BTreeSet<Txid>,
     pub utxo_us: u64,
+}
+
+/// Graph spend edges for one tx (conflicts + mempool parents).
+struct ConflictScan {
+    direct_conflicts: BTreeSet<Txid>,
+    parent_txids: BTreeSet<Txid>,
+}
+
+enum EvictUntil {
+    FreeSlot,
+    WeightBudget,
 }
 
 /// Mempool with RAM TxGraph layered on durable store.
@@ -464,6 +473,43 @@ impl ActiveMempool {
         Ok(r)
     }
 
+    fn note_conflict_and_parent(
+        &self,
+        txid: Txid,
+        op: OutPoint,
+        scan: &mut ConflictScan,
+    ) -> Result<Option<Txid>, AcceptError> {
+        if let Some(c) = self.graph.conflict_txid(&op) {
+            if c != txid {
+                scan.direct_conflicts.insert(c);
+            }
+        }
+        if let Some(creator) = self.graph.creator(&op) {
+            if !self.graph.mempool_utxo(&op) {
+                if let Some(c) = self.graph.conflict_txid(&op) {
+                    scan.direct_conflicts.insert(c);
+                } else {
+                    return Err(AcceptError::Policy("mempool double-spend"));
+                }
+            }
+            scan.parent_txids.insert(creator);
+            return Ok(Some(creator));
+        }
+        Ok(None)
+    }
+
+    fn scan_conflicts_and_parents(&self, tx: &Transaction) -> Result<ConflictScan, AcceptError> {
+        let txid = tx.compute_txid();
+        let mut scan = ConflictScan {
+            direct_conflicts: BTreeSet::new(),
+            parent_txids: BTreeSet::new(),
+        };
+        for inp in &tx.input {
+            let _ = self.note_conflict_and_parent(txid, inp.previous_output, &mut scan)?;
+        }
+        Ok(scan)
+    }
+
     /// Graph peek + UTXO resolve (`&self`: callers may hold a read lock).
     /// Does not park orphans; [`Self::park_orphan`] does that under write.
     pub fn prepare_admit(
@@ -504,27 +550,16 @@ impl ActiveMempool {
         let t_utxo = Instant::now();
         let mut prevouts: Vec<TxOut> = Vec::with_capacity(tx.input.len());
         let mut chain_coins: Vec<Option<Coin>> = Vec::with_capacity(tx.input.len());
-        let mut parent_txids = BTreeSet::new();
-        let mut direct_conflicts: BTreeSet<Txid> = BTreeSet::new();
+        let mut scan = ConflictScan {
+            direct_conflicts: BTreeSet::new(),
+            parent_txids: BTreeSet::new(),
+        };
         let mut missing_parents: BTreeSet<Txid> = BTreeSet::new();
         let mut input_value = 0u64;
         for inp in &tx.input {
             let op = inp.previous_output;
-            if let Some(c) = self.graph.conflict_txid(&op) {
-                if c != txid {
-                    direct_conflicts.insert(c);
-                }
-            }
-            let (txout, chain_coin) = if let Some(creator) = self.graph.creator(&op) {
-                if !self.graph.mempool_utxo(&op) {
-                    // Spent in-mempool — must RBF the conflict set.
-                    if let Some(c) = self.graph.conflict_txid(&op) {
-                        direct_conflicts.insert(c);
-                    } else {
-                        return Err(AcceptError::Policy("mempool double-spend"));
-                    }
-                }
-                parent_txids.insert(creator);
+            let mempool_parent = self.note_conflict_and_parent(txid, op, &mut scan)?;
+            let (txout, chain_coin) = if let Some(creator) = mempool_parent {
                 let parent_tx = self
                     .bodies
                     .get(&creator)
@@ -547,6 +582,7 @@ impl ActiveMempool {
             prevouts.push(txout);
             chain_coins.push(chain_coin);
         }
+        let _ = scan;
         let utxo_us = t_utxo.elapsed().as_micros() as u64;
 
         if !missing_parents.is_empty() {
@@ -583,8 +619,6 @@ impl ActiveMempool {
             weight,
             prevouts,
             chain_coins,
-            parent_txids,
-            direct_conflicts,
             utxo_us,
         })
     }
@@ -637,7 +671,8 @@ impl ActiveMempool {
         prep: PreparedAdmit,
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
-        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep, tip)?;
+        let _ = tip;
+        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep)?;
         let txid = tx.compute_txid();
 
         let mut replaced_scripthashes: Vec<[u8; 32]> = Vec::new();
@@ -711,7 +746,8 @@ impl ActiveMempool {
         prep: PreparedAdmit,
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
-        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep, tip)?;
+        let _ = tip;
+        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep)?;
         Ok(AcceptResult {
             txid: tx.compute_txid(),
             fee_sat,
@@ -726,9 +762,7 @@ impl ActiveMempool {
         &self,
         tx: &Transaction,
         prep: PreparedAdmit,
-        tip: ChainTipCtx,
     ) -> Result<(BTreeSet<Txid>, u64, u64), AcceptError> {
-        let _ = tip;
         let txid = tx.compute_txid();
         if let Some(live) = self.graph.get(&txid) {
             if live.wtxid == tx.compute_wtxid() {
@@ -740,24 +774,10 @@ impl ActiveMempool {
             return Err(AcceptError::Orphaned(txid));
         }
 
-        let mut direct_conflicts = BTreeSet::new();
-        let mut parent_txids = BTreeSet::new();
+        let scan = self.scan_conflicts_and_parents(tx)?;
         for (i, inp) in tx.input.iter().enumerate() {
             let op = inp.previous_output;
-            if let Some(c) = self.graph.conflict_txid(&op) {
-                if c != txid {
-                    direct_conflicts.insert(c);
-                }
-            }
             if let Some(creator) = self.graph.creator(&op) {
-                if !self.graph.mempool_utxo(&op) {
-                    if let Some(c) = self.graph.conflict_txid(&op) {
-                        direct_conflicts.insert(c);
-                    } else {
-                        return Err(AcceptError::Policy("mempool double-spend"));
-                    }
-                }
-                parent_txids.insert(creator);
                 if self.bodies.get(&creator).is_none() {
                     return Err(AcceptError::Durable("parent body missing".into()));
                 }
@@ -765,16 +785,14 @@ impl ActiveMempool {
                 return Err(AcceptError::MissingPrevout(op));
             }
         }
-        let _ = prep.direct_conflicts;
-        let _ = prep.parent_txids;
 
         let fee_sat = prep.fee_sat;
         let weight = prep.weight;
         let admit_fee =
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
 
-        let conflict_set = if !direct_conflicts.is_empty() {
-            let direct: Vec<Txid> = direct_conflicts.into_iter().collect();
+        let conflict_set = if !scan.direct_conflicts.is_empty() {
+            let direct: Vec<Txid> = scan.direct_conflicts.into_iter().collect();
             let set = self.graph.conflict_set(&direct);
             let (old_fee, old_weight) = self.graph.set_fee_weight(&set);
             let (direct_fee, direct_weight) = self
@@ -794,7 +812,8 @@ impl ActiveMempool {
         } else {
             BTreeSet::new()
         };
-        let parent_txids: BTreeSet<Txid> = parent_txids
+        let parent_txids: BTreeSet<Txid> = scan
+            .parent_txids
             .into_iter()
             .filter(|p| !conflict_set.contains(p))
             .collect();
@@ -883,29 +902,7 @@ impl ActiveMempool {
             Err(MempoolError::Full) => {}
             Err(e) => return Err(e.into()),
         }
-        let mut guard = 0u32;
-        while !self.store.has_free_slot() && guard < 10_000 {
-            guard += 1;
-            let Some((_rep, chunk)) = self.graph.worst_chunk() else {
-                break;
-            };
-            if chunk.txids.len() == 1 && protect == chunk.txids.first().copied() {
-                break;
-            }
-            let mut removed = 0usize;
-            for t in &chunk.txids {
-                if protect == Some(*t) {
-                    continue;
-                }
-                if self.graph.contains(t) {
-                    self.remove_txid(t)?;
-                    removed += 1;
-                }
-            }
-            if removed == 0 {
-                break;
-            }
-        }
+        self.evict_worst_chunks(protect, EvictUntil::FreeSlot)?;
         if self.store.has_free_slot() {
             return Ok(());
         }
@@ -916,25 +913,55 @@ impl ActiveMempool {
     ///
     /// Prefer not to evict `protect` (the just-accepted tx). Returns how many removed.
     pub fn evict_to_budget(&mut self, protect: Option<Txid>) -> Result<usize, AcceptError> {
+        self.evict_worst_chunks(protect, EvictUntil::WeightBudget)
+    }
+
+    fn evict_worst_chunks(
+        &mut self,
+        protect: Option<Txid>,
+        until: EvictUntil,
+    ) -> Result<usize, AcceptError> {
         let mut removed = 0usize;
-        while self.graph.total_weight() > self.max_weight {
-            let Some((_rep, chunk)) = self.graph.worst_chunk() else {
-                break;
-            };
-            if chunk.txids.len() == 1 && protect == chunk.txids.first().copied() {
+        let mut guard = 0u32;
+        loop {
+            match until {
+                EvictUntil::FreeSlot => {
+                    if self.store.has_free_slot() || guard >= 10_000 {
+                        break;
+                    }
+                    guard += 1;
+                }
+                EvictUntil::WeightBudget => {
+                    if self.graph.total_weight() <= self.max_weight {
+                        break;
+                    }
+                }
+            }
+            let n = self.evict_worst_chunk_once(protect)?;
+            if n == 0 {
                 break;
             }
-            for t in &chunk.txids {
-                if protect == Some(*t) {
-                    continue;
-                }
-                if self.graph.contains(t) {
-                    self.remove_txid(t)?;
-                    removed += 1;
-                }
+            removed = removed.saturating_add(n);
+        }
+        Ok(removed)
+    }
+
+    /// One worst-chunk pass. Returns how many txs this pass removed (0 = stop).
+    fn evict_worst_chunk_once(&mut self, protect: Option<Txid>) -> Result<usize, AcceptError> {
+        let Some((_rep, chunk)) = self.graph.worst_chunk() else {
+            return Ok(0);
+        };
+        if chunk.txids.len() == 1 && protect == chunk.txids.first().copied() {
+            return Ok(0);
+        }
+        let mut removed = 0usize;
+        for t in &chunk.txids {
+            if protect == Some(*t) {
+                continue;
             }
-            if removed == 0 {
-                break;
+            if self.graph.contains(t) {
+                self.remove_txid(t)?;
+                removed += 1;
             }
         }
         Ok(removed)
@@ -2615,14 +2642,57 @@ mod tests {
         let r = mp.accept_tx(&tx, &utxos, TIP_OK);
         assert!(
             r.is_ok(),
-            "expected free-slot (evict or grow), got {:?}",
+            "expected grow (weight budget has headroom), got {:?}",
             r.err().map(|e| e.to_string())
         );
-        // Evict-for-slot may keep cap=4; grow path raises it. Either is fine —
-        // must never be Durable(corrupt: slot table full).
-        assert_eq!(mp.live_count(), 5.min(mp.store.meta().slot_cap as usize));
-        // Graph and store agree we still hold a full-ish set.
-        assert!(mp.live_count() >= 4);
+        assert!(
+            mp.store.meta().slot_cap > 4,
+            "ensure_free_slot must grow before it evicts"
+        );
+        assert_eq!(mp.live_count(), 5);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evict_to_budget_protects_and_stops_when_pass_removes_zero() {
+        let dir = tmp_dir();
+        let mut mp = ActiveMempool::open_or_create_with_limit(&dir, 400).unwrap();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let tx = spend_tx(op, 99_000);
+        mp.accept_tx(&tx, &utxos, TIP_OK).unwrap();
+        let id = tx.compute_txid();
+        let before = mp.live_count();
+        let n = mp.evict_to_budget(Some(id)).unwrap();
+        assert_eq!(n, 0, "protecting the only live tx is a no-op pass");
+        assert_eq!(mp.live_count(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_rejects_conflict_that_appeared_after_prepare() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let first = spend_tx(op, 50_000);
+        let second = spend_tx(op, 99_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let prep = mp
+            .prepare_admit(&second, &utxos, TIP_OK, 0, false)
+            .expect("prepare while utxo free");
+        mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
+        let err = mp
+            .commit_after_script(&second, prep, TIP_OK)
+            .expect_err("write-lock re-check must fail closed");
+        assert!(
+            matches!(
+                err,
+                AcceptError::RbfInsufficient
+                    | AcceptError::Policy(_)
+                    | AcceptError::MissingPrevout(_)
+            ),
+            "{err}"
+        );
+        assert!(mp.graph.contains(&first.compute_txid()));
+        assert!(!mp.graph.contains(&second.compute_txid()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
