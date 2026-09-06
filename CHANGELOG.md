@@ -11,6 +11,8 @@ before 1.0).
 
 ### Changed
 
+- **Esplora asof/live scripthash reads share `sh_at_view`:** utxo,
+  chain page, and combined txs no longer copy the pin fork.
 - **Electrum asof/live scripthash reads share `sh_at_view`:** history,
   balance, and listunspent no longer copy a 4-way pin fork.
 - **CLI / conf share `NodeConfig::apply_kv`:** argv still has its own
