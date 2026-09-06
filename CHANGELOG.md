@@ -70,8 +70,9 @@ before 1.0).
   `unknown parent`, so it was dropped. `asked_blocks` also kept the hash
   after receive, so drain would not re-ask. Hold that body like an
   unknown parent, apply held children when the parent connects, and
-  forget `asked_blocks` on receive (`feature_bip68_sequence` activateCSV
-  `sync_blocks` 60s).
+  forget `asked_blocks` on successful accept or hold, not on consensus
+  reject (`feature_bip68_sequence` activateCSV `sync_blocks` 60s;
+  `feature_csv_activation` BIP113 must not re-getdata a rejected body).
 
 - **Reorg-n differential parks tip on stem after reject:** `compare_fork_n_one`
   left the hub on the side chain when the child was rejected, so the next

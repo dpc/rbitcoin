@@ -2626,7 +2626,7 @@ async fn on_block(
     }
     let _ = hub.ensure_header(&block.header);
     follow.pending_cmpct.remove(&hash);
-    take_requested_block(hub, &mut follow.requested_blocks, &hash);
+    follow.requested_blocks.remove(&hash);
     follow.pending_headers.entry(hash).or_insert(block.header);
     if !any_header_path_meets_minwork(hub, &mut follow.pending_headers, hash) {
         follow.pending_blocks.insert(hash, block.clone());
@@ -2644,6 +2644,7 @@ async fn on_block(
             rbitcoin_log::warn!("p2p: accept dropped {hash} (store not found — keep session): {e}");
         }
         Err(e) if net_error_needs_parent(&e) => {
+            hub.forget_asked_block(&hash);
             follow.pending_blocks.insert(hash, block.clone());
             drain_pending(
                 hub,
@@ -2746,15 +2747,20 @@ async fn on_cmpctblock(
         } else if hub.has_block(&hash) {
             take_requested_block(hub, &mut follow.requested_blocks, &hash);
         } else if let Some(block) = try_fill_cmpct(hub, &hsi, 2) {
-            take_requested_block(hub, &mut follow.requested_blocks, &hash);
+            follow.requested_blocks.remove(&hash);
             follow.pending_cmpct.remove(&hash);
             relay_new_pow_valid_block(hub, &block, session);
             match hub.accept_received_block_async(block.clone()).await {
                 Ok(AcceptOutcome::Accepted { .. }) => {
+                    hub.forget_asked_block(&hash);
                     maybe_select_hb_if_relay(hub, session);
                 }
                 Err(e) if net_error_needs_parent(&e) => {
+                    hub.forget_asked_block(&hash);
                     follow.pending_blocks.insert(hash, block);
+                }
+                Ok(_) => {
+                    hub.forget_asked_block(&hash);
                 }
                 _ => {
                     if !hub.knows_header(&hsi.header.prev_blockhash) {
@@ -3031,6 +3037,7 @@ async fn drain_after_accept(
 ) -> Result<(), NetError> {
     follow.pending_blocks.remove(&hash);
     follow.pending_headers.remove(&hash);
+    hub.forget_asked_block(&hash);
     if select_hb {
         maybe_select_hb_if_relay(hub, session);
     }
