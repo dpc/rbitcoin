@@ -11,6 +11,9 @@ before 1.0).
 
 ### Changed
 
+- **CLI / conf share `NodeConfig::apply_kv`:** argv still has its own
+  flag match and help text; conf `key=value` goes through one setter.
+  Parsed flags live in `CliAccum` instead of ~40 `mut` locals.
 - **Display-order 32-byte hash hex** lives in `rbitcoin-primitives`
   (`display_hash_hex` / `parse_display_hash32`). RPC, Electrum, and Esplora
   call that pair instead of each reversing then encoding.
