@@ -2855,6 +2855,11 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
         501,
         "0.5.1 patch is +1 on the Core-style integer"
     );
+    assert_eq!(
+        rpc_client_version("0.5.99"),
+        599,
+        "0.5.99 is the in-tree pre-0.6.0 mapping"
+    );
     let flags = rbitcoin_net::local_service_flags();
     let bits = flags.to_u64();
     let hex = format!("{bits:016x}");
