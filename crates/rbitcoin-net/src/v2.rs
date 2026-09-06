@@ -26,6 +26,53 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
+/// Core `V1_PREFIX_LEN`: network magic + `"version\x00\x00\x00\x00\x00"`.
+const V1_PREFIX_LEN: usize = 16;
+
+fn v1_prefix(magic: [u8; 4]) -> [u8; V1_PREFIX_LEN] {
+    let mut p = [0u8; V1_PREFIX_LEN];
+    p[..4].copy_from_slice(&magic);
+    p[4..11].copy_from_slice(b"version");
+    p
+}
+
+/// Replay bytes already read during EARLY_KEY_RESPONSE before the TCP tail.
+pub(crate) struct PrefixedRead<R> {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: R,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for PrefixedRead<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.pos < self.prefix.len() {
+            let rest = &self.prefix[self.pos..];
+            let n = rest.len().min(buf.remaining());
+            buf.put_slice(&rest[..n]);
+            self.pos += n;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+/// `p2p_v2_misbehaving.py` needles.
+pub fn v2_handshake_timeout_log(peer: u64) -> String {
+    format!("V2 handshake timeout, disconnecting peer={peer}")
+}
+
+pub fn v2_missing_garbage_terminator_log() -> &'static str {
+    "V2 transport error: missing garbage terminator"
+}
+
+pub fn v2_packet_decryption_failure_log() -> &'static str {
+    "V2 transport error: packet decryption failure"
+}
+
 /// Raw TCP bytes observed after connect (Core `nRecvBytes` / `nSendBytes`).
 #[derive(Clone, Debug)]
 pub struct WireBytes {
@@ -238,7 +285,7 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
 }
 
 /// Async read half after BIP324 handshake (buffered TCP).
-pub type V2Reader = V2SessionReader<BufReader<CountRead<OwnedReadHalf>>>;
+pub type V2Reader = V2SessionReader<PrefixedRead<BufReader<CountRead<OwnedReadHalf>>>>;
 /// Async write half after BIP324 handshake.
 pub type V2Writer = ProtocolWriter<CountWrite<OwnedWriteHalf>>;
 
@@ -463,7 +510,43 @@ fn map_protocol_error(e: ProtocolError) -> NetError {
         }
         ProtocolError::Io(io, _) => NetError::Io(io),
         ProtocolError::Internal(Bip324Error::V1Protocol) => NetError::V1Peer,
+        ProtocolError::Internal(Bip324Error::NoGarbageTerminator) => {
+            rbitcoin_log::info!("{}", v2_missing_garbage_terminator_log());
+            NetError::Bip324(v2_missing_garbage_terminator_log().to_string())
+        }
+        ProtocolError::Internal(Bip324Error::Decryption(_)) => {
+            rbitcoin_log::info!("{}", v2_packet_decryption_failure_log());
+            NetError::Bip324(v2_packet_decryption_failure_log().to_string())
+        }
         ProtocolError::Internal(inner) => NetError::Bip324(inner.to_string()),
+    }
+}
+
+/// Inbound EARLY_KEY_RESPONSE: wait until a received byte mismatches the 16-byte
+/// v1 prefix before sending ellswift (`p2p_v2_misbehaving.py`).
+async fn wait_v1_prefix_mismatch<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    magic: [u8; 4],
+) -> Result<Vec<u8>, NetError> {
+    let prefix = v1_prefix(magic);
+    let mut got = Vec::with_capacity(V1_PREFIX_LEN);
+    let mut one = [0u8; 1];
+    loop {
+        let n = reader.read(&mut one).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "v2 inbound eof before v1-prefix mismatch",
+            )
+            .into());
+        }
+        got.push(one[0]);
+        if got.as_slice() != &prefix[..got.len()] {
+            return Ok(got);
+        }
+        if got.len() == V1_PREFIX_LEN {
+            return Err(NetError::V1Peer);
+        }
     }
 }
 
@@ -479,6 +562,15 @@ pub async fn open_v2(
     magic: Magic,
     inbound: bool,
 ) -> Result<(V2Reader, V2Writer, WireBytes, std::net::TcpStream), NetError> {
+    open_v2_with_wire(stream, magic, inbound, WireBytes::new()).await
+}
+
+pub async fn open_v2_with_wire(
+    stream: TcpStream,
+    magic: Magic,
+    inbound: bool,
+    wire: WireBytes,
+) -> Result<(V2Reader, V2Writer, WireBytes, std::net::TcpStream), NetError> {
     let _ = stream.set_nodelay(true);
     let std = stream.into_std().map_err(NetError::Io)?;
     std.set_nonblocking(true).map_err(NetError::Io)?;
@@ -491,7 +583,6 @@ pub async fn open_v2(
     };
     let magic_bytes = magic.to_bytes();
     let (rh, wh) = stream.into_split();
-    let wire = WireBytes::new();
     let reader = BufReader::new(CountRead {
         inner: rh,
         n: Arc::clone(&wire.recv),
@@ -501,9 +592,30 @@ pub async fn open_v2(
         n: Arc::clone(&wire.sent),
     };
     // Protocol performs many small reads; BufReader is required for performance.
-    let protocol = Protocol::new(magic_bytes, role, None, None, reader, writer)
-        .await
-        .map_err(map_protocol_error)?;
+    let mut reader = reader;
+    let prefix = if inbound {
+        wait_v1_prefix_mismatch(&mut reader, magic_bytes).await?
+    } else {
+        Vec::new()
+    };
+    let reader = PrefixedRead {
+        prefix,
+        pos: 0,
+        inner: reader,
+    };
+    let protocol = match Protocol::new(magic_bytes, role, None, None, reader, writer).await {
+        Ok(p) => p,
+        Err(e) => {
+            let mapped = map_protocol_error(e);
+            // After EARLY_KEY_RESPONSE mismatch, a 64-byte key that starts with
+            // network magic is still v2 ellswift (p2p_v2_misbehaving.py). bip324
+            // reports V1Protocol; park until peertimeout instead of dropping.
+            if inbound && matches!(mapped, NetError::V1Peer) {
+                return Err(NetError::Protocol("magic-prefixed ellswift"));
+            }
+            return Err(mapped);
+        }
+    };
     let (r, w) = protocol.into_split();
     Ok((
         V2SessionReader::from_protocol_reader(r),
@@ -651,6 +763,18 @@ mod tests {
         assert!(short_id_for_command("wtxidrelay").is_none());
         assert!(short_id_for_command("sendheaders").is_none());
         assert!(short_id_for_command("sendaddrv2").is_none());
+        assert_eq!(
+            v2_handshake_timeout_log(0),
+            "V2 handshake timeout, disconnecting peer=0"
+        );
+        assert_eq!(
+            v2_missing_garbage_terminator_log(),
+            "V2 transport error: missing garbage terminator"
+        );
+        assert_eq!(
+            v2_packet_decryption_failure_log(),
+            "V2 transport error: packet decryption failure"
+        );
         // Placeholder slots 29–36 stay empty (unknown short id → protocol error).
         for id in 29u8..=36 {
             assert!(command_for_short_id(id).is_none(), "slot {id} empty");
@@ -841,6 +965,43 @@ mod tests {
             matches!(mapped, NetError::V1Peer),
             "expected V1Peer, got {mapped}"
         );
+    }
+
+    /// `p2p_v2_misbehaving.py` EARLY_KEY_RESPONSE: inbound responder must not
+    /// send ellswift while the first inbound bytes still match v1 prefix
+    /// (network magic + `"version\x00\x00\x00\x00\x00"`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_holds_ellswift_until_v1_prefix_mismatch() {
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::time::{timeout, Duration};
+
+        let magic = Magic::from(Network::Regtest);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            open_v2(stream, magic, true).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&magic.to_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut probe = [0u8; 8];
+        let early = timeout(Duration::from_millis(250), client.read(&mut probe)).await;
+        assert!(
+            early.is_err(),
+            "responder must not send ellswift while inbound still matches v1 magic"
+        );
+
+        client.write_all(&[0xff]).await.unwrap();
+        client.flush().await.unwrap();
+        let mut key = [0u8; 64];
+        timeout(Duration::from_secs(2), client.read_exact(&mut key))
+            .await
+            .expect("ellswift after v1-prefix mismatch")
+            .unwrap();
+        server.abort();
     }
 
     /// Core `test_size`: reject on the decrypted length prefix — do not wait

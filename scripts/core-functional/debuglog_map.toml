@@ -59,6 +59,34 @@ match = 'redundant version message from peer(=.*)?'
 emit = ['redundant version message from peer']
 
 [[rule]]
+match = 'V2 handshake timeout, disconnecting peer=(\d+)'
+emit = ['V2 handshake timeout, disconnecting peer={1}']
+
+[[rule]]
+match = 'V2 transport error: missing garbage terminator'
+emit = ['V2 transport error: missing garbage terminator']
+
+[[rule]]
+match = 'V2 transport error: packet decryption failure'
+emit = ['V2 transport error: packet decryption failure']
+
+[[rule]]
+match = 'sendaddrv2 received after verack, disconnecting peer=(\d+)'
+emit = ['sendaddrv2 received after verack, disconnecting peer={1}']
+
+[[rule]]
+match = 'addrv2 message size = (\d+)'
+emit = ['addrv2 message size = {1}']
+
+[[rule]]
+match = 'received: addrv2 \((\d+) bytes\) peer=(\d+)'
+emit = ['received: addrv2 ({1} bytes) peer={2}']
+
+[[rule]]
+match = 'sending addrv2 \((\d+) bytes\) peer=(\d+)'
+emit = ['sending addrv2 ({1} bytes) peer={2}']
+
+[[rule]]
 match = 'AcceptBlockHeader: not adding new block header ([0-9a-f]{64}), missing anti-dos proof-of-work validation'
 emit = ['AcceptBlockHeader: not adding new block header {1}, missing anti-dos proof-of-work validation']
 

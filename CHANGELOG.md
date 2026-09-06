@@ -95,6 +95,13 @@ before 1.0).
 
 ### Added
 
+- **Core functional `run` 68 → 71:** unmodified `p2p_v2_misbehaving`
+  (EARLY_KEY_RESPONSE holds ellswift until v1-prefix mismatch, V2 handshake
+  timeout, garbage-terminator / decrypt logs), `p2p_addrv2_relay`
+  (post-verack `sendaddrv2` disconnect, addrv2 relay, oversized 1010), and
+  `p2p_leak_tx` (`getpeerinfo.last_inv_sequence` / `inv_to_send`, batched
+  `notfound`, serve an announced tx from the tip block).
+
 - **IBD `getdata` serve reconstructs from Class A spans:** contiguous
   `header_txs` loads `txout.body` + `inwit.body` as libc sequential preads
   (not per-tx `get_tx_full`), off the session reactor. Host probe:

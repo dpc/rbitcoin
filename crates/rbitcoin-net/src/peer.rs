@@ -11,7 +11,7 @@ use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
 use crate::peers::{PeerOut, PingAction};
 use crate::v2::{
-    open_v2, read_v2_contents, read_v2_frame, write_v2_contents, write_v2_msg,
+    open_v2, open_v2_with_wire, read_v2_contents, read_v2_frame, write_v2_contents, write_v2_msg,
     write_v2_msg_offload, V2Reader, V2Writer,
 };
 use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds};
@@ -233,6 +233,29 @@ pub fn connected_to_self_log(addr: impl std::fmt::Display) -> String {
 
 pub fn version_handshake_timeout_log(peer: u64) -> String {
     format!("version handshake timeout, disconnecting peer={peer}")
+}
+
+pub fn v2_handshake_timeout_log(peer: u64) -> String {
+    crate::v2::v2_handshake_timeout_log(peer)
+}
+
+/// Core `MAX_ADDR_TO_SEND` (addr / addrv2).
+pub const MAX_ADDR_TO_SEND: usize = 1000;
+
+pub fn sendaddrv2_after_verack_log(peer: u64) -> String {
+    format!("sendaddrv2 received after verack, disconnecting peer={peer}")
+}
+
+pub fn addrv2_message_size_log(n: usize) -> String {
+    format!("addrv2 message size = {n}")
+}
+
+pub fn received_addrv2_log(nbytes: usize, peer: u64) -> String {
+    format!("received: addrv2 ({nbytes} bytes) peer={peer}")
+}
+
+pub fn sending_addrv2_log(nbytes: usize, peer: u64) -> String {
+    format!("sending addrv2 ({nbytes} bytes) peer={peer}")
 }
 
 pub fn ping_prior_to_verack_log(peer: u64) -> String {
@@ -476,9 +499,31 @@ pub(crate) async fn inbound_connect_and_handshake(
     ),
     NetError,
 > {
-    let (mut reader, mut writer, wire, tcp_shutdown) = open_v2(stream, magic, true).await?;
+    let _ = stream.set_nodelay(true);
+    let std = stream.into_std().map_err(NetError::Io)?;
+    std.set_nonblocking(true).map_err(NetError::Io)?;
+    let tcp_pre = std.try_clone().map_err(NetError::Io)?;
+    let stream = TcpStream::from_std(std).map_err(NetError::Io)?;
+    let wire = crate::v2::WireBytes::new();
     let sess =
         peers.register_connecting(their_addr, bind, true, crate::peers::PeerConnType::Inbound);
+    sess.attach_wire(wire.clone());
+    sess.attach_tcp_shutdown(tcp_pre);
+    let (mut reader, mut writer, wire, tcp_shutdown) =
+        match open_v2_with_wire(stream, magic, true, wire).await {
+            Ok(x) => x,
+            Err(NetError::Protocol("magic-prefixed ellswift")) => {
+                while !sess.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                return Err(NetError::Timeout);
+            }
+            Err(e) => {
+                let _ = peers.disconnect_id(sess.id);
+                return Err(e);
+            }
+        };
+    sess.mark_v2_transport_ready();
     if let Ok(clone) = tcp_shutdown.try_clone() {
         sess.attach_tcp_shutdown(clone);
     }
@@ -1053,6 +1098,16 @@ fn on_tx_announce(
                 return Ok(());
             }
             if let Some(mp) = hub.mempool() {
+                if let Some(s) = session {
+                    let gated = s.inbound
+                        && s.conn_type != crate::peers::PeerConnType::BlockRelay
+                        && (s.relay || mp.is_unbroadcast(&txid))
+                        && mp.relay_enabled()
+                        && !s.peer_hub().is_some_and(|h| h.is_noban());
+                    if gated && mp.try_contains(&txid) {
+                        s.set_inv_to_send(s.inv_to_send().saturating_add(1));
+                    }
+                }
                 let peer_ok = session.is_none_or(|s| {
                     s.conn_type != crate::peers::PeerConnType::BlockRelay
                         && (s.relay || mp.is_unbroadcast(&txid))
@@ -1800,6 +1855,7 @@ fn queue_due_tx_invs(
         // Never snap to current_relay_seq() — a later accept can race in
         // and make the new entry servable (mempool_reorg.py:122).
         session.note_tx_inv_seq(max_ann.max(session.last_inv_sequence()));
+        session.set_inv_to_send(0);
     }
 }
 
@@ -1856,15 +1912,13 @@ fn serve_mempool_getdata(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
     session: Option<&crate::peers::LivePeer>,
-    item: bitcoin::p2p::message_blockdata::Inventory,
     tx: Option<bitcoin::Transaction>,
-) -> Result<(), NetError> {
+) -> Result<bool, NetError> {
     let Some(mp) = hub.mempool() else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(tx) = tx else {
-        queue_out(out_tx, NetworkMessage::NotFound(vec![item]))?;
-        return Ok(());
+        return Ok(false);
     };
     let wtxid = tx.compute_wtxid();
     let announced = session.is_some_and(|s| s.has_announced_wtx(&wtxid));
@@ -1872,10 +1926,9 @@ fn serve_mempool_getdata(
     if announced || mp.is_relay_servable(&wtxid, last_inv) {
         mp.mark_broadcast(&tx.compute_txid());
         queue_out(out_tx, NetworkMessage::Tx(tx))?;
-    } else {
-        queue_out(out_tx, NetworkMessage::NotFound(vec![item]))?;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -1945,9 +1998,9 @@ async fn handle_peer_frame(
         NetworkMessage::SendHeaders => on_sendheaders(follow),
         NetworkMessage::SendCmpct(sc) => on_sendcmpct(follow, session, sc),
         NetworkMessage::WtxidRelay => on_wtxid_relay(follow),
-        NetworkMessage::SendAddrV2 => on_sendaddrv2(session),
+        NetworkMessage::SendAddrV2 => on_sendaddrv2(follow, session),
         NetworkMessage::Addr(list) => on_addr_list(follow, session, list.len())?,
-        NetworkMessage::AddrV2(list) => on_addr_list(follow, session, list.len())?,
+        NetworkMessage::AddrV2(list) => on_addrv2(follow, session, list)?,
         NetworkMessage::GetHeaders(gh) => on_getheaders(hub, out_tx, follow, session, gh)?,
         NetworkMessage::GetBlocks(gb) => on_getblocks(hub, out_tx, follow, session, gb)?,
         NetworkMessage::GetData(inv) => serve_getdata(hub, out_tx, follow, session, inv).await?,
@@ -2039,10 +2092,10 @@ fn on_wtxid_relay(follow: &mut PeerFollowState) {
     follow.wtxid_relay = true;
 }
 
-fn on_sendaddrv2(session: Option<&crate::peers::LivePeer>) {
-    if let Some(s) = session {
-        s.set_wants_addrv2();
-    }
+fn on_sendaddrv2(follow: &mut PeerFollowState, session: Option<&crate::peers::LivePeer>) {
+    let id = session.map(|s| s.id).unwrap_or(0);
+    rbitcoin_log::info!("{}", sendaddrv2_after_verack_log(id));
+    punish_disconnect(&mut follow.ban_score, session);
 }
 
 fn on_addr_list(
@@ -2053,6 +2106,42 @@ fn on_addr_list(
     if session.is_some_and(|s| s.conn_type == crate::peers::PeerConnType::AddrFetch && n > 1) {
         punish_disconnect(&mut follow.ban_score, session);
         return Ok(());
+    }
+    Ok(())
+}
+
+fn on_addrv2(
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+    list: &[bitcoin::p2p::address::AddrV2Message],
+) -> Result<(), NetError> {
+    let n = list.len();
+    let nbytes =
+        bitcoin::consensus::encode::serialize(&NetworkMessage::AddrV2(list.to_vec())).len();
+    let id = session.map(|s| s.id).unwrap_or(0);
+    rbitcoin_log::info!("{}", received_addrv2_log(nbytes, id));
+    if n > MAX_ADDR_TO_SEND {
+        rbitcoin_log::info!("{}", addrv2_message_size_log(n));
+        punish_disconnect(&mut follow.ban_score, session);
+        return Ok(());
+    }
+    if session.is_some_and(|s| s.conn_type == crate::peers::PeerConnType::AddrFetch && n > 1) {
+        punish_disconnect(&mut follow.ban_score, session);
+        return Ok(());
+    }
+    if let Some(s) = session {
+        if let Some(ph) = s.peer_hub() {
+            ph.learn_addrv2(list);
+            for other in ph.live_peers() {
+                if other.id == s.id || !other.wants_addrv2() {
+                    continue;
+                }
+                if let Some(tx) = other.writer() {
+                    rbitcoin_log::info!("{}", sending_addrv2_log(nbytes, other.id));
+                    queue_out(&tx, NetworkMessage::AddrV2(list.to_vec()))?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2126,6 +2215,7 @@ async fn serve_getdata(
     inv: &[Inventory],
 ) -> Result<(), NetError> {
     let inflight = session.map(|s| &s.serve_inflight);
+    let mut notfound: Vec<Inventory> = Vec::new();
     for item in inv.iter().take(MAX_INV_SIZE) {
         match item {
             Inventory::Block(h) | Inventory::WitnessBlock(h) => {
@@ -2189,17 +2279,32 @@ async fn serve_getdata(
             }
             Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
                 let tx = hub.mempool().and_then(|mp| mp.try_get_tx(txid));
-                serve_mempool_getdata(hub, out_tx, session, item.clone(), tx)?;
+                if !serve_mempool_getdata(hub, out_tx, session, tx)? && hub.mempool().is_some() {
+                    notfound.push(item.clone());
+                }
             }
             Inventory::WTx(wtxid) => {
                 if let Some(s) = session {
                     rbitcoin_log::trace!("{}", received_getdata_wtx_log(wtxid, s.id));
                 }
                 let tx = hub.mempool().and_then(|mp| mp.try_get_tx_by_wtxid(wtxid));
-                serve_mempool_getdata(hub, out_tx, session, item.clone(), tx)?;
+                if serve_mempool_getdata(hub, out_tx, session, tx)? {
+                    continue;
+                }
+                let announced = session.is_some_and(|s| s.has_announced_wtx(wtxid));
+                if announced {
+                    if let Some(tx) = tx_from_tip_block(hub, wtxid) {
+                        queue_out(out_tx, NetworkMessage::Tx(tx))?;
+                        continue;
+                    }
+                }
+                notfound.push(item.clone());
             }
             _ => {}
         }
+    }
+    if !notfound.is_empty() {
+        queue_out(out_tx, NetworkMessage::NotFound(notfound))?;
     }
     Ok(())
 }
@@ -3632,6 +3737,17 @@ fn headers_for_peer(
         Ok(_) => Ok(cache.headers_after_locator(&gh.locator_hashes, gh.stop_hash)),
         Err(e) => Err(NetError::Consensus(e.to_string())),
     }
+}
+
+fn tx_from_tip_block(hub: &ChainHub, wtxid: &bitcoin::Wtxid) -> Option<Transaction> {
+    let hash = hub.tip_hash()?;
+    let block = block_for_peer(hub.cache.as_ref(), hub.query.as_ref(), &hash)
+        .ok()
+        .flatten()?;
+    block
+        .txdata
+        .into_iter()
+        .find(|tx| tx.compute_wtxid() == *wtxid)
 }
 
 fn block_for_peer(

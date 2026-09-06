@@ -129,6 +129,9 @@ fn blockchain_empty_store() {
     assert_eq!(mem["permitbaremultisig"], true);
     let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap();
     assert_eq!(raw, json!([]));
+    let seq = dispatch(&ctx, "getrawmempool", vec![json!(false), json!(true)]).unwrap();
+    assert_eq!(seq["txids"], json!([]));
+    assert_eq!(seq["mempool_sequence"].as_u64().unwrap(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2639,6 +2642,11 @@ fn getpeerinfo_lists_registered_session() {
         .as_u64()
         .unwrap();
     assert_eq!(mid, before + 12);
+    let pi = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    assert_eq!(pi[0]["bytesrecv"].as_u64().unwrap(), mid);
+    assert_eq!(pi[0]["bytessent"].as_u64().unwrap(), 0);
+    assert_eq!(pi[0]["last_inv_sequence"].as_u64().unwrap(), 1);
+    assert_eq!(pi[0]["inv_to_send"].as_u64().unwrap(), 0);
 
     // rpc_net.py:100 — dual inbound+outbound is two connections, not
     // outbound-follow-only (ctx.connections stays 0 here).

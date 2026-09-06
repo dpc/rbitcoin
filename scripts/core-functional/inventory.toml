@@ -564,8 +564,7 @@ status = "run"
 
 [[test]]
 name = "p2p_addrv2_relay.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_block_sync.py"
@@ -675,7 +674,7 @@ status = "run"
 name = "p2p_invalid_messages.py"
 status = "skip"
 reason = "core-net-policy"
-analog = "official: after sendaddrv2, test_addrv2_empty missing 'received: addrv2 (0 bytes)' / ProcessMessages Exception / 'end of data' (p2p_invalid_messages.py:203); addrv2 log zoo + oversized inv/headers + v1 resource_exhaustion later"
+analog = "official: test_addrv2_empty missing 'received: addrv2 (0 bytes)' / ProcessMessages Exception / 'end of data'; then addrv2 zoo + oversized inv/headers; resource_exhaustion is v1-only"
 
 [[test]]
 name = "p2p_invalid_tx.py"
@@ -688,9 +687,7 @@ status = "run"
 
 [[test]]
 name = "p2p_leak_tx.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: tx leak / inv"
+status = "run"
 
 [[test]]
 name = "p2p_message_capture.py"
@@ -801,8 +798,7 @@ analog = "follow-up: v2 encrypted (we force v2)"
 
 [[test]]
 name = "p2p_v2_misbehaving.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_v2_transport.py"
