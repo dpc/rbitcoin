@@ -139,7 +139,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
         with:
-          toolchain: 1.95.0
           targets: x86_64-pc-windows-msvc
 
       # No build cache: cached objects must not feed shipped binaries.
@@ -183,8 +182,6 @@ jobs:
           echo "short=${sha:0:12}" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
-        with:
-          toolchain: 1.95.0
 
       # No build cache: cached objects must not feed shipped binaries.
       - name: Build node + cli
