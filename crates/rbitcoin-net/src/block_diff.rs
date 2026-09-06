@@ -570,22 +570,30 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
     ))
 }
 
-/// Spend `mature` with BIP68 relative-height `nSequence` (tx version 2).
+/// Spend `mature` with BIP68 `nSequence`. Layout: `[seq:u32 le][ver:u8][time_shift:u16 le]`.
+/// Short leftover bytes parse as zero. `ver == 0` → tx version 1, else 2.
 pub fn prepare_csv_age_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
     if data.is_empty() {
         return None;
     }
-    let rel = if data.len() >= 2 {
-        u16::from_le_bytes([data[0], data[1]])
+    let mut buf = [0u8; 7];
+    let n = data.len().min(7);
+    buf[..n].copy_from_slice(&data[..n]);
+    let seq = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let version = if buf[4] == 0 {
+        TxVersion::ONE
     } else {
-        u16::from(data[0])
+        TxVersion::TWO
     };
+    let time_shift = u32::from(u16::from_le_bytes([buf[5], buf[6]]));
     let mut spend = default_op_true_spend(mature, next_diff_cb_uniq());
-    spend.version = TxVersion::TWO;
-    spend.input[0].sequence = Sequence::from_consensus(u32::from(rel));
+    spend.version = version;
+    spend.input[0].sequence = Sequence::from_consensus(seq);
     Some(mine_diff_paying(
         tip.hash,
-        tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+        tip.time
+            .saturating_add(REGTEST_BLOCK_SPACING)
+            .saturating_add(time_shift),
         tip.height.saturating_add(1),
         ScriptBuf::from_bytes(vec![0x51]),
         vec![spend],
@@ -2471,11 +2479,14 @@ mod tests {
             height: DIFF_TEST_PAD_HEIGHT,
         };
         let mature = height1_mature_out();
-        let got = prepare_csv_age_candidate(&dummy, mature, &[5, 0]).unwrap();
+        let got = prepare_csv_age_candidate(&dummy, mature, &[5, 0, 0, 0, 2, 7, 0]).unwrap();
         assert_eq!(got.txdata[1].version, TxVersion::TWO);
         assert_eq!(got.txdata[1].input[0].sequence, Sequence::from_consensus(5));
         assert_eq!(got.txdata[1].input[0].previous_output, mature);
         assert_eq!(got.header.prev_blockhash, dummy.hash);
+        assert_eq!(got.header.time, 1 + REGTEST_BLOCK_SPACING + 7);
+        let v1 = prepare_csv_age_candidate(&dummy, mature, &[5, 0, 0, 0]).unwrap();
+        assert_eq!(v1.txdata[1].version, TxVersion::ONE);
         assert!(prepare_csv_age_candidate(&dummy, mature, b"").is_none());
     }
 
@@ -2485,15 +2496,81 @@ mod tests {
         let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
         let mut tip = pad.tip.clone();
         let mock = MockOracle::new(OracleReply::NullAccept);
-        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[1, 0]) {
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[1, 0, 0, 0, 2]) {
             CompareOne::Agreed { accept: true } => {}
             other => panic!("csv rel=1: {other:?}"),
         }
         assert_eq!(hub.tip_height(), Some(DIFF_MATURE_PAD_HEIGHT));
         let mock = MockOracle::new(OracleReply::Reason("non-BIP68-final".into()));
-        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[200, 0]) {
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[200, 0, 0, 0, 2]) {
             CompareOne::Agreed { accept: false } => {}
             other => panic!("csv rel=200: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn csv_fuzz_bytes(seq: u32, ver: u8, shift: u16) -> Vec<u8> {
+        let mut b = Vec::from(seq.to_le_bytes());
+        b.push(ver);
+        b.extend_from_slice(&shift.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn compare_csv_age_one_version_one_ignores_height_lock() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        let data = csv_fuzz_bytes(200, 0, 0);
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &data) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("csv v1 rel=200: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_csv_age_one_disable_flag_accepts() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        let data = csv_fuzz_bytes((1 << 31) | 200, 2, 0);
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &data) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("csv disable: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_csv_age_one_time_type_small_accepts_large_rejects() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+        let type_flag = 1u32 << 22;
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_csv_age_one(
+            &hub,
+            &mut tip,
+            &mock,
+            pad.mature,
+            &csv_fuzz_bytes(type_flag | 1, 2, 0),
+        ) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("csv time n=1: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason("non-BIP68-final".into()));
+        match compare_csv_age_one(
+            &hub,
+            &mut tip,
+            &mock,
+            pad.mature,
+            &csv_fuzz_bytes(type_flag | 0xffff, 2, 0),
+        ) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("csv time n=ffff: {other:?}"),
         }
         let _ = fs::remove_dir_all(dir);
     }

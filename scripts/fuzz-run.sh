@@ -265,7 +265,11 @@ elif [[ "$BIN" == "block_reorg_n_differential" ]]; then
     crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin fork.bin
 elif [[ "$BIN" == "block_csv_differential" ]]; then
   merge_seed fuzz/corpus/block_csv_differential \
-    crates/rbitcoin-consensus/tests/fixtures/script_op_true.bin rel.bin
+    crates/rbitcoin-consensus/tests/fixtures/csv_rel1.bin rel.bin
+  merge_seed fuzz/corpus/block_csv_differential \
+    crates/rbitcoin-consensus/tests/fixtures/csv_time.bin time.bin
+  merge_seed fuzz/corpus/block_csv_differential \
+    crates/rbitcoin-consensus/tests/fixtures/script_op_true.bin op_true.bin
 elif [[ "$BIN" == "mempool_differential" ]]; then
   merge_seed fuzz/corpus/mempool_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin spend.bin
