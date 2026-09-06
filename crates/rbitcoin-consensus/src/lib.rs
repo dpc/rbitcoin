@@ -486,6 +486,9 @@ pub mod confirm_phase_stats {
 
     /// Wire-prep residual subtimers (ns): `(wire_arc, struct, header, prepare, filter_plan)`.
     ///
+    /// [`crate::confirm_wire_lookup_stamp`] owns these for both IBD TipOnly stamp
+    /// and one-shot [`crate::confirm_wire_load_phase_pipelined`]. Header PoW /
+    /// prev checks are `PREP_HEADER_NS` (not folded into `PREP_STRUCT_NS`).
     /// These sit inside [`LOAD_NS`] but outside pin (confirm_load_stats). Pin and
     /// assemble remain separate (`PARENT_PIN_NS` / [`CONNECT_NS`]).
     #[inline]

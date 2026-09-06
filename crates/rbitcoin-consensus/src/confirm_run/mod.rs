@@ -293,7 +293,22 @@ pub fn confirm_wire_run_preverified(
     if blocks.is_empty() {
         return Err(ConsensusError::BadBlock("empty confirm batch"));
     }
-    let arcs = wire_blocks_to_arcs(query, blocks);
+    let arcs: Vec<(
+        Height,
+        Arc<Block>,
+        Option<Arc<[rbitcoin_query::TxPrecompute]>>,
+    )> = {
+        let t = Instant::now();
+        let arcs = blocks
+            .iter()
+            .map(|(h, b)| (*h, Arc::new(b.clone()), None))
+            .collect();
+        let ns = t.elapsed().as_nanos() as u64;
+        if ns > 0 {
+            confirm_phase_stats::PREP_WIRE_ARC_NS.fetch_add(ns, Ordering::Relaxed);
+        }
+        arcs
+    };
     let stamped = confirm_wire_lookup_stamp(query, params, milestone, &arcs, None)?;
     let mat = confirm_wire_load_from_plan(query, params, milestone, stamped, None, preverified)?;
     let ok = confirm_scripts_phase(mat.batch)?;

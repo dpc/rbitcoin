@@ -4,18 +4,17 @@ use super::*;
 
 type CreatePin = rbitcoin_query::CreatePin;
 
+struct PlanSpend<'a> {
+    spend_edges: rbitcoin_query::SpendEdges,
+    parent_vouts: U64Map<Vec<u32>>,
+    vouts_from_stamp: bool,
+    batch_pin_by_id: U64Map<&'a CreatePin>,
+}
+
 fn spend_edges_from_plan<'a>(
     plan: &'a rbitcoin_query::ArchiveWritePlan,
     parent_pin: &mut ParentPinStamp,
-) -> Result<
-    (
-        rbitcoin_query::SpendEdges,
-        U64Map<Vec<u32>>,
-        bool,
-        U64Map<&'a CreatePin>,
-    ),
-    ConsensusError,
-> {
+) -> Result<PlanSpend<'a>, ConsensusError> {
     let mut batch_pin_by_id: U64Map<&CreatePin> = U64Map::default();
     if plan.batch_pin.len() == plan.planned_fks.len() {
         for (fk, pin) in plan.planned_fks.iter().zip(plan.batch_pin.iter()) {
@@ -54,7 +53,12 @@ fn spend_edges_from_plan<'a>(
     } else {
         (std::mem::take(&mut parent_pin.parent_vouts), true)
     };
-    Ok((spend_edges, parent_vouts, vouts_from_stamp, batch_pin_by_id))
+    Ok(PlanSpend {
+        spend_edges,
+        parent_vouts,
+        vouts_from_stamp,
+        batch_pin_by_id,
+    })
 }
 
 fn spend_edges_from_stamp(
@@ -266,11 +270,21 @@ pub(super) fn pin_for_wire_batch(
     let t_pin = Instant::now();
     let t_thin = Instant::now();
 
-    let (spend_edges, mut parent_vouts, vouts_from_stamp, batch_pin_by_id) = match plan {
+    let PlanSpend {
+        spend_edges,
+        mut parent_vouts,
+        vouts_from_stamp,
+        batch_pin_by_id,
+    } = match plan {
         Some(p) => spend_edges_from_plan(p, parent_pin)?,
         None => {
             let (edges, vouts) = spend_edges_from_stamp(parent_pin, metas, wire_blocks);
-            (edges, vouts, false, U64Map::default())
+            PlanSpend {
+                spend_edges: edges,
+                parent_vouts: vouts,
+                vouts_from_stamp: false,
+                batch_pin_by_id: U64Map::default(),
+            }
         }
     };
 
