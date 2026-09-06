@@ -6,16 +6,18 @@ and similar infrastructure—not a desktop GUI or end-user wallet.
 
 Until **1.0**, treat mainnet deployment as **early production / high-scrutiny**:
 on-disk format and APIs can still change (named refuse/wipe, not a silent
-wipe), and there is **no** long-term support SLA. **0.5.x** is the supported
-published line until 0.6 or 1.0. Run signet first, then mainnet with
-monitoring. See [`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md)
-and [`OPERATOR.md`](./OPERATOR.md).
+wipe), and there is **no** long-term support SLA. In-tree is **0.5.99**
+(pre-0.6.0). **0.5.x** tags (0.5.1 / 0.5.2) are the supported published
+line until 0.6 or 1.0. Run signet first, then mainnet with monitoring. See
+[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md) and
+[`OPERATOR.md`](./OPERATOR.md).
 
 ## Supported versions
 
 | Version | Support |
 |---------|---------|
-| **0.5.x** | Supported **published** line. Security-relevant fixes land here until **0.6** or **1.0**. No LTS. Report against the tag (and binary digest if you built musl static). |
+| **0.5.99** (in-tree) | Untagged master toward **0.6.0**. Report against the git commit (and binary digest if you built musl static). |
+| **0.5.x** | Supported **published** line (0.5.1 / 0.5.2). Security-relevant fixes land here until **0.6** or **1.0**. No LTS. Report against the tag. |
 | **1.0+** (future) | Will define a clearer support window once the on-disk schema and public surface stabilize. |
 
 Untagged trees: report against a **git commit** (and binary digest if you built musl static).

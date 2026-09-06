@@ -11,6 +11,8 @@ before 1.0).
 
 ### Changed
 
+- **Workspace version 0.5.99:** in-tree toward 0.6.0. Published GitHub
+  Releases remain 0.5.1; 0.5.2 is the 0.5.1 maintenance branch.
 - **`NodeConfig` is composed option groups:** `DatadirOpts` / `ListenOpts` /
   `MempoolOpts` / `RpcOpts`. CLI flags and `apply_kv` keys unchanged.
   `config.datadir` still `Deref`s to the process datadir `PathBuf`.
