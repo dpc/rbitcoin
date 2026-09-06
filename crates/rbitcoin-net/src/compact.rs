@@ -9,6 +9,7 @@ use bitcoin::block::Header;
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::p2p::message::NetworkMessage;
+use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin::p2p::message_compact_blocks::{CmpctBlock, SendCmpct};
 use bitcoin::p2p::Magic;
 use bitcoin::{Block, BlockHash, Target, Transaction};
@@ -74,9 +75,27 @@ pub fn encode_sendcmpct_hb_v2() -> Result<Vec<u8>, NetError> {
     }))
 }
 
+/// BIP324 `ping`.
+pub fn encode_ping_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::Ping(nonce))
+}
+
 /// BIP324 `pong`.
 pub fn encode_pong_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
     encode_v2_contents(NetworkMessage::Pong(nonce))
+}
+
+/// BIP324 `verack`.
+pub fn encode_verack_v2() -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::Verack)
+}
+
+/// BIP324 `getheaders` with empty locator (Core stays connected).
+pub fn encode_getheaders_empty_v2() -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::GetHeaders(GetHeadersMessage::new(
+        Vec::new(),
+        BlockHash::from_byte_array([0; 32]),
+    )))
 }
 
 /// Core v2 frame after we send `cmpctblock`.
@@ -84,6 +103,7 @@ pub fn encode_pong_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
 pub enum CmpctPeerFrame {
     GetBlockTxn(Vec<u64>),
     Ping(u64),
+    Pong(u64),
     Other,
 }
 
@@ -95,6 +115,7 @@ pub fn classify_v2_cmpct_peer(contents: &[u8]) -> CmpctPeerFrame {
                 CmpctPeerFrame::GetBlockTxn(r.txs_request.indexes.clone())
             }
             NetworkMessage::Ping(n) => CmpctPeerFrame::Ping(*n),
+            NetworkMessage::Pong(n) => CmpctPeerFrame::Pong(*n),
             _ => CmpctPeerFrame::Other,
         },
         Err(_) => CmpctPeerFrame::Other,
@@ -613,9 +634,13 @@ mod tests {
     fn classify_v2_ping_and_sendcmpct_encode() {
         let ping = crate::v2::encode_v2_contents(NetworkMessage::Ping(7)).unwrap();
         assert_eq!(classify_v2_cmpct_peer(&ping), CmpctPeerFrame::Ping(7));
+        let ping2 = encode_ping_v2(7).unwrap();
+        assert_eq!(ping, ping2);
         let pong = encode_pong_v2(7).unwrap();
-        assert_eq!(classify_v2_cmpct_peer(&pong), CmpctPeerFrame::Other);
+        assert_eq!(classify_v2_cmpct_peer(&pong), CmpctPeerFrame::Pong(7));
         encode_sendcmpct_hb_v2().unwrap();
+        encode_verack_v2().unwrap();
+        encode_getheaders_empty_v2().unwrap();
         assert_eq!(classify_v2_cmpct_peer(&[]), CmpctPeerFrame::Other);
     }
 

@@ -124,6 +124,9 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
     echo "FUZZ_DICT=fuzz/dict/script.dict"
     echo "FUZZ_MAX_LEN=2000"
   fi
+  if [[ "$BIN" == "v2_session" ]]; then
+    echo "FUZZ_DICT=fuzz/dict/p2p.dict"
+  fi
   if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
@@ -202,15 +205,22 @@ if [[ "$BIN" == "v2_session" ]]; then
   export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
   merge_seed fuzz/corpus/v2_session crates/rbitcoin-net/tests/fixtures/v2_ping.bin
   merge_seed fuzz/corpus/v2_session crates/rbitcoin-net/tests/fixtures/v2_verack.bin
+  log="${TMPDIR:-/tmp}/rbtc-fuzz-v2.$$.log"
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_session -- \
     -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
     -timeout="$timeout" \
     -max_len=65536 \
-    -seed="$SEED"
-  st=$?
+    -dict=fuzz/dict/p2p.dict \
+    -seed="$SEED" \
+    2>&1 | tee "$log"
+  st=${PIPESTATUS[0]}
   set -e
-  finish_fuzz "$st"
+  if [[ "$st" -ne 0 ]]; then
+    copy_crashers fuzz/artifacts "$CRASHERS"
+    exit "$st"
+  fi
+  fail_if_no_comparisons "$log"
   exit 0
 fi
 

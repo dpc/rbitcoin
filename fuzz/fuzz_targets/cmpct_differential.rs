@@ -131,7 +131,7 @@ async fn drain_frames(
                         }
                     }
                 }
-                CmpctPeerFrame::Other => {}
+                CmpctPeerFrame::Pong(_) | CmpctPeerFrame::Other => {}
             },
         }
     }

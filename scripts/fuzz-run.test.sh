@@ -50,6 +50,8 @@ assert_ok "v2_session dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
 assert_ok "v2_session dry-run BITCOIND_LISTEN=1" \
   grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+assert_ok "v2_session dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/p2p.dict" <<<"$out"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN" cmpct_differential)"
 assert_ok "cmpct-differential dry-run bin" \
