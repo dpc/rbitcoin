@@ -629,21 +629,12 @@ pub(crate) fn store_err(e: rbitcoin_query::QueryError) -> Response {
 
 /// Esplora / Core display order (internal hash bytes reversed).
 pub(crate) fn block_hash_hex(hash: &[u8; 32]) -> String {
-    let mut rev = *hash;
-    rev.reverse();
-    rbitcoin_primitives::hex_encode(rev)
+    rbitcoin_primitives::display_hash_hex(hash)
 }
 
 /// Parse 32-byte hash/txid hex (display order) → internal byte order.
 pub(crate) fn parse_hash32(s: &str) -> Result<[u8; 32], ()> {
-    let mut bytes = rbitcoin_primitives::hex_decode(s).map_err(|_| ())?;
-    if bytes.len() != 32 {
-        return Err(());
-    }
-    bytes.reverse();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    rbitcoin_primitives::parse_display_hash32(s).map_err(|_| ())
 }
 
 pub(crate) fn mempool_wire(st: &AppState, txid: &[u8; 32]) -> Option<bitcoin::Transaction> {

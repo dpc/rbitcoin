@@ -16,6 +16,54 @@ impl fmt::Display for HexError {
 
 impl std::error::Error for HexError {}
 
+/// Failed to parse Core / Electrum / Esplora display-order 32-byte hex.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayHashError {
+    Hex(HexError),
+    WrongLength { got: usize },
+}
+
+impl fmt::Display for DisplayHashError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hex(e) => write!(f, "{e}"),
+            Self::WrongLength { got } => {
+                write!(f, "hash/txid must be 32 bytes hex (got {got})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DisplayHashError {}
+
+impl From<HexError> for DisplayHashError {
+    fn from(e: HexError) -> Self {
+        Self::Hex(e)
+    }
+}
+
+/// Core / Electrum / Esplora **display order** hex for a 32-byte hash or txid.
+///
+/// Store and rust-bitcoin `to_byte_array()` use **internal** byte order; RPC
+/// clients expect the reversed hex (same as `BlockHash`/`Txid` `Display`).
+pub fn display_hash_hex(h: &[u8; 32]) -> String {
+    let mut rev = *h;
+    rev.reverse();
+    encode(rev)
+}
+
+/// Parse display-order 32-byte hex → internal byte order.
+pub fn parse_display_hash32(hex: &str) -> Result<[u8; 32], DisplayHashError> {
+    let mut b = decode(hex)?;
+    if b.len() != 32 {
+        return Err(DisplayHashError::WrongLength { got: b.len() });
+    }
+    b.reverse();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&b);
+    Ok(out)
+}
+
 /// Lowercase hex encoding of `data`.
 pub fn encode(data: impl AsRef<[u8]>) -> String {
     let data = data.as_ref();
@@ -88,5 +136,32 @@ mod tests {
         let _ = &e as &dyn std::error::Error;
         assert_eq!(decode("0Xff").unwrap(), vec![0xff]);
         assert_eq!(encode([]), "");
+    }
+
+    #[test]
+    fn display_hash_roundtrips_known_internal_bytes() {
+        let mut internal = [0u8; 32];
+        internal[0] = 0xab;
+        internal[31] = 0xcd;
+        let display = "cd000000000000000000000000000000000000000000000000000000000000ab";
+        assert_eq!(display_hash_hex(&internal), display);
+        assert_eq!(parse_display_hash32(display).unwrap(), internal);
+    }
+
+    #[test]
+    fn parse_display_hash32_rejects_odd_length_and_non_hex() {
+        assert_eq!(
+            parse_display_hash32("c").unwrap_err().to_string(),
+            "odd hex length"
+        );
+        assert_eq!(
+            parse_display_hash32("zz").unwrap_err().to_string(),
+            "invalid hex digit"
+        );
+        let e = parse_display_hash32("abcd").unwrap_err();
+        assert!(
+            matches!(e, DisplayHashError::WrongLength { got: 2 }),
+            "{e:?}"
+        );
     }
 }
