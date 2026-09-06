@@ -5,9 +5,11 @@ use crate::error::NetError;
 use crate::peer::{drain_pending_now, PendingBlocks};
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::{deserialize, serialize};
+use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{
-    Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+    Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
+    Witness,
 };
 use rbitcoin_consensus::{
     genesis_block, mine_empty_regtest, mine_regtest_paying, prepare_regtest_candidate, ChainParams,
@@ -89,6 +91,8 @@ pub const DIFF_MUT_ANNEX: u8 = 0x20;
 pub const DIFF_MUT_SHUFFLE: u8 = 0x40;
 /// `prepare_script_candidate` prefix: version + witness then scriptPubKey.
 pub const SCRIPT_FUZZ_CTRL: u8 = 0x80;
+/// Structured `{n_tx, has_witness, extra_size}` prefix for spend / height-1 prepare.
+pub const BLOCK_STRUCT_CTRL: u8 = 0x81;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffTip {
@@ -581,6 +585,39 @@ pub fn parse_script_fuzz_ctrl(data: &[u8]) -> (TxVersion, Witness, &[u8]) {
     )
 }
 
+fn parse_block_struct_ctrl(data: &[u8]) -> Option<(u8, bool, u8)> {
+    if data.first() != Some(&BLOCK_STRUCT_CTRL) || data.len() < 4 {
+        return None;
+    }
+    Some((data[1].min(16), data[2] != 0, data[3]))
+}
+
+fn dummy_struct_tx(uniq: u32, witness: bool, extra_size: u8) -> Transaction {
+    let mut spk = vec![0x51];
+    spk.resize(spk.len() + extra_size as usize, 0);
+    let mut tx = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([uniq as u8; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1000),
+            script_pubkey: ScriptBuf::from_bytes(spk),
+        }],
+    };
+    if witness {
+        tx.input[0].witness = Witness::from_slice(&[&[1u8]]);
+    }
+    tx
+}
+
 fn mine_diff_paying(
     prev: BlockHash,
     time: u32,
@@ -595,6 +632,39 @@ fn mine_diff_paying(
 }
 
 pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
+    if let Some((n_tx, witness, extra_size)) = parse_block_struct_ctrl(data) {
+        let n = n_tx.max(1);
+        let height = tip.height.saturating_add(1);
+        let uniq = next_diff_cb_uniq();
+        let mut spend = default_op_true_spend(mature, uniq);
+        if witness {
+            if let Some(i) = spend.input.first_mut() {
+                i.witness = Witness::from_slice(&[&[1u8]]);
+            }
+        }
+        if extra_size > 0 {
+            if let Some(o) = spend.output.first_mut() {
+                let mut spk = o.script_pubkey.to_bytes();
+                spk.resize(spk.len() + extra_size as usize, 0);
+                o.script_pubkey = ScriptBuf::from_bytes(spk);
+            }
+        }
+        let mut txs = vec![spend];
+        for i in 1..n {
+            txs.push(dummy_struct_tx(
+                uniq.wrapping_add(i as u32),
+                witness,
+                extra_size,
+            ));
+        }
+        return Some(mine_diff_paying(
+            tip.hash,
+            tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            txs,
+        ));
+    }
     let parsed: Block = deserialize(data).ok()?;
     if parsed.txdata.is_empty() {
         return None;
@@ -1098,17 +1168,32 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-pub fn compare_one(
-    hub: &ChainHub,
-    tip: &mut DiffTip,
-    oracle: &dyn BlockOracle,
-    data: &[u8],
-) -> CompareOne {
-    let Ok(mut block) = deserialize::<Block>(data) else {
-        return CompareOne::NotABlock;
-    };
+pub fn prepare_height1_candidate(tip: &DiffTip, data: &[u8]) -> Option<Block> {
+    if let Some((n_tx, witness, extra_size)) = parse_block_struct_ctrl(data) {
+        let height = tip.height.saturating_add(1);
+        let uniq = next_diff_cb_uniq();
+        let mut extras = Vec::new();
+        for i in 0..n_tx {
+            extras.push(dummy_struct_tx(
+                uniq.wrapping_add(i as u32),
+                witness,
+                extra_size,
+            ));
+        }
+        let mut block = mine_diff_paying(
+            tip.hash,
+            tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            extras,
+        );
+        stamp_diff_coinbase(&mut block, uniq);
+        remine_diff_header(&mut block);
+        return Some(block);
+    }
+    let mut block: Block = deserialize(data).ok()?;
     if block.txdata.is_empty() {
-        return CompareOne::NotABlock;
+        return None;
     }
     if block.txdata.len() > 1 {
         let n = block.txdata.len();
@@ -1125,6 +1210,18 @@ pub fn compare_one(
     );
     stamp_diff_coinbase(&mut block, uniq);
     remine_diff_header(&mut block);
+    Some(block)
+}
+
+pub fn compare_one(
+    hub: &ChainHub,
+    tip: &mut DiffTip,
+    oracle: &dyn BlockOracle,
+    data: &[u8],
+) -> CompareOne {
+    let Some(block) = prepare_height1_candidate(tip, data) else {
+        return CompareOne::NotABlock;
+    };
     compare_prepared(hub, tip, oracle, block)
 }
 
@@ -2433,6 +2530,28 @@ mod tests {
         let target = bitcoin::Target::from_compact(got.header.bits);
         assert!(got.header.validate_pow(target).is_ok());
         assert!(prepare_spend_candidate(&dummy, mature, b"junk").is_none());
+    }
+
+    #[test]
+    fn prepare_spend_struct_ctrl_n_tx_three_and_witness() {
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let mature = height1_mature_out();
+        let three = prepare_spend_candidate(&dummy, mature, &[BLOCK_STRUCT_CTRL, 3, 0, 0]).unwrap();
+        assert_eq!(three.txdata.len(), 4);
+        let wit = prepare_spend_candidate(&dummy, mature, &[BLOCK_STRUCT_CTRL, 1, 1, 0]).unwrap();
+        assert_eq!(wit.txdata.len(), 2);
+        assert!(rbitcoin_consensus::block_has_witness(&wit));
+        let h1 = prepare_height1_candidate(
+            &genesis_diff_tip(&diff_regtest_params()),
+            &[BLOCK_STRUCT_CTRL, 3, 1, 8],
+        )
+        .unwrap();
+        assert_eq!(h1.txdata.len(), 4);
+        assert!(rbitcoin_consensus::block_has_witness(&h1));
     }
 
     #[test]

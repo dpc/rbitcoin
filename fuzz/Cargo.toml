@@ -149,3 +149,10 @@ path = "fuzz_targets/script_kernel_differential.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "p2p_sequence_differential"
+path = "fuzz_targets/p2p_sequence_differential.rs"
+test = false
+doc = false
+bench = false

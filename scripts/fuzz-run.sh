@@ -27,6 +27,7 @@ wire_dict_for_bin() {
     inv_getdata_wire) printf 'fuzz/dict/inv.dict' ;;
     electrum_json) printf 'fuzz/dict/electrum.dict' ;;
     v2_session) printf 'fuzz/dict/p2p.dict' ;;
+    p2p_sequence_differential) printf 'fuzz/dict/p2p.dict' ;;
     script_differential|script_verify_differential|script_kernel_differential) printf 'fuzz/dict/script.dict' ;;
     *) printf '' ;;
   esac
@@ -144,6 +145,9 @@ elif [[ "$BIN" == "store_reorg" ]]; then
 elif [[ "$BIN" == "script_kernel_differential" ]]; then
   sanitizer="address"
   timeout=10
+elif [[ "$BIN" == "p2p_sequence_differential" ]]; then
+  sanitizer="none"
+  timeout=180
 fi
 
 WRAP="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
@@ -170,7 +174,7 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   if [[ "$BIN" == "script_differential" || "$BIN" == "script_verify_differential" ]]; then
     echo "FUZZ_MAX_LEN=2000"
   fi
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" || "$BIN" == "p2p_sequence_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
   if [[ "$BIN" == "store_reorg" ]]; then
@@ -181,10 +185,10 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
     echo "FUZZ_NO_CORE=1"
     echo "FUZZ_MAX_LEN=2000"
   fi
-  if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
+  if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" || "$BIN" == "p2p_sequence_differential" ]]; then
     echo "BITCOIND_LISTEN=1"
   fi
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "p2p_sequence_differential" ]]; then
     echo "RBITCOIN_HEAD_SCALE=${RBITCOIN_HEAD_SCALE:-tiny}"
   fi
   exit 0
@@ -360,6 +364,31 @@ if [[ "$BIN" == "script_kernel_differential" ]]; then
     exit "$st"
   fi
   fail_if_no_comparisons "$log" 0.01
+  exit 0
+fi
+
+if [[ "$BIN" == "p2p_sequence_differential" ]]; then
+  export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
+  export RBITCOIN_IO="${RBITCOIN_IO:-fd}"
+  export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
+  merge_seed fuzz/corpus/p2p_sequence_differential \
+    crates/rbitcoin-net/tests/fixtures/p2p_seq_two_ping.bin
+  log="${TMPDIR:-/tmp}/rbtc-fuzz-p2p-seq.$$.log"
+  set +e
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer none p2p_sequence_differential -- \
+    -max_total_time="$(fuzz_max_total_time)" \
+    -timeout="$timeout" \
+    -max_len=256 \
+    -dict=fuzz/dict/p2p.dict \
+    -seed="$SEED" \
+    2>&1 | tee "$log"
+  st=${PIPESTATUS[0]}
+  set -e
+  if [[ "$st" -ne 0 ]]; then
+    copy_crashers fuzz/artifacts "$CRASHERS"
+    exit "$st"
+  fi
+  fail_if_no_comparisons "$log" 0.005
   exit 0
 fi
 

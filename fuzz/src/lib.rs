@@ -1,7 +1,9 @@
 //! Live Core JSON-RPC + bitcoind spawn for differential and v2 session fuzz.
 
+mod p2p_seq;
 mod script_kernel;
 
+pub use p2p_seq::{p2p_sequence_ping_comparisons, parse_p2p_sequence, P2pSeqKind, P2pSeqStep};
 pub use script_kernel::{compare_script_kernel, kernel_forks, parse_kernel_input, KernelCmp};
 
 use rbitcoin_net::{

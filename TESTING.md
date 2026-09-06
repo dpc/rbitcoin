@@ -279,6 +279,7 @@ in-tree extras (`store_reorg`, later `script_kernel_differential` /
 | `script_verify_differential` | `verify_tx_scripts_detached` vs Core `testmempoolaccept` of the parent+spend package. Same policy skip | same tarball, `-acceptnonstdtxn=1` |
 | `store_reorg` | Tiny-hub `{extend, sibling, rewind}` connect churn (ASan, no Core). Store `Corrupt` / probe-exhausted **panics** | none |
 | `script_kernel_differential` | In-process `verify_tx_scripts_detached_forks` vs `bitcoinconsensus::verify_with_flags` (ASan, **fuzz workspace only**) | Core interpreter via `bitcoinconsensus` crate |
+| `p2p_sequence_differential` | Up to 8 `{ping, headers, block}` steps vs live Core v2 + `compare_one` for block | same tarball, `-listen=1` |
 
 ```bash
 ./scripts/fuzz-run.sh                           # block_wire (ASan)
@@ -299,6 +300,7 @@ in-tree extras (`store_reorg`, later `script_kernel_differential` /
 ./scripts/fuzz-run.sh script_verify_differential # detached scripts vs testmempoolaccept package
 ./scripts/fuzz-run.sh store_reorg                # tiny hub connect/disconnect, ASan, no Core
 ./scripts/fuzz-run.sh script_kernel_differential # ours vs libbitcoinconsensus, ASan, no Core
+./scripts/fuzz-run.sh p2p_sequence_differential  # ping/headers/block vs Core, --sanitizer none
 ```
 
 `block_differential` prepares every candidate on **regtest genesis** (`prev`

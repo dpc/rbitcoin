@@ -85,6 +85,18 @@ assert_ok "script_kernel dry-run dict" \
 assert_ok "script_kernel dry-run max_len 2000" \
   grep -qx "FUZZ_MAX_LEN=2000" <<<"$out"
 
+out="$(FUZZ_DRY_RUN=1 "$RUN" p2p_sequence_differential)"
+assert_ok "p2p_sequence dry-run bin" \
+  grep -qx "FUZZ_BIN=p2p_sequence_differential" <<<"$out"
+assert_ok "p2p_sequence dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+assert_ok "p2p_sequence dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/p2p.dict" <<<"$out"
+assert_ok "p2p_sequence dry-run BITCOIND_LISTEN=1" \
+  grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+assert_ok "p2p_sequence two-ping seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/p2p_seq_two_ping.bin"
+
 out="$(FUZZ_DRY_RUN=1 "$RUN" cmpct_differential)"
 assert_ok "cmpct-differential dry-run bin" \
   grep -qx "FUZZ_BIN=cmpct_differential" <<<"$out"
