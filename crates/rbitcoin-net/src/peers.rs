@@ -783,6 +783,7 @@ impl LivePeer {
                 }
                 p
             },
+            mapped_as: None,
         }
     }
 }
@@ -854,6 +855,8 @@ pub struct PeerInfo {
     pub permissions: Vec<String>,
     /// Block heights in flight from this peer (`getpeerinfo.inflight`).
     pub inflight: Vec<u32>,
+    /// Core `mapped_as` when an asmap mapped this peer (omit/`None` otherwise).
+    pub mapped_as: Option<u32>,
 }
 
 /// Thread-safe session table + addnode remembered addrs.

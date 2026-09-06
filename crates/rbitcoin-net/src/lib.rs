@@ -11,6 +11,7 @@ mod eviction;
 mod ibd;
 mod most_work;
 mod msg_decode;
+mod netgroup;
 mod peer;
 mod peer_dos;
 mod peers;
@@ -61,6 +62,7 @@ pub use most_work::{
     first_best_ancestor, lca_on_best_chain, path_hashes_from_ancestor, select_most_work, sum_work,
     sum_work_for_hashes, work_better, InvalidHashSet, SelectOutcome, WorkCandidate,
 };
+pub use netgroup::netgroup;
 pub use peer::{flush_tx_invs, force_announce_txid, local_service_flags, V2PlainSession};
 pub use peer_dos::{
     inbound_semaphore, PeerRateLimiter, DEFAULT_MAX_BYTES_PER_SEC, DEFAULT_MAX_INBOUND,
