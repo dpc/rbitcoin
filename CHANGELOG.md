@@ -30,13 +30,11 @@ before 1.0).
   prefix (not `non-mandatory-script-verify-flag-failed`). CLEANSTACK extra
   items on OP_TRUE/SHA1 spends were reported as consensus splits.
 
-- **`testmempoolaccept` maxfeerate is a high cap, not `0`:** Core treats
-  `0` as `Some(CFeeRate(0))` and rejects any positive fee. Pad spends pay
-  ~1 BTC. Default 0.10 BTC/kvB remains skipped as `max feerate exceeded`.
-
-- **Mempool/script-verify fuzz no longer treats Core `max feerate exceeded`
-  as a consensus split:** v31.1 `testmempoolaccept` defaults to 0.10 BTC/kvB
-  (`max feerate`, not `max-fee`). Skip that policy reason.
+- **Mempool/script-verify fuzz `testmempoolaccept` uses `maxfeerate=0`:**
+  Core v31 treats `0` as accept-any fee rate. Values above 1 BTC/kvB are
+  rejected as RPC parameters; `10000` made every oracle call `RpcError` and
+  muted both targets (zero comparisons). Default 0.10 remains skipped as
+  `max feerate exceeded` when the arg is omitted.
 
 - **Tip-follow `getdata` that a peer never answers is retried:** inflight
   hashes sat in `requested` / `asked_blocks` with no timeout, so a serve-cap
