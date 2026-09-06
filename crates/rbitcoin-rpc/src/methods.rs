@@ -9,7 +9,10 @@ use bitcoin::{
     Txid,
 };
 use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::{hex_decode, hex_encode, Height, Network};
+use rbitcoin_primitives::{
+    display_hash_hex, hex_decode, hex_encode, parse_display_hash32, DisplayHashError, Height,
+    Network,
+};
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -18,33 +21,22 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Core / Electrum / Esplora **display order** hex for a 32-byte hash or txid.
-///
-/// Store and rust-bitcoin `to_byte_array()` use **internal** byte order; RPC
-/// clients expect the reversed hex (same as `BlockHash`/`Txid` `Display`).
 fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
     sat_kvb as f64 / 100_000_000.0
 }
 
 fn hash_hex_display(h: &[u8; 32]) -> String {
-    let mut rev = *h;
-    rev.reverse();
-    hex_encode(rev)
+    display_hash_hex(h)
 }
 
 /// Parse Core display-order 32-byte hex → internal byte order.
 pub(crate) fn parse_hash32_display(hex: &str) -> Result<[u8; 32], Value> {
-    let mut b = hex_decode(hex).map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))?;
-    if b.len() != 32 {
-        return Err(rpc_error(
-            ERR_INVALID_PARAMS,
-            "hash/txid must be 32 bytes hex",
-        ));
-    }
-    b.reverse();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&b);
-    Ok(out)
+    parse_display_hash32(hex).map_err(|e| match e {
+        DisplayHashError::WrongLength { .. } => {
+            rpc_error(ERR_INVALID_PARAMS, "hash/txid must be 32 bytes hex")
+        }
+        DisplayHashError::Hex(h) => rpc_error(ERR_INVALID_PARAMS, h.to_string()),
+    })
 }
 
 /// Shared process context for RPC handlers.

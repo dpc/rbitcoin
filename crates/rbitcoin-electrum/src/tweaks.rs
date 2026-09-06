@@ -435,9 +435,7 @@ fn push_hex(s: &mut String, data: &[u8]) {
 }
 
 fn push_txid_display_hex(s: &mut String, txid: &[u8; 32]) {
-    let mut r = *txid;
-    r.reverse();
-    push_hex(s, &r);
+    s.push_str(&rbitcoin_primitives::display_hash_hex(txid));
 }
 
 /// Cake `noData` / resubscribe signal (`fromJson` catch path reads `message`).
@@ -488,9 +486,7 @@ pub fn encode_tx_tweak(t: &TxTweak) -> Value {
 
 #[cfg(test)]
 fn txid_display_hex(txid: &[u8; 32]) -> String {
-    let mut r = *txid;
-    r.reverse();
-    hex_encode(r)
+    rbitcoin_primitives::display_hash_hex(txid)
 }
 
 fn param_u32(params: &Value, idx: usize) -> Result<u32, String> {

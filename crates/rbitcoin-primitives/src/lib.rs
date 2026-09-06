@@ -7,7 +7,10 @@ mod hex;
 mod median_time;
 mod script_sigops;
 
-pub use hex::{decode as hex_decode, encode as hex_encode, HexError};
+pub use hex::{
+    decode as hex_decode, display_hash_hex, encode as hex_encode, parse_display_hash32,
+    DisplayHashError, HexError,
+};
 pub use median_time::median_time_past_times;
 pub use script_sigops::script_sigop_count;
 

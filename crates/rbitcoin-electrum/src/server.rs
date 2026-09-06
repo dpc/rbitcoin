@@ -1569,14 +1569,7 @@ fn method_accepts_asof(method: &str) -> bool {
 }
 
 fn parse_blockhash32(s: &str) -> Option<[u8; 32]> {
-    let mut bytes = rbitcoin_primitives::hex_decode(s).ok()?;
-    if bytes.len() != 32 {
-        return None;
-    }
-    bytes.reverse();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Some(out)
+    rbitcoin_primitives::parse_display_hash32(s).ok()
 }
 
 fn protocol_tuple(s: &str) -> Option<Vec<u32>> {
@@ -1713,27 +1706,22 @@ fn param_str(params: &Value, idx: usize) -> Result<&str, String> {
 
 fn param_scripthash(params: &Value, idx: usize) -> Result<[u8; 32], String> {
     let s = param_str(params, idx)?;
-    let mut bytes = rbitcoin_primitives::hex_decode(s).map_err(|e| e.to_string())?;
-    if bytes.len() != 32 {
-        return Err("scripthash must be 32 bytes hex".into());
-    }
-    // Electrum uses reversed hex for scripthash
-    bytes.reverse();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    rbitcoin_primitives::parse_display_hash32(s).map_err(|e| match e {
+        rbitcoin_primitives::DisplayHashError::WrongLength { .. } => {
+            "scripthash must be 32 bytes hex".into()
+        }
+        rbitcoin_primitives::DisplayHashError::Hex(h) => h.to_string(),
+    })
 }
 
 fn param_txid(params: &Value, idx: usize) -> Result<[u8; 32], String> {
     let s = param_str(params, idx)?;
-    let mut bytes = rbitcoin_primitives::hex_decode(s).map_err(|e| e.to_string())?;
-    if bytes.len() != 32 {
-        return Err("txid must be 32 bytes hex".into());
-    }
-    bytes.reverse();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    rbitcoin_primitives::parse_display_hash32(s).map_err(|e| match e {
+        rbitcoin_primitives::DisplayHashError::WrongLength { .. } => {
+            "txid must be 32 bytes hex".into()
+        }
+        rbitcoin_primitives::DisplayHashError::Hex(h) => h.to_string(),
+    })
 }
 
 fn txid_hex(txid: &[u8; 32]) -> String {
@@ -1741,9 +1729,7 @@ fn txid_hex(txid: &[u8; 32]) -> String {
 }
 
 fn hash_hex_rev(h: &[u8; 32]) -> String {
-    let mut r = *h;
-    r.reverse();
-    rbitcoin_primitives::hex_encode(r)
+    rbitcoin_primitives::display_hash_hex(h)
 }
 
 fn append_mempool_history(

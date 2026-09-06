@@ -4,7 +4,7 @@ use crate::script_fields::esplora_script_fields;
 use bitcoin::hashes::Hash;
 use bitcoin::{Network, Transaction};
 use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::hex_encode;
+use rbitcoin_primitives::{display_hash_hex, hex_encode};
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::{Query, QueryError, ScriptHashHistoryItem, ScriptHashUtxo};
 use rbitcoin_store::InputRecord;
@@ -333,9 +333,7 @@ fn vout_fields(script: &[u8], value: i64, network: Network) -> Value {
 }
 
 fn block_hash_hex(hash: &[u8; 32]) -> String {
-    let mut rev = *hash;
-    rev.reverse();
-    hex_encode(rev)
+    display_hash_hex(hash)
 }
 
 /// Last push of scriptSig as redeemscript asm (P2SH).
