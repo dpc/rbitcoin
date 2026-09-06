@@ -24,6 +24,8 @@ pub enum NetError {
     Cancelled,
     /// Compact/body does not match the header (`BLOCK_MUTATED`). Do not cache as failed.
     Mutated(String),
+    /// Header prev is not the expected tip / batch parent.
+    BadPrev,
     /// Height occupied by a different block — hold and try `accept_branch`.
     SideBlock,
     /// Parent header is not on our chain.
@@ -48,6 +50,7 @@ impl fmt::Display for NetError {
             NetError::Consensus(s) => write!(f, "consensus: {s}"),
             NetError::Cancelled => f.write_str("confirm cancelled"),
             NetError::Mutated(s) => write!(f, "consensus: {s}"),
+            NetError::BadPrev => f.write_str("consensus: unexpected previous header"),
             NetError::SideBlock => f.write_str("protocol: side block; use accept_branch for reorg"),
             NetError::UnknownParent => f.write_str("protocol: unknown parent"),
         }
@@ -66,6 +69,16 @@ impl std::error::Error for NetError {
 impl From<io::Error> for NetError {
     fn from(e: io::Error) -> Self {
         NetError::Io(e)
+    }
+}
+
+impl NetError {
+    pub fn from_consensus(e: rbitcoin_consensus::ConsensusError) -> Self {
+        match e {
+            rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
+            rbitcoin_consensus::ConsensusError::BadPrev => NetError::BadPrev,
+            other => NetError::Consensus(other.to_string()),
+        }
     }
 }
 
@@ -96,6 +109,7 @@ mod tests {
                 NetError::Mutated("bad-txnmrklroot".into()),
                 "consensus: bad-txnmrklroot",
             ),
+            (NetError::BadPrev, "consensus: unexpected previous header"),
             (
                 NetError::SideBlock,
                 "protocol: side block; use accept_branch for reorg",

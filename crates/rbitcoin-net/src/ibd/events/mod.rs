@@ -564,12 +564,7 @@ pub(crate) fn apply_confirm_reject(
         warn!("ibd: confirm reject ignored zero-hash @{height}: {err}");
         return;
     }
-    if class == ConfirmRejectClass::Cancelled {
-        return;
-    }
-    // Soft re-get only for bad wire / missing header window / merkle reconstruct.
-    // Never soft-requeue "parent unresolved" / "fk mismatch" (hides store bugs).
-    let soft_wire = class == ConfirmRejectClass::SoftWire || class == ConfirmRejectClass::BadPrev;
+    let soft_wire = class.is_soft();
     let bad_prev = class == ConfirmRejectClass::BadPrev;
     if bad_prev {
         if let Some(q) = query {
@@ -598,7 +593,7 @@ pub(crate) fn apply_confirm_reject(
         clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
         if let Some(q) = query {
             let _ = q.block_queue_dequeue_height(height);
-            if err.contains("merkle root mismatch") {
+            if class == ConfirmRejectClass::SoftMerkle {
                 match q.clear_archived_body(hash.as_byte_array()) {
                     Ok(true) => warn!(
                         "ibd: cleared corrupt Class A body for {hash} @{height} (merkle mismatch)"

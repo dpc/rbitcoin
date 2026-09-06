@@ -90,11 +90,8 @@ fn cheap_submit_tx_reject(query: &rbitcoin_query::Query, block: &Block) -> Optio
 }
 
 fn submit_reject_reason(e: &rbitcoin_net::NetError) -> String {
-    match e {
-        rbitcoin_net::NetError::UnknownParent | rbitcoin_net::NetError::SideBlock => {
-            return "prev-blk-not-found".into();
-        }
-        _ => {}
+    if matches!(e, rbitcoin_net::NetError::UnknownParent) {
+        return "prev-blk-not-found".into();
     }
     submit_reject_reason_str(&e.to_string())
 }

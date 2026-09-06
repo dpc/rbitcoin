@@ -13,8 +13,9 @@ before 1.0).
 
 - **Confirm/net rejects are typed at the sender:** IBD matches
   `ConfirmRejectClass` (not English). Side blocks, unknown parents, mutated
-  compact bodies, duplicate mempool txs, and io_uring-unavailable stay the
-  same log/RPC strings.
+  compact bodies, and duplicate mempool txs keep the same log/RPC strings.
+  `io_uring` not available logs as `io_uring unavailable` (no `corrupt record:`
+  prefix).
 - **One-shot confirm load is stamp then pin:** `confirm_wire_load_phase`
   is `confirm_wire_lookup_stamp` + `confirm_wire_load_from_plan` (same
   as IBD after BQ TipOnly). Script jobs carry `ScriptVerifyFlags`.

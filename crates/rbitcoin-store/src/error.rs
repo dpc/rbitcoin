@@ -63,7 +63,7 @@ impl fmt::Display for StoreError {
             StoreError::Corrupt(m) => write!(f, "corrupt record: {m}"),
             StoreError::BudgetFull(m) => write!(f, "budget full: {m}"),
             StoreError::Cancelled(m) => write!(f, "cancelled: {m}"),
-            StoreError::Unavailable => f.write_str("corrupt record: io_uring unavailable"),
+            StoreError::Unavailable => f.write_str("io_uring unavailable"),
             StoreError::Layout(m) => write!(f, "{m}"),
             StoreError::Stale(m) => write!(f, "{m}"),
         }
@@ -120,7 +120,7 @@ mod tests {
         assert!(texts[6].contains("corrupt record: broken"));
         assert!(texts[7].contains("budget full: block_queue"));
         assert!(texts[8].contains("cancelled: stop"));
-        assert_eq!(texts[9], "corrupt record: io_uring unavailable");
+        assert_eq!(texts[9], "io_uring unavailable");
         assert_eq!(texts[10], "inwit is on a cold datadir");
         assert_eq!(texts[11], "chain view moved");
         for e in &arms {

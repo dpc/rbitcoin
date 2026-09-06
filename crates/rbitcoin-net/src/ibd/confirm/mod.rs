@@ -298,24 +298,23 @@ impl ConfirmFeed {
 /// How IBD treats a confirm-engine reject (computed at the sender).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfirmRejectClass {
-    SoftWire,
+    SoftMerkle,
+    SoftRetarget,
     BadPrev,
     Permanent,
-    Cancelled,
 }
 
 impl ConfirmRejectClass {
     /// Today's substring map (pin for `confirm_reject_tests` strings).
     pub(crate) fn from_err_str(err: &str) -> Self {
-        if err.contains("confirm cancelled") {
-            return Self::Cancelled;
-        }
-        let bad_prev = super::reorg::is_bad_prev_err(err);
-        if bad_prev {
+        if super::reorg::is_bad_prev_err(err) {
             return Self::BadPrev;
         }
-        if err.contains("missing retarget first header") || err.contains("merkle root mismatch") {
-            return Self::SoftWire;
+        if err.contains("merkle root mismatch") {
+            return Self::SoftMerkle;
+        }
+        if err.contains("missing retarget first header") {
+            return Self::SoftRetarget;
         }
         Self::Permanent
     }
@@ -323,20 +322,23 @@ impl ConfirmRejectClass {
     pub(crate) fn from_consensus(err: &rbitcoin_consensus::ConsensusError) -> Self {
         use rbitcoin_consensus::ConsensusError;
         match err {
-            ConsensusError::Cancelled => Self::Cancelled,
             ConsensusError::BadPrev => Self::BadPrev,
-            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftWire,
-            ConsensusError::BadHeader("missing retarget first header") => Self::SoftWire,
+            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftMerkle,
+            ConsensusError::BadHeader("missing retarget first header") => Self::SoftRetarget,
             other => Self::from_err_str(&other.to_string()),
         }
     }
 
     pub(crate) fn from_net(err: &crate::error::NetError) -> Self {
         match err {
-            crate::error::NetError::Cancelled => Self::Cancelled,
-            crate::error::NetError::Mutated(_) => Self::SoftWire,
+            crate::error::NetError::Mutated(_) => Self::SoftMerkle,
+            crate::error::NetError::BadPrev => Self::BadPrev,
             other => Self::from_err_str(&other.to_string()),
         }
+    }
+
+    pub(crate) fn is_soft(self) -> bool {
+        matches!(self, Self::SoftMerkle | Self::SoftRetarget | Self::BadPrev)
     }
 }
 

@@ -32,7 +32,7 @@ fn apply_confirm_reject(
     );
 }
 
-/// Soft/BadPrev/Permanent/Cancelled class matches today's substring map.
+/// SoftMerkle/SoftRetarget/BadPrev/Permanent class matches today's substring map.
 #[test]
 fn confirm_reject_class_matches_substring_table() {
     use rbitcoin_consensus::ConsensusError;
@@ -47,11 +47,11 @@ fn confirm_reject_class_matches_substring_table() {
         ("consensus: unexpected previous", ConfirmRejectClass::BadPrev),
         (
             "consensus: bad block: merkle root mismatch",
-            ConfirmRejectClass::SoftWire,
+            ConfirmRejectClass::SoftMerkle,
         ),
         (
             "consensus: bad header: missing retarget first header",
-            ConfirmRejectClass::SoftWire,
+            ConfirmRejectClass::SoftRetarget,
         ),
         (
             "consensus: script verification failed: script false",
@@ -73,7 +73,6 @@ fn confirm_reject_class_matches_substring_table() {
             "consensus: prevout already spent on best chain",
             ConfirmRejectClass::Permanent,
         ),
-        ("confirm cancelled", ConfirmRejectClass::Cancelled),
     ];
     for (s, want) in cases {
         assert_eq!(ConfirmRejectClass::from_err_str(s), *want, "{s}");
@@ -84,21 +83,21 @@ fn confirm_reject_class_matches_substring_table() {
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::BadBlock("merkle root mismatch")),
-        ConfirmRejectClass::SoftWire
+        ConfirmRejectClass::SoftMerkle
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::BadHeader(
             "missing retarget first header"
         )),
-        ConfirmRejectClass::SoftWire
+        ConfirmRejectClass::SoftRetarget
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::Cancelled),
-        ConfirmRejectClass::Cancelled
+        ConfirmRejectClass::Permanent
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::from(StoreError::Cancelled("stop"))),
-        ConfirmRejectClass::Cancelled
+        ConfirmRejectClass::Permanent
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::PrevoutSpent),

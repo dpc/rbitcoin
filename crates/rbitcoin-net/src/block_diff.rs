@@ -999,6 +999,7 @@ pub fn verdict_from_accept(
             NetError::Protocol(_)
             | NetError::Consensus(_)
             | NetError::Mutated(_)
+            | NetError::BadPrev
             | NetError::SideBlock
             | NetError::UnknownParent,
         ) => Ok(DiffVerdict::Reject),

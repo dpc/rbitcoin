@@ -1091,10 +1091,7 @@ impl ChainHub {
             pipeline,
             &ScriptPreverified::new(),
         )
-        .map_err(|e| match e {
-            rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
-            other => NetError::Consensus(other.to_string()),
-        })
+        .map_err(NetError::from_consensus)
     }
 
     /// Unified lookup+load from raw wire blocks (no Class-A wire rebuild).
@@ -1132,10 +1129,7 @@ impl ChainHub {
             &ScriptPreverified::new(),
             pipeline,
         )
-        .map_err(|e| match e {
-            rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
-            other => NetError::Consensus(other.to_string()),
-        })?;
+        .map_err(NetError::from_consensus)?;
         Ok(Some(ok))
     }
 
@@ -1146,12 +1140,8 @@ impl ChainHub {
             .into_iter()
             .map(|(h, raw)| (h, BlockHash::from_byte_array(raw)))
             .collect();
-        confirm_write_phase(&self.query, &self.params, self.milestone, batch).map_err(
-            |e| match e {
-                rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
-                other => NetError::Consensus(other.to_string()),
-            },
-        )?;
+        confirm_write_phase(&self.query, &self.params, self.milestone, batch)
+            .map_err(NetError::from_consensus)?;
         self.note_confirmed_tip(&meta)?;
         Ok(meta
             .iter()
