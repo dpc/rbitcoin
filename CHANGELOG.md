@@ -11,10 +11,17 @@ before 1.0).
 
 ### Changed
 
+<<<<<<< HEAD
 - **IBD confirm-event drain is `apply_confirm_events`:** the main loop still
   drains before assign and after `offer_confirm_ready` (plus the stall tick).
   Headers apply is named stages; a repeated header window does not grow the
   header table. Confirm reject no longer clones unused wire.
+=======
+- **ChainHub holds side bodies in one `HeldBodies` map:** first-seen seq
+  lives next to the body (one `RwLock`, cap 320 FIFO). Invalidated hashes,
+  header-only tips, and mining knobs are named types. RPC/P2P façades
+  unchanged.
+>>>>>>> 918299b4 (net: compose ChainHub held bodies, tips, and mining knobs)
 - **Workspace version 0.5.99:** in-tree toward 0.6.0. Published GitHub
   Releases remain 0.5.1; 0.5.2 is the 0.5.1 maintenance branch.
 - **`NodeConfig` is composed option groups:** `DatadirOpts` / `ListenOpts` /
