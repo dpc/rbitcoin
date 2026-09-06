@@ -796,6 +796,9 @@ pub fn verdict_from_accept(
     match r {
         Ok(AcceptOutcome::Accepted { .. }) => Ok(DiffVerdict::Accept),
         Ok(AcceptOutcome::AlreadyHave | AcceptOutcome::IgnoredWeaker) => Ok(DiffVerdict::Skip),
+        Err(NetError::Consensus(s)) if rbitcoin_store::is_store_corrupt_display(&s) => {
+            Err("store: corrupt")
+        }
         Err(NetError::Protocol(_) | NetError::Consensus(_)) => Ok(DiffVerdict::Reject),
         Err(NetError::Io(_) | NetError::Timeout | NetError::Disconnected) => Err("harness"),
         Err(_) => Err("harness"),
@@ -1886,6 +1889,16 @@ mod tests {
         assert_eq!(
             verdict_from_accept(Err(NetError::Consensus("bad-txnmrklroot".into()))).unwrap(),
             DiffVerdict::Reject
+        );
+        let probe = rbitcoin_store::StoreError::Corrupt("address head probe exhausted on insert");
+        assert!(rbitcoin_store::is_probe_exhausted_error(&probe));
+        let harness = verdict_from_accept(Err(NetError::Consensus(probe.to_string())));
+        assert_eq!(harness, Err("store: corrupt"));
+        assert_eq!(
+            verdict_from_accept(Err(NetError::Consensus(
+                "corrupt record: leftover identity broken".into()
+            ))),
+            Err("store: corrupt")
         );
         assert!(verdict_from_accept(Err(NetError::Io(std::io::Error::other("x")))).is_err());
     }
