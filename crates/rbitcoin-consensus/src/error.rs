@@ -14,6 +14,8 @@ pub enum ConsensusError {
     BadPrev,
     /// BIP34/66/65 outdated `nVersion` (`bad-version(0x…)`).
     BadVersion(i32),
+    /// Cooperative abort (IBD SIGINT / confirm cancel) — not a block reject.
+    Cancelled,
 }
 
 impl fmt::Display for ConsensusError {
@@ -29,6 +31,7 @@ impl fmt::Display for ConsensusError {
             ConsensusError::InvalidPow => f.write_str("pow invalid"),
             ConsensusError::BadPrev => f.write_str("unexpected previous header"),
             ConsensusError::BadVersion(v) => write!(f, "bad-version(0x{v:08x})"),
+            ConsensusError::Cancelled => f.write_str("confirm cancelled"),
         }
     }
 }
@@ -47,11 +50,12 @@ impl From<StoreError> for ConsensusError {
         // Peer / untrusted blocks can hit archive stamp when a parent is simply
         // missing (invalid block). That is consensus MissingPrevout, not store
         // corruption — see docs/external_findings/002-store-corrupt-record-on-invalid-block.md.
-        match &e {
+        match e {
+            StoreError::Cancelled(_) => ConsensusError::Cancelled,
             StoreError::Corrupt(m) if m.contains("parent create_fk unresolved") => {
                 ConsensusError::MissingPrevout
             }
-            _ => ConsensusError::Store(e),
+            other => ConsensusError::Store(other),
         }
     }
 }
@@ -141,11 +145,16 @@ mod tests {
             (ConsensusError::InvalidPow, "pow invalid"),
             (ConsensusError::BadPrev, "unexpected previous header"),
             (ConsensusError::BadVersion(2), "bad-version(0x00000002)"),
+            (ConsensusError::Cancelled, "confirm cancelled"),
         ];
         for (err, needle) in cases {
             assert_eq!(err.to_string(), *needle);
             assert!(err.source().is_none());
         }
+        assert!(matches!(
+            ConsensusError::from(StoreError::Cancelled("stop")),
+            ConsensusError::Cancelled
+        ));
     }
 
     #[test]

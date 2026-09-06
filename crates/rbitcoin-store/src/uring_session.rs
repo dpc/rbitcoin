@@ -130,7 +130,7 @@ impl UringSession {
     #[cfg(test)]
     pub fn new(entries: u32) -> Result<Self, StoreError> {
         if !crate::bulk_io::io_uring_enabled() {
-            return Err(StoreError::Corrupt("io_uring unavailable"));
+            return Err(StoreError::Unavailable);
         }
         Self::try_open(entries)
     }
@@ -711,7 +711,7 @@ pub fn with_thread_local<R>(
 
         // Gate once; TLS open uses try_open to avoid recursive enabled() probe.
         if !crate::bulk_io::io_uring_enabled() {
-            return Err(StoreError::Corrupt("io_uring unavailable"));
+            return Err(StoreError::Unavailable);
         }
 
         DEPTH.with(|depth| {

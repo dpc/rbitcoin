@@ -1091,7 +1091,10 @@ impl ChainHub {
             pipeline,
             &ScriptPreverified::new(),
         )
-        .map_err(|e| NetError::Consensus(e.to_string()))
+        .map_err(|e| match e {
+            rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
+            other => NetError::Consensus(other.to_string()),
+        })
     }
 
     /// Unified lookup+load from raw wire blocks (no Class-A wire rebuild).
@@ -1129,7 +1132,10 @@ impl ChainHub {
             &ScriptPreverified::new(),
             pipeline,
         )
-        .map_err(|e| NetError::Consensus(e.to_string()))?;
+        .map_err(|e| match e {
+            rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
+            other => NetError::Consensus(other.to_string()),
+        })?;
         Ok(Some(ok))
     }
 
@@ -1140,8 +1146,12 @@ impl ChainHub {
             .into_iter()
             .map(|(h, raw)| (h, BlockHash::from_byte_array(raw)))
             .collect();
-        confirm_write_phase(&self.query, &self.params, self.milestone, batch)
-            .map_err(|e| NetError::Consensus(e.to_string()))?;
+        confirm_write_phase(&self.query, &self.params, self.milestone, batch).map_err(
+            |e| match e {
+                rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
+                other => NetError::Consensus(other.to_string()),
+            },
+        )?;
         self.note_confirmed_tip(&meta)?;
         Ok(meta
             .iter()
@@ -1567,7 +1577,7 @@ impl ChainHub {
                     .height_of_hash(&prev.to_byte_array())
                     .map_err(|e| NetError::Consensus(e.to_string()))?
                 else {
-                    return Err(NetError::Protocol("unknown parent"));
+                    return Err(NetError::UnknownParent);
                 };
 
                 let new_height = parent_h.0.saturating_add(1);
@@ -1590,9 +1600,7 @@ impl ChainHub {
                     return Ok(AcceptOutcome::IgnoredWeaker);
                 }
 
-                Err(NetError::Protocol(
-                    "side block; use accept_branch for reorg",
-                ))
+                Err(NetError::SideBlock)
             }
         }
     }
@@ -1778,11 +1786,8 @@ impl ChainHub {
                     None => Ok(AcceptOutcome::IgnoredWeaker),
                 }
             }
-            Err(NetError::Protocol(s))
-                if s.contains("side block")
-                    || s.contains("unknown parent")
-                    || s.contains("gap above tip") =>
-            {
+            Err(NetError::SideBlock | NetError::UnknownParent)
+            | Err(NetError::Protocol("gap above tip")) => {
                 self.hold_body(block);
                 match self.try_apply_held()? {
                     Some(o) => Ok(o),
@@ -1796,7 +1801,7 @@ impl ChainHub {
                 // acceptable so a later honest reconstruct can connect
                 // (`p2p_compactblocks` stalling-peer invalid compact).
                 if let NetError::Consensus(s) = &e {
-                    if !reject_is_mutated(s) && !s.to_ascii_lowercase().contains("not found") {
+                    if !s.to_ascii_lowercase().contains("not found") {
                         self.note_invalid_block(hash);
                     }
                 }
@@ -2009,7 +2014,7 @@ impl ChainHub {
                 if let (NetError::Consensus(s), Some(tip)) =
                     (&e, branch.last().map(Block::block_hash))
                 {
-                    if !reject_is_mutated(s) && !s.to_ascii_lowercase().contains("not found") {
+                    if !s.to_ascii_lowercase().contains("not found") {
                         self.note_invalid_block(tip);
                     }
                 }
@@ -2050,7 +2055,11 @@ impl ChainHub {
                 "{}",
                 rbitcoin_consensus::block_reject_log_line(&hash, &reason)
             );
-            NetError::Consensus(reason)
+            if reject_is_mutated(&reason) {
+                NetError::Mutated(reason)
+            } else {
+                NetError::Consensus(reason)
+            }
         })?;
         self.header_tips.write().unwrap().remove(&hash);
         let t_mp = std::time::Instant::now();
@@ -3231,7 +3240,7 @@ mod tests {
         let orphan = mine(BlockHash::from_byte_array([9u8; 32]), 1_300_000_200, 99);
         assert!(matches!(
             hub.accept_block(orphan).unwrap_err(),
-            NetError::Protocol(_)
+            NetError::UnknownParent
         ));
 
         // accept_branch empty / unlinked.
@@ -3255,7 +3264,7 @@ mod tests {
         let orphan = mine(BlockHash::from_byte_array([9u8; 32]), 1_300_000_500, 99);
         assert!(matches!(
             hub.accept_block(orphan).unwrap_err(),
-            NetError::Protocol(_)
+            NetError::UnknownParent
         ));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3867,8 +3876,8 @@ mod tests {
         }
         let err = hub.accept_block(side.clone()).unwrap_err();
         assert!(
-            matches!(err, NetError::Protocol(_)),
-            "side/gap should be protocol err: {err}"
+            matches!(err, NetError::SideBlock),
+            "side block must be NetError::SideBlock: {err}"
         );
 
         // Weaker single-block branch at height 1 → IgnoredWeaker (less work than tip path).
@@ -3883,10 +3892,21 @@ mod tests {
         // is "side block; use accept_branch".
         // Missing parent:
         let orphan = mine(BlockHash::from_byte_array([0xab; 32]), 1_300_003_000, 99);
-        assert!(matches!(
-            hub.accept_block(orphan).unwrap_err(),
-            NetError::Protocol(_)
-        ));
+        assert!(
+            matches!(
+                hub.accept_block(orphan.clone()).unwrap_err(),
+                NetError::UnknownParent
+            ),
+            "unknown parent must be NetError::UnknownParent"
+        );
+        assert!(
+            matches!(
+                hub.accept_received_block(orphan.clone()).unwrap(),
+                AcceptOutcome::IgnoredWeaker
+            ),
+            "unknown parent must hold without substring match"
+        );
+        assert!(hub.held_body(&orphan.block_hash()).is_some());
 
         // tip_hash prefers store when present.
         assert_eq!(hub.tip_hash().unwrap(), b2.block_hash());

@@ -295,6 +295,51 @@ impl ConfirmFeed {
     }
 }
 
+/// How IBD treats a confirm-engine reject (computed at the sender).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmRejectClass {
+    SoftWire,
+    BadPrev,
+    Permanent,
+    Cancelled,
+}
+
+impl ConfirmRejectClass {
+    /// Today's substring map (pin for `confirm_reject_tests` strings).
+    pub(crate) fn from_err_str(err: &str) -> Self {
+        if err.contains("confirm cancelled") {
+            return Self::Cancelled;
+        }
+        let bad_prev = super::reorg::is_bad_prev_err(err);
+        if bad_prev {
+            return Self::BadPrev;
+        }
+        if err.contains("missing retarget first header") || err.contains("merkle root mismatch") {
+            return Self::SoftWire;
+        }
+        Self::Permanent
+    }
+
+    pub(crate) fn from_consensus(err: &rbitcoin_consensus::ConsensusError) -> Self {
+        use rbitcoin_consensus::ConsensusError;
+        match err {
+            ConsensusError::Cancelled => Self::Cancelled,
+            ConsensusError::BadPrev => Self::BadPrev,
+            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftWire,
+            ConsensusError::BadHeader("missing retarget first header") => Self::SoftWire,
+            other => Self::from_err_str(&other.to_string()),
+        }
+    }
+
+    pub(crate) fn from_net(err: &crate::error::NetError) -> Self {
+        match err {
+            crate::error::NetError::Cancelled => Self::Cancelled,
+            crate::error::NetError::Mutated(_) => Self::SoftWire,
+            other => Self::from_err_str(&other.to_string()),
+        }
+    }
+}
+
 pub(crate) enum ConfirmEvent {
     /// Tip advanced; hash is the confirmed block.
     Accepted { hash: BlockHash },
@@ -302,6 +347,7 @@ pub(crate) enum ConfirmEvent {
     Reject {
         height: u32,
         hash: BlockHash,
+        class: ConfirmRejectClass,
         err: String,
     },
 }
@@ -1242,7 +1288,7 @@ pub(crate) fn spawn_confirm_engine(
                     Err(e) => {
                         confirm_thr_stats::add_write_work(t0.elapsed());
                         let msg = e.to_string();
-                        if msg.contains("confirm cancelled") || feed_wb.stopped() {
+                        if matches!(e, crate::error::NetError::Cancelled) || feed_wb.stopped() {
                             info!("ibd: confirm write aborted: {msg}");
                             break;
                         }
@@ -1284,6 +1330,7 @@ pub(crate) fn spawn_confirm_engine(
                         let _ = event_tx_wb.send(ConfirmEvent::Reject {
                             height,
                             hash,
+                            class: ConfirmRejectClass::from_net(&e),
                             err: msg,
                         });
                     }
@@ -1344,7 +1391,9 @@ pub(crate) fn spawn_confirm_engine(
                 |e, meta, dropped| {
                     confirm_thr_stats::add_script_work(Duration::ZERO);
                     let msg = e.to_string();
-                    if msg.contains("confirm cancelled") || feed_sc.stopped() {
+                    if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
+                        || feed_sc.stopped()
+                    {
                         info!("ibd: confirm scripts aborted: {msg}");
                         return false;
                     }
@@ -1364,6 +1413,7 @@ pub(crate) fn spawn_confirm_engine(
                     let _ = event_tx_sc.send(ConfirmEvent::Reject {
                         height,
                         hash,
+                        class: ConfirmRejectClass::from_consensus(&e),
                         err: msg,
                     });
                     true
@@ -1494,7 +1544,9 @@ pub(crate) fn spawn_confirm_engine(
                     Ok(s) => s,
                     Err(e) => {
                         let msg = e.to_string();
-                        if msg.contains("confirm cancelled") || feed_load.stopped() {
+                        if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
+                            || feed_load.stopped()
+                        {
                             drop(mat_tx);
                             rbitcoin_consensus::unpark_script_publisher();
                             let _ = scripts.join();
@@ -1527,6 +1579,7 @@ pub(crate) fn spawn_confirm_engine(
                         let _ = event_tx_load.send(ConfirmEvent::Reject {
                             height: expect_h,
                             hash: first_hash,
+                            class: ConfirmRejectClass::from_consensus(&e),
                             err: log_msg,
                         });
                         std::thread::sleep(Duration::from_millis(50));
@@ -1639,7 +1692,7 @@ pub(crate) fn spawn_confirm_engine(
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        if msg.contains("confirm cancelled") {
+                        if matches!(e, crate::error::NetError::Cancelled) {
                             info!("ibd: confirm load cancelled @ {expect_h}");
                             drop(mat_tx);
                             rbitcoin_consensus::unpark_script_publisher();
@@ -1665,6 +1718,7 @@ pub(crate) fn spawn_confirm_engine(
                             .send(ConfirmEvent::Reject {
                                 height: expect_h,
                                 hash: first_hash,
+                                class: ConfirmRejectClass::from_net(&e),
                                 err: msg,
                             })
                             .is_err()

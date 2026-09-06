@@ -235,8 +235,7 @@ fn map_uring_resolve<T>(
 
 fn is_uring_unavailable(err: &StoreError) -> bool {
     match err {
-        StoreError::Corrupt("io_uring unavailable")
-        | StoreError::Corrupt("io_uring is Linux-only") => true,
+        StoreError::Unavailable | StoreError::Corrupt("io_uring is Linux-only") => true,
         StoreError::Io { path, .. } if path.as_os_str() == "io_uring" => true,
         _ => false,
     }
@@ -870,7 +869,7 @@ mod tests {
     #[test]
     fn resolve_uring_unavailable_falls_back_to_pread() {
         let mut pread_hits = 0u32;
-        let out = map_uring_resolve(Err(StoreError::Corrupt("io_uring unavailable")), || {
+        let out = map_uring_resolve(Err(StoreError::Unavailable), || {
             pread_hits += 1;
             Ok(vec![([0u8; 32], None::<(Fk, (u64, u64))>)])
         })

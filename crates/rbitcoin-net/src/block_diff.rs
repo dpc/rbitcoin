@@ -995,7 +995,13 @@ pub fn verdict_from_accept(
         Err(NetError::Consensus(s)) if rbitcoin_store::is_store_corrupt_display(&s) => {
             Err("store: corrupt")
         }
-        Err(NetError::Protocol(_) | NetError::Consensus(_)) => Ok(DiffVerdict::Reject),
+        Err(
+            NetError::Protocol(_)
+            | NetError::Consensus(_)
+            | NetError::Mutated(_)
+            | NetError::SideBlock
+            | NetError::UnknownParent,
+        ) => Ok(DiffVerdict::Reject),
         Err(NetError::Io(_) | NetError::Timeout | NetError::Disconnected) => Err("harness"),
         Err(_) => Err("harness"),
     }

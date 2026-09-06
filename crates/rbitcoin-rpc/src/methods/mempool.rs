@@ -263,7 +263,7 @@ pub(crate) fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result
         }
         // Core sendraw of a live mempool tx is a no-op success (returns txid)
         // and must not re-enter the unbroadcast set (`mempool_unbroadcast.py:93`).
-        Err(e) if e.to_string().starts_with("duplicate ") => {
+        Err(rbitcoin_net::AcceptError::Duplicate(_)) => {
             Ok(json!(hash_hex_display(&tx.compute_txid().to_byte_array())))
         }
         // Same txid, different witness: success + force-INV the live body so a

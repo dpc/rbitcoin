@@ -1637,7 +1637,7 @@ fn take_requested_block(hub: &ChainHub, requested: &mut HashSet<BlockHash>, hash
 fn net_error_needs_parent(e: &NetError) -> bool {
     matches!(
         e,
-        NetError::Protocol("unknown parent") | NetError::Protocol("gap above tip")
+        NetError::UnknownParent | NetError::Protocol("gap above tip")
     )
 }
 

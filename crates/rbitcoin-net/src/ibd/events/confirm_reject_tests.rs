@@ -1,14 +1,109 @@
 //! Tests for super:: events helpers (peeled from events.rs).
 
+use super::super::confirm::ConfirmRejectClass;
 use super::super::state::IbdWorkState;
-use super::apply_confirm_reject;
+use super::apply_confirm_reject as apply_confirm_reject_class;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
+use rbitcoin_query::Query;
 
 fn h(n: u8) -> BlockHash {
     let mut b = [0u8; 32];
     b[0] = n;
     BlockHash::from_byte_array(b)
+}
+
+fn apply_confirm_reject(
+    st: &mut IbdWorkState,
+    height: u32,
+    hash: BlockHash,
+    err: &str,
+    query: Option<&Query>,
+    hub: Option<&crate::chain::ChainHub>,
+) {
+    apply_confirm_reject_class(
+        st,
+        height,
+        hash,
+        ConfirmRejectClass::from_err_str(err),
+        err,
+        query,
+        hub,
+    );
+}
+
+/// Soft/BadPrev/Permanent/Cancelled class matches today's substring map.
+#[test]
+fn confirm_reject_class_matches_substring_table() {
+    use rbitcoin_consensus::ConsensusError;
+    use rbitcoin_store::StoreError;
+
+    let cases: &[(&str, ConfirmRejectClass)] = &[
+        (
+            "consensus: unexpected previous header",
+            ConfirmRejectClass::BadPrev,
+        ),
+        ("unexpected previous header", ConfirmRejectClass::BadPrev),
+        ("consensus: unexpected previous", ConfirmRejectClass::BadPrev),
+        (
+            "consensus: bad block: merkle root mismatch",
+            ConfirmRejectClass::SoftWire,
+        ),
+        (
+            "consensus: bad header: missing retarget first header",
+            ConfirmRejectClass::SoftWire,
+        ),
+        (
+            "consensus: script verification failed: script false",
+            ConfirmRejectClass::Permanent,
+        ),
+        (
+            "consensus: store: corrupt record: invariant: spend annotate missing pin denserels/abs",
+            ConfirmRejectClass::Permanent,
+        ),
+        (
+            "consensus: store: corrupt record: archive: parent create_fk unresolved (contiguous batch required)",
+            ConfirmRejectClass::Permanent,
+        ),
+        (
+            "consensus: store: corrupt record: tx put_full_batch fk mismatch (plan not committed in order)",
+            ConfirmRejectClass::Permanent,
+        ),
+        (
+            "consensus: prevout already spent on best chain",
+            ConfirmRejectClass::Permanent,
+        ),
+        ("confirm cancelled", ConfirmRejectClass::Cancelled),
+    ];
+    for (s, want) in cases {
+        assert_eq!(ConfirmRejectClass::from_err_str(s), *want, "{s}");
+    }
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::BadPrev),
+        ConfirmRejectClass::BadPrev
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::BadBlock("merkle root mismatch")),
+        ConfirmRejectClass::SoftWire
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::BadHeader(
+            "missing retarget first header"
+        )),
+        ConfirmRejectClass::SoftWire
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::Cancelled),
+        ConfirmRejectClass::Cancelled
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::from(StoreError::Cancelled("stop"))),
+        ConfirmRejectClass::Cancelled
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::PrevoutSpent),
+        ConfirmRejectClass::Permanent
+    );
 }
 
 /// Soft re-get is wire-only (`unexpected previous header`). Internal
@@ -1980,6 +2075,7 @@ fn apply_confirm_events_accepted_and_reject() {
     tx.send(ConfirmEvent::Reject {
         height: 1,
         hash: h(12),
+        class: ConfirmRejectClass::Permanent,
         err: "consensus: script verification failed: script false".into(),
     })
     .unwrap();

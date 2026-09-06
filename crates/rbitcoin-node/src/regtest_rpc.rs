@@ -89,7 +89,17 @@ fn cheap_submit_tx_reject(query: &rbitcoin_query::Query, block: &Block) -> Optio
     None
 }
 
-fn submit_reject_reason(s: &str) -> String {
+fn submit_reject_reason(e: &rbitcoin_net::NetError) -> String {
+    match e {
+        rbitcoin_net::NetError::UnknownParent | rbitcoin_net::NetError::SideBlock => {
+            return "prev-blk-not-found".into();
+        }
+        _ => {}
+    }
+    submit_reject_reason_str(&e.to_string())
+}
+
+fn submit_reject_reason_str(s: &str) -> String {
     let s = s.strip_prefix("consensus: ").unwrap_or(s);
     let s = s.strip_prefix("protocol: ").unwrap_or(s);
     if s.contains("unknown parent") || s.contains("BadPrev") || s.contains("unexpected previous") {
@@ -177,7 +187,7 @@ impl RpcRegtest for HubRegtest {
             Ok(AcceptOutcome::AlreadyHave) => SubmitBlockOutcome::Duplicate,
             Ok(AcceptOutcome::IgnoredWeaker) => SubmitBlockOutcome::IgnoredWeaker,
             Err(e) => {
-                let reason = submit_reject_reason(&e.to_string());
+                let reason = submit_reject_reason(&e);
                 // Mutated merkle / missing parent stay retryable. Other
                 // consensus rejects mark the hash so a second submit is
                 // `duplicate-invalid` and children get `bad-prevblk`.

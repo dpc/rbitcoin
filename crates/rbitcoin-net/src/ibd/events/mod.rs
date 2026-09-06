@@ -527,8 +527,21 @@ pub(crate) fn apply_confirm_events(
                 st.max_ready_height = st.max_ready_height.max(tip);
                 max_ready_shared.store(st.max_ready_height, Ordering::Relaxed);
             }
-            super::confirm::ConfirmEvent::Reject { height, hash, err } => {
-                apply_confirm_reject(st, height, hash, &err, Some(hub.query.as_ref()), Some(hub));
+            super::confirm::ConfirmEvent::Reject {
+                height,
+                hash,
+                class,
+                err,
+            } => {
+                apply_confirm_reject(
+                    st,
+                    height,
+                    hash,
+                    class,
+                    &err,
+                    Some(hub.query.as_ref()),
+                    Some(hub),
+                );
             }
         }
     }
@@ -538,24 +551,26 @@ pub(crate) fn apply_confirm_reject(
     st: &mut IbdWorkState,
     height: u32,
     hash: BlockHash,
+    class: super::confirm::ConfirmRejectClass,
     err: &str,
     query: Option<&rbitcoin_query::Query>,
     hub: Option<&crate::chain::ChainHub>,
 ) {
     // Never blacklist the all-zero sentinel (write used to emit this on
     // mis-attributed rejects).
+    use super::confirm::ConfirmRejectClass;
     use bitcoin::hashes::Hash;
     if hash.to_byte_array() == [0u8; 32] {
         warn!("ibd: confirm reject ignored zero-hash @{height}: {err}");
         return;
     }
+    if class == ConfirmRejectClass::Cancelled {
+        return;
+    }
     // Soft re-get only for bad wire / missing header window / merkle reconstruct.
     // Never soft-requeue "parent unresolved" / "fk mismatch" (hides store bugs).
-    let soft_wire = err.contains("unexpected previous header")
-        || err.contains("unexpected previous")
-        || err.contains("missing retarget first header")
-        || err.contains("merkle root mismatch");
-    let bad_prev = super::reorg::is_bad_prev_err(err);
+    let soft_wire = class == ConfirmRejectClass::SoftWire || class == ConfirmRejectClass::BadPrev;
+    let bad_prev = class == ConfirmRejectClass::BadPrev;
     if bad_prev {
         if let Some(q) = query {
             q.set_lookup_taken_hi(hub.and_then(|h| h.tip_height()));
