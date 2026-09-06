@@ -342,8 +342,10 @@ pub fn setup_side_block(
     oracle: &dyn BlockOracle,
     block: &Block,
 ) -> Result<(), &'static str> {
-    match hub.accept_received_block(block.clone()) {
-        Ok(AcceptOutcome::IgnoredWeaker | AcceptOutcome::AlreadyHave) => {}
+    match hub.accept_block(block.clone()) {
+        Ok(AcceptOutcome::IgnoredWeaker | AcceptOutcome::AlreadyHave) => {
+            hub.hold_unconnected_body(block.clone());
+        }
         Ok(AcceptOutcome::Accepted { .. }) => return Err("side became tip"),
         Err(_) => return Err("side reject"),
     }
