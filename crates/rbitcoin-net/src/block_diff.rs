@@ -189,7 +189,9 @@ fn store_reorg_accept(hub: &ChainHub, block: Block, expect_h: Option<u32>) -> Re
                     return Err(format!("height {height} != {e}"));
                 }
             }
-            store_reorg_check_tip(hub, height, Some(hash))?;
+            // Sibling hold + try_apply_held may connect a heavier archived
+            // path; Accepted height is that tip, not necessarily `hash`.
+            store_reorg_check_tip(hub, height, expect_h.is_some().then_some(hash))?;
             Ok(true)
         }
         Ok(AcceptOutcome::AlreadyHave | AcceptOutcome::IgnoredWeaker) => Ok(true),
@@ -2148,6 +2150,17 @@ mod tests {
         let e = NetError::Consensus(probe.to_string());
         assert!(store_reorg_corrupt_is_finding(&e));
         assert_eq!(verdict_from_accept(Err(e)).unwrap_err(), "store: corrupt");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn store_reorg_sibling_accepted_need_not_be_submitted_tip() {
+        // Nightly crash-d6137829: persistent hub + sibling after rewind. The
+        // sibling is held; try_apply_held may connect a heavier archived path
+        // and return Accepted for a hash that is not the submitted sibling.
+        let (dir, hub, _tip) = tmp_diff_hub();
+        store_reorg_apply(&hub, &[0, 0, 0, 1, 2, 2, 1]).expect("sibling apply of held/archive");
+        assert!(hub.tip_height().is_some());
         let _ = fs::remove_dir_all(dir);
     }
 

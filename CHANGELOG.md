@@ -58,6 +58,7 @@ before 1.0).
 
 ### Fixed
 
+- **Fuzz harness: `cmpct_differential` compiles, kernel always sets P2SH, store_reorg does not require the submitted sibling to be tip:** `BlockOracle` was used without import. `script_kernel_differential` passed `VERIFY_WITNESS` without `VERIFY_P2SH`, which `libbitcoinconsensus` asserts. `store_reorg` treated `Accepted` as “this hash is tip” after `try_apply_held` connected a heavier held/archive path.
 - **`getpeerinfo` omits a completed peer after TCP FIN even with unread bytes:**
   `peek==0` missed the far-side close while the session was still draining
   (`mempool_reorg` `disconnect_nodes` 5s). Linux uses `POLLRDHUP`.

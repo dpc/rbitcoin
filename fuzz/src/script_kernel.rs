@@ -17,15 +17,13 @@ pub enum KernelCmp {
 }
 
 pub fn kernel_forks(flags: u8) -> (bool, bool, bool, bool, bool, u32) {
-    let p2sh = flags & 1 != 0;
     let dersig = flags & 2 != 0;
     let cltv = flags & 4 != 0;
     let csv = flags & 8 != 0;
     let tap = flags & 16 != 0;
-    let mut core = VERIFY_NULLDUMMY | VERIFY_WITNESS;
-    if p2sh {
-        core |= VERIFY_P2SH;
-    }
+    // libbitcoinconsensus VerifyScript asserts P2SH whenever WITNESS is set.
+    let p2sh = true;
+    let mut core = VERIFY_NULLDUMMY | VERIFY_WITNESS | VERIFY_P2SH;
     if dersig {
         core |= VERIFY_DERSIG;
     }
@@ -134,5 +132,22 @@ mod tests {
         assert_eq!(sig, [0xaa]);
         assert_eq!(pk, [0x51]);
         assert!(parse_kernel_input(&[]).is_none());
+    }
+
+    #[test]
+    fn witness_without_p2sh_bit_does_not_abort() {
+        // Nightly crash-047863e3: flags 0x7a (WITNESS on, P2SH bit off).
+        // libbitcoinconsensus asserts SCRIPT_VERIFY_P2SH when WITNESS is set.
+        let (sig, pk, f) = parse_kernel_input(&[0x7a, 0x51]).unwrap();
+        assert_eq!(f, 0x7a);
+        assert!(sig.is_empty());
+        assert_eq!(pk, [0x51]);
+        match compare_script_kernel(&sig, &pk, f) {
+            KernelCmp::Agree { accept: true } => {}
+            other => panic!("OP_TRUE without P2SH bit: {other:?}"),
+        }
+        let (_, _, _, p2sh, _, core) = kernel_forks(0);
+        assert!(p2sh, "WITNESS requires P2SH");
+        assert_ne!(core & VERIFY_P2SH, 0);
     }
 }
