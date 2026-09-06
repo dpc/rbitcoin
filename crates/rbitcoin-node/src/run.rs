@@ -6,8 +6,9 @@ use rbitcoin_electrum::{run_electrum, ElectrumConfig, ElectrumHandle, TipNotify}
 use rbitcoin_esplora::{run_esplora, EsploraConfig, EsploraHandle};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
-    default_port, format_serve_perf, format_tip_perf_sizes, read_proc_rss, sample_reset_serve_perf,
-    AddrMan, ChainHub, IbdConfig, MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
+    default_port, format_serve_perf, format_tip_perf_sizes, netgroup, read_proc_rss,
+    sample_reset_serve_perf, AddrMan, ChainHub, IbdConfig, MempoolHub, P2PNode, PeerConnType,
+    TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -387,17 +388,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
 
     let max_out = config.listen.max_outbound.max(1) as usize;
     let candidate_n = max_out.saturating_mul(2).clamp(16, 48);
-    let targets = if !config.listen.connect.is_empty() {
-        config.listen.connect.clone()
-    } else {
-        addrman.take_outbound(max_out)
-    };
-
-    let ibd_targets = if !config.listen.connect.is_empty() {
-        config.listen.connect.clone()
-    } else {
-        addrman.take_outbound(candidate_n)
-    };
+    let occupied = node.peers.live_outbound_full_relay_addrs();
+    let targets = follow_dial_targets(&config.listen.connect, &addrman, max_out, &occupied);
+    let ibd_targets = follow_dial_targets(&config.listen.connect, &addrman, candidate_n, &occupied);
     let catch_up = run_ibd_or_skip(
         &node,
         &ibd_targets,
@@ -824,15 +817,22 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
 
             last_tip_change = Instant::now();
-            let extra = addrman.take_outbound_offset(1, seed_offset);
+            let occupied = node.peers.live_outbound_full_relay_addrs();
+            let extra = addrman.take_outbound_offset_occupied(1, seed_offset, &occupied);
             seed_offset = seed_offset.saturating_add(1);
             if extra.is_empty() {
                 continue;
             }
             if stale_follow_needs_room(follow_live, max_out) {
                 let ids = node.peers.outbound_full_relay_ids();
+                let addrs = node.peers.outbound_full_relay_addrs();
+                let groups: Vec<u64> = addrs
+                    .iter()
+                    .map(|a| netgroup(*a, addrman.asmap()))
+                    .collect();
                 let salt = node.hub.clock.now_secs();
-                let Some(evict_id) = rbitcoin_net::pick_stale_follow_evict(&ids, salt) else {
+                let Some(evict_id) = rbitcoin_net::pick_stale_follow_evict(&ids, salt, &groups)
+                else {
                     continue;
                 };
                 node.peers.disconnect_id(evict_id);
@@ -1507,6 +1507,20 @@ pub(crate) fn tip_follow_wake_kind(wake: &TipFollowWake, last_tip: u32) -> TipFo
     }
 }
 
+/// `--connect` is operator-pinned: no netgroup filter. Otherwise rank + diversity.
+pub(crate) fn follow_dial_targets(
+    connect: &[SocketAddr],
+    book: &AddrMan,
+    max: usize,
+    occupied: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    if !connect.is_empty() {
+        connect.to_vec()
+    } else {
+        book.take_outbound_occupied(max, occupied)
+    }
+}
+
 /// Whether this wake should run the stale-tip redial check.
 ///
 /// Perf (5s) and RPC-stop (50ms) ticks must still evaluate stale. A one-shot
@@ -1571,6 +1585,33 @@ mod tests {
         assert!(stale_follow_needs_room(31, 16));
         assert!(stale_follow_needs_room(1, 1));
         assert!(!stale_follow_needs_room(0, 1));
+    }
+
+    #[test]
+    fn follow_dial_targets_connect_bypasses_diversity() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let mut am = AddrMan::new();
+        am.add(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 0, 1)), 8333));
+        am.add(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 0, 1)), 8333));
+        let connect = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            8333,
+        )];
+        let occupied = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 0, 9)), 8333)];
+        assert_eq!(follow_dial_targets(&connect, &am, 8, &occupied), connect);
+    }
+
+    #[test]
+    fn follow_dial_targets_skips_occupied_group() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let mut am = AddrMan::new();
+        let same = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 0, 1)), 8333);
+        let other = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 3, 0, 1)), 8333);
+        am.add(same);
+        am.add(other);
+        let occupied = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 0, 9)), 8333)];
+        let got = follow_dial_targets(&[], &am, 1, &occupied);
+        assert_eq!(got, vec![other]);
     }
 
     #[test]

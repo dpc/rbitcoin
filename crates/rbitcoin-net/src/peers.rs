@@ -1581,17 +1581,43 @@ impl PeerHub {
     /// Outbound full-relay sessions eligible for stale-tip slot rotation.
     /// Empty when this hub is `noban` (functional keep-alive).
     pub fn outbound_full_relay_ids(&self) -> Vec<u64> {
+        self.outbound_full_relay_rows()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    pub fn outbound_full_relay_addrs(&self) -> Vec<SocketAddr> {
+        self.outbound_full_relay_rows()
+            .into_iter()
+            .map(|(_, a)| a)
+            .collect()
+    }
+
+    fn outbound_full_relay_rows(&self) -> Vec<(u64, SocketAddr)> {
         if self.is_noban() {
             return Vec::new();
         }
-        let mut ids: Vec<u64> = self
+        let mut rows: Vec<(u64, SocketAddr)> = self
             .live_peers()
             .into_iter()
             .filter(|p| p.conn_type == PeerConnType::OutboundFullRelay && !p.inbound)
-            .map(|p| p.id)
+            .map(|p| (p.id, p.addr))
             .collect();
-        ids.sort_unstable();
-        ids
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        rows
+    }
+
+    /// Live outbound full-relay addrs (not `noban`-gated) for diversity occupied.
+    pub fn live_outbound_full_relay_addrs(&self) -> Vec<SocketAddr> {
+        let mut rows: Vec<(u64, SocketAddr)> = self
+            .live_peers()
+            .into_iter()
+            .filter(|p| p.conn_type == PeerConnType::OutboundFullRelay && !p.inbound)
+            .map(|p| (p.id, p.addr))
+            .collect();
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        rows.into_iter().map(|(_, a)| a).collect()
     }
 
     pub fn disconnect_id(&self, id: u64) -> bool {
@@ -1672,9 +1698,26 @@ impl PeerHub {
 }
 
 /// Pick one live outbound id to drop so a stale-tip extra can dial.
-pub fn pick_stale_follow_evict(ids: &[u64], salt: u64) -> Option<u64> {
+/// Prefer an id whose netgroup is shared with another outbound (break a
+/// duplicate). If every candidate is unique, `ids[salt % len]` as before.
+pub fn pick_stale_follow_evict(ids: &[u64], salt: u64, groups: &[u64]) -> Option<u64> {
     if ids.is_empty() {
         return None;
+    }
+    if groups.len() == ids.len() {
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        for &g in groups {
+            *counts.entry(g).or_insert(0) += 1;
+        }
+        let dup: Vec<usize> = groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| counts.get(g).copied().unwrap_or(0) > 1)
+            .map(|(i, _)| i)
+            .collect();
+        if !dup.is_empty() {
+            return Some(ids[dup[(salt as usize) % dup.len()]]);
+        }
     }
     Some(ids[(salt as usize) % ids.len()])
 }
@@ -2171,20 +2214,33 @@ mod tests {
 
     #[test]
     fn pick_stale_follow_evict_none_on_empty() {
-        assert!(pick_stale_follow_evict(&[], 7).is_none());
+        assert!(pick_stale_follow_evict(&[], 7, &[]).is_none());
     }
 
     #[test]
     fn pick_stale_follow_evict_picks_only_from_candidates() {
         let ids = [3u64, 9, 12];
+        let groups = [1u64, 2, 3];
         for salt in 0..16u64 {
-            let got = pick_stale_follow_evict(&ids, salt).unwrap();
+            let got = pick_stale_follow_evict(&ids, salt, &groups).unwrap();
             assert!(ids.contains(&got), "salt={salt} got={got}");
         }
-        assert_eq!(pick_stale_follow_evict(&ids, 0), Some(3));
-        assert_eq!(pick_stale_follow_evict(&ids, 1), Some(9));
-        assert_eq!(pick_stale_follow_evict(&ids, 2), Some(12));
-        assert_eq!(pick_stale_follow_evict(&ids, 3), Some(3));
+        assert_eq!(pick_stale_follow_evict(&ids, 0, &groups), Some(3));
+        assert_eq!(pick_stale_follow_evict(&ids, 1, &groups), Some(9));
+        assert_eq!(pick_stale_follow_evict(&ids, 2, &groups), Some(12));
+        assert_eq!(pick_stale_follow_evict(&ids, 3, &groups), Some(3));
+    }
+
+    #[test]
+    fn pick_stale_follow_evict_prefers_duplicate_group() {
+        let ids = [1u64, 2, 3];
+        let groups = [10u64, 10, 20];
+        assert_eq!(pick_stale_follow_evict(&ids, 0, &groups), Some(1));
+        assert_eq!(pick_stale_follow_evict(&ids, 1, &groups), Some(2));
+        for salt in 0..16u64 {
+            let got = pick_stale_follow_evict(&ids, salt, &groups).unwrap();
+            assert!(got == 1 || got == 2, "salt={salt} got={got}");
+        }
     }
 
     #[test]

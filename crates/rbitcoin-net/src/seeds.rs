@@ -443,7 +443,8 @@ impl AddrMan {
         if self.order.is_empty() || max == 0 {
             return Vec::new();
         }
-        let ranked = self.take_dial_candidates(self.order.len(), &HashSet::new(), occupied);
+        let exclude: HashSet<SocketAddr> = occupied.iter().copied().collect();
+        let ranked = self.take_dial_candidates(self.order.len(), &exclude, occupied);
         if ranked.is_empty() {
             return Vec::new();
         }
@@ -461,7 +462,8 @@ impl AddrMan {
     }
 
     pub fn take_outbound_occupied(&self, max: usize, occupied: &[SocketAddr]) -> Vec<SocketAddr> {
-        self.take_dial_candidates(max, &HashSet::new(), occupied)
+        let exclude: HashSet<SocketAddr> = occupied.iter().copied().collect();
+        self.take_dial_candidates(max, &exclude, occupied)
     }
 
     /// Snapshot of all entries (for tests / diagnostics).
