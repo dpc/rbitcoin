@@ -468,7 +468,7 @@ impl ActiveMempool {
             .script_us
             .saturating_add(t_script.elapsed().as_micros() as u64);
         script_res?;
-        let r = self.commit_after_script(tx, prep, tip)?;
+        let r = self.commit_after_script(tx, prep)?;
         self.promote_orphans_of(r.txid, utxos, tip);
         Ok(r)
     }
@@ -477,22 +477,28 @@ impl ActiveMempool {
         &self,
         txid: Txid,
         op: OutPoint,
-        scan: &mut ConflictScan,
+        mut scan: Option<&mut ConflictScan>,
     ) -> Result<Option<Txid>, AcceptError> {
         if let Some(c) = self.graph.conflict_txid(&op) {
             if c != txid {
-                scan.direct_conflicts.insert(c);
+                if let Some(s) = scan.as_mut() {
+                    s.direct_conflicts.insert(c);
+                }
             }
         }
         if let Some(creator) = self.graph.creator(&op) {
             if !self.graph.mempool_utxo(&op) {
                 if let Some(c) = self.graph.conflict_txid(&op) {
-                    scan.direct_conflicts.insert(c);
+                    if let Some(s) = scan.as_mut() {
+                        s.direct_conflicts.insert(c);
+                    }
                 } else {
                     return Err(AcceptError::Policy("mempool double-spend"));
                 }
             }
-            scan.parent_txids.insert(creator);
+            if let Some(s) = scan.as_mut() {
+                s.parent_txids.insert(creator);
+            }
             return Ok(Some(creator));
         }
         Ok(None)
@@ -505,7 +511,7 @@ impl ActiveMempool {
             parent_txids: BTreeSet::new(),
         };
         for inp in &tx.input {
-            let _ = self.note_conflict_and_parent(txid, inp.previous_output, &mut scan)?;
+            let _ = self.note_conflict_and_parent(txid, inp.previous_output, Some(&mut scan))?;
         }
         Ok(scan)
     }
@@ -550,15 +556,11 @@ impl ActiveMempool {
         let t_utxo = Instant::now();
         let mut prevouts: Vec<TxOut> = Vec::with_capacity(tx.input.len());
         let mut chain_coins: Vec<Option<Coin>> = Vec::with_capacity(tx.input.len());
-        let mut scan = ConflictScan {
-            direct_conflicts: BTreeSet::new(),
-            parent_txids: BTreeSet::new(),
-        };
         let mut missing_parents: BTreeSet<Txid> = BTreeSet::new();
         let mut input_value = 0u64;
         for inp in &tx.input {
             let op = inp.previous_output;
-            let mempool_parent = self.note_conflict_and_parent(txid, op, &mut scan)?;
+            let mempool_parent = self.note_conflict_and_parent(txid, op, None)?;
             let (txout, chain_coin) = if let Some(creator) = mempool_parent {
                 let parent_tx = self
                     .bodies
@@ -582,7 +584,6 @@ impl ActiveMempool {
             prevouts.push(txout);
             chain_coins.push(chain_coin);
         }
-        let _ = scan;
         let utxo_us = t_utxo.elapsed().as_micros() as u64;
 
         if !missing_parents.is_empty() {
@@ -669,9 +670,7 @@ impl ActiveMempool {
         &mut self,
         tx: &Transaction,
         prep: PreparedAdmit,
-        tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
-        let _ = tip;
         let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep)?;
         let txid = tx.compute_txid();
 
@@ -744,9 +743,7 @@ impl ActiveMempool {
         &self,
         tx: &Transaction,
         prep: PreparedAdmit,
-        tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
-        let _ = tip;
         let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep)?;
         Ok(AcceptResult {
             txid: tx.compute_txid(),
@@ -857,7 +854,7 @@ impl ActiveMempool {
             .script_us
             .saturating_add(t_script.elapsed().as_micros() as u64);
         script_res?;
-        self.commit_after_script(tx, prep, tip)
+        self.commit_after_script(tx, prep)
     }
 
     /// Electrum scripthash = SHA256(scriptPubKey) (same as store `script_hash`).
@@ -2086,9 +2083,7 @@ mod tests {
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
         mp.accept_tx(&low, &utxos, TIP_OK).unwrap();
         let prep = mp.prepare_admit(&high, &utxos, TIP_OK, 0, true).unwrap();
-        let r = mp
-            .evaluate_after_script(&high, prep, TIP_OK)
-            .expect("preview");
+        let r = mp.evaluate_after_script(&high, prep).expect("preview");
         assert!(r.replaced.contains(&low_id));
         assert!(mp.graph.contains(&low_id));
         assert!(!mp.graph.contains(&high.compute_txid()));
@@ -2102,7 +2097,7 @@ mod tests {
         let tx = spend_tx(op, 99_000);
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
         let prep = mp.prepare_admit(&tx, &utxos, TIP_OK, 0, true).unwrap();
-        mp.commit_after_script(&tx, prep, TIP_OK)
+        mp.commit_after_script(&tx, prep)
             .expect("commit uses prep.chain_coins");
         assert!(mp.graph.contains(&tx.compute_txid()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2680,7 +2675,7 @@ mod tests {
             .expect("prepare while utxo free");
         mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
         let err = mp
-            .commit_after_script(&second, prep, TIP_OK)
+            .commit_after_script(&second, prep)
             .expect_err("write-lock re-check must fail closed");
         assert!(
             matches!(

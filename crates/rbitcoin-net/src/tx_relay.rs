@@ -323,6 +323,12 @@ pub struct MempoolPerfSample {
 /// Core default `-mempoolexpiry` (336 hours) in seconds.
 const DEFAULT_MEMPOOL_EXPIRY_SECS: u64 = 336 * 3600;
 
+struct AdmitSpec {
+    park_orphans: bool,
+    fee_delta: i64,
+    time_prepare_lock: bool,
+}
+
 /// Shared mempool + relay gate used by peer sessions and tip confirm.
 pub struct MempoolHub {
     inner: RwLock<ActiveMempool>,
@@ -1120,9 +1126,7 @@ impl MempoolHub {
         &self,
         tx: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
-        park_orphans: bool,
-        fee_delta: i64,
-        time_prepare_lock: bool,
+        spec: AdmitSpec,
         stages: &mut rbitcoin_mempool::AcceptStageUs,
         lock_us: &mut u64,
     ) -> Result<rbitcoin_mempool::PreparedAdmit, AcceptError> {
@@ -1130,9 +1134,9 @@ impl MempoolHub {
         let t_prep = Instant::now();
         let prep = {
             let g = self.lock_read();
-            g.prepare_admit(tx, utxo, tip, fee_delta, park_orphans)
+            g.prepare_admit(tx, utxo, tip, spec.fee_delta, spec.park_orphans)
         };
-        if time_prepare_lock {
+        if spec.time_prepare_lock {
             *lock_us = lock_us.saturating_add(t_prep.elapsed().as_micros() as u64);
         }
         let prep = match prep {
@@ -1140,7 +1144,7 @@ impl MempoolHub {
                 stages.utxo_us = stages.utxo_us.saturating_add(p.utxo_us);
                 p
             }
-            Err(AcceptError::Orphaned(_)) if park_orphans => {
+            Err(AcceptError::Orphaned(_)) if spec.park_orphans => {
                 let t_lock = Instant::now();
                 let mut g = self.lock_write();
                 let e = g.park_orphan(tx);
@@ -1171,13 +1175,16 @@ impl MempoolHub {
     ) -> Result<AcceptResult, AcceptError> {
         utxo.note_spender(tx);
         let t0 = Instant::now();
-        let tip = self.chain_tip_ctx();
 
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
         let delta = self.fee_delta(&tx.compute_txid());
-        let prep = match self.admit_staged(tx, utxo, true, delta, false, &mut stages, &mut lock_us)
-        {
+        let spec = AdmitSpec {
+            park_orphans: true,
+            fee_delta: delta,
+            time_prepare_lock: false,
+        };
+        let prep = match self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
             Err(e) => {
                 let us = t0.elapsed().as_micros() as u64;
@@ -1191,7 +1198,7 @@ impl MempoolHub {
             let t_lock = Instant::now();
             let mut g = self.lock_write();
             g.last_accept_stages = stages;
-            let r = g.commit_after_script(tx, prep, tip);
+            let r = g.commit_after_script(tx, prep);
             stages = g.last_accept_stages;
             lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
             r
@@ -1276,25 +1283,28 @@ impl MempoolHub {
         let t0 = Instant::now();
         let utxo = self.utxo_provider();
         utxo.note_spender(tx);
-        let tip = self.chain_tip_ctx();
 
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
         let delta = self.fee_delta(&tx.compute_txid());
-        let prep =
-            match self.admit_staged(tx, &utxo, false, delta, false, &mut stages, &mut lock_us) {
-                Ok(p) => p,
-                Err(e) => {
-                    let us = t0.elapsed().as_micros() as u64;
-                    self.meter_accept_stages(lock_us, stages);
-                    return self.finish_accept_err(us, e);
-                }
-            };
+        let spec = AdmitSpec {
+            park_orphans: false,
+            fee_delta: delta,
+            time_prepare_lock: false,
+        };
+        let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
+            Ok(p) => p,
+            Err(e) => {
+                let us = t0.elapsed().as_micros() as u64;
+                self.meter_accept_stages(lock_us, stages);
+                return self.finish_accept_err(us, e);
+            }
+        };
 
         let result = {
             let t_lock = Instant::now();
             let g = self.lock_read();
-            let r = g.evaluate_after_script(tx, prep, tip);
+            let r = g.evaluate_after_script(tx, prep);
             lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
             r
         };
@@ -1439,22 +1449,25 @@ impl MempoolHub {
         rbitcoin_mempool::ActiveMempool::check_package_shape(txs)?;
         let t0 = Instant::now();
         let utxo = self.utxo_provider();
-        let tip = self.chain_tip_ctx();
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
         let mut preps = Vec::with_capacity(txs.len());
         for tx in txs {
             utxo.note_spender(tx);
             let delta = self.fee_delta(&tx.compute_txid());
-            let prep =
-                match self.admit_staged(tx, &utxo, true, delta, true, &mut stages, &mut lock_us) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let us = t0.elapsed().as_micros() as u64;
-                        self.meter_accept_stages(lock_us, stages);
-                        return Err(self.finish_accept_err(us, e).unwrap_err());
-                    }
-                };
+            let spec = AdmitSpec {
+                park_orphans: true,
+                fee_delta: delta,
+                time_prepare_lock: true,
+            };
+            let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
+                Ok(p) => p,
+                Err(e) => {
+                    let us = t0.elapsed().as_micros() as u64;
+                    self.meter_accept_stages(lock_us, stages);
+                    return Err(self.finish_accept_err(us, e).unwrap_err());
+                }
+            };
             preps.push(prep);
         }
         let prevouts: Vec<Vec<TxOut>> = preps.iter().map(|p| p.prevouts.clone()).collect();
@@ -1465,7 +1478,7 @@ impl MempoolHub {
             let mut accepted: Vec<AcceptResult> = Vec::with_capacity(txs.len());
             let mut err = None;
             for (tx, prep) in txs.iter().zip(preps) {
-                match g.commit_after_script(tx, prep, tip) {
+                match g.commit_after_script(tx, prep) {
                     Ok(r) => accepted.push(r),
                     Err(e) => {
                         for r in accepted.iter().rev() {
@@ -1659,14 +1672,18 @@ impl MempoolHub {
         utxo: &impl rbitcoin_mempool::UtxoProvider,
     ) -> Result<Vec<TxOut>, AcceptError> {
         utxo.note_spender(tx);
-        let tip = self.chain_tip_ctx();
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
-        let prep = self.admit_staged(tx, utxo, true, 0, false, &mut stages, &mut lock_us)?;
+        let spec = AdmitSpec {
+            park_orphans: true,
+            fee_delta: 0,
+            time_prepare_lock: false,
+        };
+        let prep = self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us)?;
         let prevouts = prep.prevouts.clone();
         {
             let mut g = self.lock_write();
-            g.commit_after_script(tx, prep, tip)?;
+            g.commit_after_script(tx, prep)?;
         }
         self.promote_orphans_staged(tx.compute_txid(), utxo);
         Ok(prevouts)
