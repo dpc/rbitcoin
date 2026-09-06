@@ -2762,7 +2762,6 @@ async fn on_cmpctblock(
                 }
                 Ok(_) => {
                     hub.forget_asked_block(&hash);
-                    maybe_select_hb_if_relay(hub, session);
                 }
                 _ => {
                     if !hub.knows_header(&hsi.header.prev_blockhash) {
@@ -2881,7 +2880,6 @@ async fn on_blocktxn(
                     }
                     Ok(_) => {
                         take_requested_block(hub, &mut follow.requested_blocks, &hash);
-                        maybe_select_hb_if_relay(hub, session);
                         drain_pending(
                             hub,
                             out_tx,
