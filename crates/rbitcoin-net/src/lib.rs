@@ -29,10 +29,11 @@ pub use block_diff::{
     genesis_diff_tip, is_core_connectivity_skip, is_core_mempool_policy_skip, mine_diff_pad,
     mine_diff_stem, parse_submitblock_json, parse_testmempoolaccept_json,
     prepare_csv_age_candidate, prepare_script_candidate, prepare_spend_candidate,
-    rewind_oracle_until, setup_side_block, split_http_body, submit_pad_to_oracle,
-    submit_side_to_oracle, verdict_from_accept, verdict_from_core_reply, wait_for_file,
-    BlockOracle, CompareOne, DiffPad, DiffTip, DiffVerdict, OracleReply, DIFF_MATURE_PAD_HEIGHT,
-    DIFF_REORG_N, DIFF_TEST_PAD_HEIGHT,
+    rewind_oracle_until, setup_side_block, split_http_body, store_reorg_apply,
+    store_reorg_corrupt_is_finding, store_reorg_step, submit_pad_to_oracle, submit_side_to_oracle,
+    verdict_from_accept, verdict_from_core_reply, wait_for_file, BlockOracle, CompareOne, DiffPad,
+    DiffTip, DiffVerdict, OracleReply, StoreReorgOp, DIFF_MATURE_PAD_HEIGHT, DIFF_REORG_N,
+    DIFF_TEST_PAD_HEIGHT,
 };
 pub use cache::BlockCache;
 pub use chain::{

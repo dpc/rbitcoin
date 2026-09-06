@@ -138,6 +138,9 @@ elif [[ "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differenti
 elif [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
   sanitizer="address"
   timeout=90
+elif [[ "$BIN" == "store_reorg" ]]; then
+  sanitizer="address"
+  timeout=30
 fi
 
 WRAP="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
@@ -166,6 +169,10 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   fi
   if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
+  fi
+  if [[ "$BIN" == "store_reorg" ]]; then
+    echo "RBITCOIN_HEAD_SCALE=${RBITCOIN_HEAD_SCALE:-tiny}"
+    echo "FUZZ_NO_CORE=1"
   fi
   if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "BITCOIND_LISTEN=1"
@@ -296,6 +303,29 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
     exit "$st"
   fi
   fail_if_no_comparisons "$log" 0.005
+  exit 0
+fi
+
+if [[ "$BIN" == "store_reorg" ]]; then
+  export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
+  export RBITCOIN_IO="${RBITCOIN_IO:-fd}"
+  merge_seed fuzz/corpus/store_reorg \
+    crates/rbitcoin-net/tests/fixtures/store_reorg_ops.bin
+  log="${TMPDIR:-/tmp}/rbtc-fuzz-store-reorg.$$.log"
+  set +e
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" store_reorg -- \
+    -max_total_time="$(fuzz_max_total_time)" \
+    -timeout="$timeout" \
+    -max_len=64 \
+    -seed="$SEED" \
+    2>&1 | tee "$log"
+  st=${PIPESTATUS[0]}
+  set -e
+  if [[ "$st" -ne 0 ]]; then
+    copy_crashers fuzz/artifacts "$CRASHERS"
+    exit "$st"
+  fi
+  fail_if_no_comparisons "$log" 0.01
   exit 0
 fi
 

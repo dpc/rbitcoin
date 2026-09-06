@@ -61,6 +61,18 @@ assert_ok "v2_session dry-run BITCOIND_LISTEN=1" \
 assert_ok "v2_session dry-run dict" \
   grep -qx "FUZZ_DICT=fuzz/dict/p2p.dict" <<<"$out"
 
+out="$(FUZZ_DRY_RUN=1 "$RUN" store_reorg)"
+assert_ok "store_reorg dry-run bin" \
+  grep -qx "FUZZ_BIN=store_reorg" <<<"$out"
+assert_ok "store_reorg dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "store_reorg dry-run no Core" \
+  grep -qx "FUZZ_NO_CORE=1" <<<"$out"
+assert_ok "store_reorg dry-run tiny heads" \
+  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
+assert_ok "store_reorg ops seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/store_reorg_ops.bin"
+
 out="$(FUZZ_DRY_RUN=1 "$RUN" cmpct_differential)"
 assert_ok "cmpct-differential dry-run bin" \
   grep -qx "FUZZ_BIN=cmpct_differential" <<<"$out"

@@ -275,6 +275,7 @@ Nightly (not a required PR check) `fuzz.yml` runs **16** cargo-fuzz targets:
 | `block_csv_differential` | BIP68 relative lock (full `u32` nSequence + version + MTP `time_shift`) vs Core `submitblock` | same tarball |
 | `mempool_differential` | `MempoolHub::test_accept` vs Core `testmempoolaccept`. **Consensus-class only** — Core standardness / fee / RBF / dust is skip (COMPAT) | same tarball, `-acceptnonstdtxn=1` |
 | `script_verify_differential` | `verify_tx_scripts_detached` vs Core `testmempoolaccept` of the parent+spend package. Same policy skip | same tarball, `-acceptnonstdtxn=1` |
+| `store_reorg` | Tiny-hub `{extend, sibling, rewind}` connect churn (ASan, no Core). Store `Corrupt` / probe-exhausted **panics** | none |
 
 ```bash
 ./scripts/fuzz-run.sh                           # block_wire (ASan)

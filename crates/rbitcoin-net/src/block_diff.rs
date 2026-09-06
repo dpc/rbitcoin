@@ -131,6 +131,120 @@ pub fn genesis_diff_tip(params: &ChainParams) -> DiffTip {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreReorgOp {
+    Extend,
+    Sibling,
+    Rewind,
+}
+
+impl StoreReorgOp {
+    pub fn from_byte(b: u8) -> Self {
+        match b % 3 {
+            0 => Self::Extend,
+            1 => Self::Sibling,
+            _ => Self::Rewind,
+        }
+    }
+}
+
+pub fn store_reorg_corrupt_is_finding(err: &NetError) -> bool {
+    matches!(err, NetError::Consensus(s) if rbitcoin_store::is_store_corrupt_display(s))
+}
+
+fn store_reorg_map_err(e: NetError) -> String {
+    if store_reorg_corrupt_is_finding(&e) {
+        format!("store corrupt: {e}")
+    } else {
+        format!("net: {e}")
+    }
+}
+
+fn store_reorg_check_tip(
+    hub: &ChainHub,
+    height: u32,
+    hash: Option<BlockHash>,
+) -> Result<(), String> {
+    if hub.tip_height() != Some(height) {
+        return Err(format!("tip_height {:?} != {height}", hub.tip_height()));
+    }
+    if let Some(want) = hash {
+        if hub.tip_hash() != Some(want) {
+            return Err(format!("tip_hash {:?} != {want}", hub.tip_hash()));
+        }
+    }
+    Ok(())
+}
+
+fn store_reorg_accept(hub: &ChainHub, block: Block, expect_h: Option<u32>) -> Result<bool, String> {
+    let hash = block.block_hash();
+    match hub.accept_received_block(block) {
+        Ok(AcceptOutcome::Accepted { height }) => {
+            if let Some(e) = expect_h {
+                if height != e {
+                    return Err(format!("height {height} != {e}"));
+                }
+            }
+            store_reorg_check_tip(hub, height, Some(hash))?;
+            Ok(true)
+        }
+        Ok(AcceptOutcome::AlreadyHave | AcceptOutcome::IgnoredWeaker) => Ok(true),
+        Err(e) if store_reorg_corrupt_is_finding(&e) => Err(format!("store corrupt: {e}")),
+        Err(_) => Ok(false),
+    }
+}
+
+/// One `{extend | sibling | rewind}` step. `Ok(true)` means a connect ran.
+pub fn store_reorg_step(hub: &ChainHub, op: StoreReorgOp) -> Result<bool, String> {
+    let height = hub.tip_height().ok_or("no tip height")?;
+    let hash = hub.tip_hash().ok_or("no tip hash")?;
+    match op {
+        StoreReorgOp::Rewind => {
+            if height == 0 {
+                return Ok(false);
+            }
+            hub.rewind_to_height(height - 1)
+                .map_err(store_reorg_map_err)?;
+            store_reorg_check_tip(hub, height - 1, None)?;
+            Ok(false)
+        }
+        StoreReorgOp::Extend => {
+            if height >= 32 {
+                return Ok(false);
+            }
+            let hdr = hub.tip_header().ok_or("no tip header")?;
+            let mut b = mine_empty_regtest(
+                hash,
+                hdr.time.saturating_add(REGTEST_BLOCK_SPACING),
+                height + 1,
+            );
+            stamp_diff_coinbase(&mut b, next_diff_cb_uniq());
+            remine_diff_header(&mut b);
+            store_reorg_accept(hub, b, Some(height + 1))
+        }
+        StoreReorgOp::Sibling => {
+            if height == 0 {
+                return Ok(false);
+            }
+            let hdr = hub.tip_header().ok_or("no tip header")?;
+            let mut b = mine_empty_regtest(hdr.prev_blockhash, hdr.time.saturating_add(1), height);
+            stamp_diff_coinbase(&mut b, next_diff_cb_uniq());
+            remine_diff_header(&mut b);
+            store_reorg_accept(hub, b, None)
+        }
+    }
+}
+
+pub fn store_reorg_apply(hub: &ChainHub, data: &[u8]) -> Result<u32, String> {
+    let mut n = 0u32;
+    for &b in data.iter().take(32) {
+        if store_reorg_step(hub, StoreReorgOp::from_byte(b))? {
+            n = n.saturating_add(1);
+        }
+    }
+    Ok(n)
+}
+
 pub fn mine_diff_pad(hub: &ChainHub, last: u32) -> Result<DiffPad, &'static str> {
     if last < 1 {
         return Err("pad last");
@@ -1916,6 +2030,26 @@ mod tests {
             Err("store: corrupt")
         );
         assert!(verdict_from_accept(Err(NetError::Io(std::io::Error::other("x")))).is_err());
+    }
+
+    #[test]
+    fn store_reorg_three_ops_do_not_corrupt() {
+        let (dir, hub, _tip) = tmp_diff_hub();
+        let n = store_reorg_apply(
+            &hub,
+            &[
+                0, // extend
+                1, // sibling
+                2, // rewind
+            ],
+        )
+        .expect("happy path");
+        assert!(n >= 1, "extend must connect n={n}");
+        let probe = rbitcoin_store::StoreError::Corrupt("address head probe exhausted on insert");
+        let e = NetError::Consensus(probe.to_string());
+        assert!(store_reorg_corrupt_is_finding(&e));
+        assert_eq!(verdict_from_accept(Err(e)).unwrap_err(), "store: corrupt");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

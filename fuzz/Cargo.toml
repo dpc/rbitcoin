@@ -133,3 +133,10 @@ path = "fuzz_targets/electrum_json.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "store_reorg"
+path = "fuzz_targets/store_reorg.rs"
+test = false
+doc = false
+bench = false
