@@ -711,8 +711,8 @@ async fn node_run_p2p_short() {
         .with_datadir(node_dir.path())
         .with_network(Network::Regtest)
         .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-    cfg.connect = vec![seed_addr];
-    cfg.use_seeds = false;
+    cfg.listen.connect = vec![seed_addr];
+    cfg.listen.use_seeds = false;
     cfg.max_run_secs = Some(0); // sync then exit immediately
 
     run_p2p(cfg).await.expect("run_p2p");

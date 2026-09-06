@@ -11,6 +11,9 @@ before 1.0).
 
 ### Changed
 
+- **`NodeConfig` is composed option groups:** `DatadirOpts` / `ListenOpts` /
+  `MempoolOpts` / `RpcOpts`. CLI flags and `apply_kv` keys unchanged.
+  `config.datadir` still `Deref`s to the process datadir `PathBuf`.
 - **P2P inbound dispatch and session `select!` arms are named functions:**
   `handle_peer_frame` calls `on_ping` / `serve_getdata` / `on_cmpctblock` / …
   Session stages are `on_heartbeat` / `on_tip_event` / `run_writer_task`.

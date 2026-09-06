@@ -196,7 +196,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     }
     apply_startup_index_mode(&handle.query, &config, params.taproot_height())?;
     let listen = config
-        .p2p_listen
+        .listen
+        .p2p
         .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], default_port(config.network))));
 
     let start_tip = handle.query.tip_height().map(|h| h.0).unwrap_or(0);
@@ -207,7 +208,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config.network.as_str(),
         config.datadir.display(),
         config
-            .datadir_cold
+            .datadir
+            .cold
             .as_ref()
             .map(|p| format!(" datadir_cold={}", p.display()))
             .unwrap_or_default(),
@@ -224,11 +226,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         params.clone(),
         milestone,
         p2p_ua,
-        config.max_inbound as usize,
+        config.listen.max_inbound as usize,
     )
     .await
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
-    for extra in &config.p2p_extra_listens {
+    for extra in &config.listen.p2p_extra {
         node.add_listen(*extra)
             .await
             .map_err(|e| NodeError::Config(format!("p2p extra listen {extra}: {e}")))?;
@@ -264,17 +266,21 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let mempool = MempoolHub::open_with_weight_persist(
         config.mempool_path(),
         node.hub.query.clone(),
-        config.mempool_max_weight,
-        config.persist_mempool,
+        config.mempool.max_weight,
+        config.mempool.persist,
     )
     .map_err(|e| NodeError::Config(e))?;
-    mempool.set_cluster_limits(config.limit_cluster_count, config.limit_cluster_size_kvb);
-    if let Some(secs) = config.peer_timeout_secs {
+    mempool.set_cluster_limits(
+        config.mempool.limit_cluster_count,
+        config.mempool.limit_cluster_size_kvb,
+    );
+    if let Some(secs) = config.listen.peer_timeout_secs {
         node.peers.set_peer_timeout_secs(secs);
     }
     node.peers.set_listen_port(listen.port());
-    if !config.external_ips.is_empty() {
-        node.peers.set_external_ips(config.external_ips.clone());
+    if !config.listen.external_ips.is_empty() {
+        node.peers
+            .set_external_ips(config.listen.external_ips.clone());
     }
     if config.whitelist.iter().any(|w| w.contains("noban")) {
         mempool.set_immediate_relay(true);
@@ -287,12 +293,12 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         node.peers.set_forcerelay_perm(true);
         node.peers.set_relay_perm(true);
     }
-    if let Some(s) = config.min_relay_fee_btc.as_deref() {
+    if let Some(s) = config.mempool.min_relay_fee_btc.as_deref() {
         if let Some(sat) = parse_btc_to_sat(s) {
             mempool.set_min_relay_sat_kvb(sat);
         }
     }
-    if let Some(h) = config.mempool_expiry_hours {
+    if let Some(h) = config.mempool.expiry_hours {
         mempool.set_expiry_hours(h);
     }
     node.hub
@@ -303,7 +309,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config.mempool_path().display(),
         mempool.generation(),
         mempool.live_count(),
-        config.mempool_max_weight
+        config.mempool.max_weight
     );
 
     info!(
@@ -355,7 +361,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             AddrMan::new()
         }
     };
-    for c in &config.connect {
+    for c in &config.listen.connect {
         addrman.add(*c);
     }
     if should_resolve_default_seeds(&config) {
@@ -370,22 +376,25 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             addrman.len().saturating_sub(n_before),
             addrman.len()
         );
-    } else if config.signet_challenge.is_some() && config.connect.is_empty() && addrman.is_empty() {
+    } else if config.signet_challenge.is_some()
+        && config.listen.connect.is_empty()
+        && addrman.is_empty()
+    {
         warn!("custom signet has no peers; use --connect ADDR or reuse a datadir with known peers");
     }
     let shared_peers = std::sync::Arc::new(std::sync::Mutex::new(addrman.clone()));
     node.peers.set_addrman(std::sync::Arc::clone(&shared_peers));
 
-    let max_out = config.max_outbound.max(1) as usize;
+    let max_out = config.listen.max_outbound.max(1) as usize;
     let candidate_n = max_out.saturating_mul(2).clamp(16, 48);
-    let targets = if !config.connect.is_empty() {
-        config.connect.clone()
+    let targets = if !config.listen.connect.is_empty() {
+        config.listen.connect.clone()
     } else {
         addrman.take_outbound(max_out)
     };
 
-    let ibd_targets = if !config.connect.is_empty() {
-        config.connect.clone()
+    let ibd_targets = if !config.listen.connect.is_empty() {
+        config.listen.connect.clone()
     } else {
         addrman.take_outbound(candidate_n)
     };
@@ -425,7 +434,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     Arc::clone(&shutdown.flag),
                 );
             }
-            if !config.blocksonly && tip_meets_min_work(&config, &node.hub) && !node.hub.in_ibd() {
+            if !config.mempool.blocksonly
+                && tip_meets_min_work(&config, &node.hub)
+                && !node.hub.in_ibd()
+            {
                 mempool.set_relay_enabled(true);
             }
             info!(
@@ -447,7 +459,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     }
 
     if tip_follow_ready && !shutdown.requested() && addrman.is_empty() {
-        for raw in &config.seednodes {
+        for raw in &config.listen.seednodes {
             let addr = match resolve_seednode(raw, config.network) {
                 Ok(a) => a,
                 Err(e) => {
@@ -462,9 +474,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
         }
     }
-    if !shutdown.requested() && !config.seednodes.is_empty() && !addrman.is_empty() {
+    if !shutdown.requested() && !config.listen.seednodes.is_empty() && !addrman.is_empty() {
         const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
-        let seeds = config.seednodes.clone();
+        let seeds = config.listen.seednodes.clone();
         let network = config.network;
         let peers = Arc::clone(&node.peers);
         let clock = Arc::clone(&node.hub.clock);
@@ -555,7 +567,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
 
     let (electrum_handles, electrum_bridge) = start_electrum_if_ready(
         sh_tip_ready,
-        config.electrum_listen,
+        config.listen.electrum,
         &shutdown,
         &node.hub,
         &params,
@@ -564,7 +576,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await;
     let (esplora_handles, esplora_tip_bridge) = start_esplora_if_ready(
         sh_tip_ready,
-        config.esplora_listen,
+        config.listen.esplora,
         config.network,
         &shutdown,
         &node.hub,
@@ -573,16 +585,16 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await;
 
     let mut rpc_handle: Option<RpcHandle> = None;
-    if let Some(addr) = config.rpc_listen {
+    if let Some(addr) = config.rpc.listen {
         if !shutdown.requested() {
             let rcfg = RpcConfig {
                 listen: addr,
-                datadir: config.datadir.clone(),
+                datadir: config.datadir.path.clone(),
                 network: config.network,
-                rpc_user: config.rpc_user.clone(),
-                rpc_password: config.rpc_password.clone(),
+                rpc_user: config.rpc.user.clone(),
+                rpc_password: config.rpc.password.clone(),
                 cookie_path: Some(config.rpc_cookie_path()),
-                work_queue: config.rpc_work_queue,
+                work_queue: config.rpc.work_queue,
                 subversion: Some(
                     rbitcoin_primitives::rbitcoin_subversion(
                         env!("CARGO_PKG_VERSION"),
@@ -590,7 +602,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     )
                     .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
                 ),
-                permit_bare_multisig: config.permit_bare_multisig,
+                permit_bare_multisig: config.mempool.permit_bare_multisig,
                 alert_notify: config.alert_notify.clone(),
             };
             let miner: Option<Arc<dyn RpcRegtest>> = if config.network == Network::Regtest {
@@ -618,7 +630,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     info!(
                         "rpc: listening on {} (auth={})",
                         h.local_addr,
-                        if config.rpc_user.is_some() {
+                        if config.rpc.user.is_some() {
                             "rpcuser/rpcpassword"
                         } else {
                             "cookie"
@@ -707,7 +719,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 let ibd = node.hub.in_ibd();
                 h.initial_block_download
                     .store(!minwork || ibd, Ordering::SeqCst);
-                let want_relay = !config.blocksonly && minwork && !ibd;
+                let want_relay = !config.mempool.blocksonly && minwork && !ibd;
                 if want_relay != mempool.relay_enabled() {
                     mempool.set_relay_enabled(want_relay);
                     if want_relay {
@@ -804,7 +816,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
 
             let stagnant = last_tip_change.elapsed() >= Duration::from_secs(STALE_TIP_SECS);
-            if !stagnant || config.connect.is_empty() == false || !config.use_seeds {
+            if !stagnant || config.listen.connect.is_empty() == false || !config.listen.use_seeds {
                 continue;
             }
             if addrman.is_empty() || shutdown.requested() {
@@ -962,7 +974,7 @@ fn tip_meets_min_work(config: &NodeConfig, hub: &rbitcoin_net::ChainHub) -> bool
 }
 
 fn should_resolve_default_seeds(config: &NodeConfig) -> bool {
-    config.use_seeds && config.connect.is_empty() && config.signet_challenge.is_none()
+    config.listen.use_seeds && config.listen.connect.is_empty() && config.signet_challenge.is_none()
 }
 
 /// One walker per process: SH-warm start and post-IBD `enter_tip_mode` both call this.
@@ -1963,8 +1975,8 @@ mod tests {
             .with_datadir(&dir)
             .with_network(rbitcoin_primitives::Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.use_seeds = false;
-        cfg.connect.clear();
+        cfg.listen.use_seeds = false;
+        cfg.listen.connect.clear();
         cfg.max_run_secs = Some(0); // exit after catch-up / tip mode
         cfg.smoke = false;
         // Bound runtime so a hang fails the test suite instead of blocking.
@@ -2004,11 +2016,11 @@ mod tests {
             .with_datadir(&dir)
             .with_network(rbitcoin_primitives::Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.use_seeds = false;
-        cfg.connect.clear();
+        cfg.listen.use_seeds = false;
+        cfg.listen.connect.clear();
         cfg.milestone_height = 100; // exercise milestone log branch
         cfg.shindex = true;
-        cfg.electrum_listen = Some("127.0.0.1:0".parse().unwrap());
+        cfg.listen.electrum = Some("127.0.0.1:0".parse().unwrap());
         // max_run_secs=0 exits after catch-up/tip (tip-follow loop uses 60s poll sleeps).
         cfg.max_run_secs = Some(0);
         let result = tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg)).await;
@@ -2028,10 +2040,10 @@ mod tests {
             .with_datadir(&dir)
             .with_network(rbitcoin_primitives::Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.use_seeds = false;
-        cfg.connect.clear();
+        cfg.listen.use_seeds = false;
+        cfg.listen.connect.clear();
         cfg.shindex = true;
-        cfg.esplora_listen = Some("127.0.0.1:0".parse().unwrap());
+        cfg.listen.esplora = Some("127.0.0.1:0".parse().unwrap());
         cfg.max_run_secs = Some(0);
         let result = tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg)).await;
         assert!(result.is_ok(), "run_p2p timed out");
@@ -2051,9 +2063,9 @@ mod tests {
             .with_datadir(&dir)
             .with_network(rbitcoin_primitives::Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.use_seeds = false;
+        cfg.listen.use_seeds = false;
         // Blackhole / closed port: connect fails fast under FOLLOW_CONNECT_SECS.
-        cfg.connect = vec!["127.0.0.1:1".parse().unwrap()];
+        cfg.listen.connect = vec!["127.0.0.1:1".parse().unwrap()];
         cfg.max_run_secs = Some(0);
         // Dead connect should fail fast (FOLLOW_CONNECT_SECS); 20s bound for hang detection.
         let result = tokio::time::timeout(Duration::from_secs(20), run_p2p(cfg)).await;
@@ -2122,13 +2134,13 @@ mod tests {
             .with_datadir(&dir)
             .with_network(rbitcoin_primitives::Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.use_seeds = false;
+        cfg.listen.use_seeds = false;
         // Peers file is loaded for bookkeeping; do not dial those addrs as --connect
         // (would stall IBD). Empty connect + no seeds → catch-up complete immediately.
-        cfg.connect.clear();
+        cfg.listen.connect.clear();
         cfg.max_run_secs = Some(0);
         cfg.shindex = true;
-        cfg.electrum_listen = Some("127.0.0.1:0".parse().unwrap());
+        cfg.listen.electrum = Some("127.0.0.1:0".parse().unwrap());
         cfg.milestone_height = 50;
         let result = tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg)).await;
         assert!(result.is_ok(), "run_p2p timed out");
@@ -2151,8 +2163,8 @@ mod tests {
             .with_datadir(&dir)
             .with_network(rbitcoin_primitives::Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.use_seeds = false;
-        cfg.connect = vec!["127.0.0.1:1".parse().unwrap()];
+        cfg.listen.use_seeds = false;
+        cfg.listen.connect = vec!["127.0.0.1:1".parse().unwrap()];
         cfg.max_run_secs = Some(0);
         let result = tokio::time::timeout(Duration::from_secs(20), run_p2p(cfg)).await;
         assert!(result.is_ok(), "run_p2p timed out");
@@ -2187,8 +2199,8 @@ mod tests {
             .with_datadir(&dir)
             .with_network(rbitcoin_primitives::Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.use_seeds = true; // regtest: resolve_all_seeds → empty
-        cfg.connect.clear();
+        cfg.listen.use_seeds = true; // regtest: resolve_all_seeds → empty
+        cfg.listen.connect.clear();
         cfg.max_run_secs = Some(0);
         cfg.milestone_height = 1; // log milestone branch
         let result = tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg)).await;
@@ -2212,10 +2224,10 @@ mod tests {
             .with_datadir(&dir)
             .with_network(rbitcoin_primitives::Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.use_seeds = false;
-        cfg.connect.clear();
+        cfg.listen.use_seeds = false;
+        cfg.listen.connect.clear();
         cfg.shindex = true;
-        cfg.electrum_listen = Some(addr); // already bound → fail
+        cfg.listen.electrum = Some(addr); // already bound → fail
         cfg.max_run_secs = Some(0);
         let result = tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg)).await;
         assert!(result.is_ok(), "run_p2p timed out");

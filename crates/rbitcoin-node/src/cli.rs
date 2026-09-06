@@ -1062,10 +1062,10 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     }
 
     if acc.datadir_set {
-        config.datadir = acc.datadir;
+        config.datadir.path = acc.datadir;
     }
     if acc.datadir_cold_set {
-        config.datadir_cold = acc.datadir_cold;
+        config.datadir.cold = acc.datadir_cold;
     }
     if acc.network_set {
         config.network = acc.network;
@@ -1077,14 +1077,14 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         config.signet_block_time = acc.signet_block_time;
     }
     if let Some((first, rest)) = acc.listen.split_first() {
-        config.p2p_listen = Some(*first);
-        config.p2p_extra_listens.extend(rest.iter().copied());
+        config.listen.p2p = Some(*first);
+        config.listen.p2p_extra.extend(rest.iter().copied());
     }
     if let Some(a) = acc.electrum_listen {
-        config.electrum_listen = Some(a);
+        config.listen.electrum = Some(a);
     }
     if let Some(a) = acc.esplora_listen {
-        config.esplora_listen = Some(a);
+        config.listen.esplora = Some(a);
     }
     if acc.shindex_set {
         config.shindex = acc.shindex;
@@ -1093,25 +1093,25 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         config.sptweaks = acc.sptweaks;
     }
     if let Some(a) = acc.rpc_listen {
-        config.rpc_listen = Some(a);
+        config.rpc.listen = Some(a);
     }
     if let Some(u) = acc.rpc_user {
-        config.rpc_user = Some(u);
+        config.rpc.user = Some(u);
     }
     if let Some(p) = acc.rpc_password {
-        config.rpc_password = Some(p);
+        config.rpc.password = Some(p);
     }
     if let Some(n) = acc.rpc_work_queue {
-        config.rpc_work_queue = Some(n);
+        config.rpc.work_queue = Some(n);
     }
     if !acc.connect.is_empty() {
-        config.connect = acc.connect;
+        config.listen.connect = acc.connect;
     }
     if !acc.seednodes.is_empty() {
-        config.seednodes = acc.seednodes;
+        config.listen.seednodes = acc.seednodes;
     }
     if acc.seeds_set {
-        config.use_seeds = acc.use_seeds;
+        config.listen.use_seeds = acc.use_seeds;
     }
     config.smoke = acc.smoke;
     // Milestone: CLI > conf > network default (assumevalid-style).
@@ -1121,16 +1121,16 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         config.milestone_height = default_milestone_height(config.network);
     }
     if acc.max_outbound_set {
-        config.max_outbound = acc.max_outbound;
+        config.listen.max_outbound = acc.max_outbound;
     }
     if acc.max_inbound_set {
-        config.max_inbound = acc.max_inbound;
-        config.max_inbound_explicit = true;
+        config.listen.max_inbound = acc.max_inbound;
+        config.listen.max_inbound_explicit = true;
     }
     config.inhibit_suspend = acc.inhibit_suspend;
     // Map MiB → weight units (1 MiB ≈ 1e6 WU for budget purposes).
     if let Some(mb) = acc.mempool_size_mb {
-        config.mempool_max_weight = mb.saturating_mul(1_000_000);
+        config.mempool.max_weight = mb.saturating_mul(1_000_000);
     }
     if !acc.test_activation_heights.is_empty() {
         config
@@ -1138,19 +1138,19 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
             .extend(acc.test_activation_heights);
     }
     if let Some(b) = acc.persist_mempool {
-        config.persist_mempool = b;
+        config.mempool.persist = b;
     }
     if !acc.whitelist.is_empty() {
         config.whitelist.extend(acc.whitelist);
     }
     if let Some(b) = acc.blocksonly {
-        config.blocksonly = b;
+        config.mempool.blocksonly = b;
     }
     if let Some(s) = acc.min_relay_fee_btc {
-        config.min_relay_fee_btc = Some(s);
+        config.mempool.min_relay_fee_btc = Some(s);
     }
     if let Some(h) = acc.mempool_expiry_hours {
-        config.mempool_expiry_hours = Some(h);
+        config.mempool.expiry_hours = Some(h);
     }
     if let Some(s) = acc.startup_notify {
         config.startup_notify = Some(s);
@@ -1159,16 +1159,16 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         config.alert_notify = Some(s);
     }
     if let Some(b) = acc.permit_bare_multisig {
-        config.permit_bare_multisig = b;
+        config.mempool.permit_bare_multisig = b;
     }
     if let Some(n) = acc.limit_cluster_count {
-        config.limit_cluster_count = Some(n);
+        config.mempool.limit_cluster_count = Some(n);
     }
     if let Some(n) = acc.limit_cluster_size_kvb {
-        config.limit_cluster_size_kvb = Some(n);
+        config.mempool.limit_cluster_size_kvb = Some(n);
     }
     if let Some(n) = acc.peer_timeout_secs {
-        config.peer_timeout_secs = Some(n);
+        config.listen.peer_timeout_secs = Some(n);
     }
     if let Some(w) = acc.minimum_chain_work {
         config.minimum_chain_work = Some(w);
@@ -1186,7 +1186,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         config.block_min_tx_fee_btc = Some(s);
     }
     if !acc.external_ips.is_empty() {
-        config.external_ips.extend(acc.external_ips);
+        config.listen.external_ips.extend(acc.external_ips);
     }
 
     // Unstable env is an input when CLI/conf omitted inbound — never set_var.
