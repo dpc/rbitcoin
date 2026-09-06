@@ -5223,6 +5223,142 @@ fn catchup_headers_getdata_stays_in_serve_window() {
     });
 }
 
+/// Child-before-parent catch-up bodies must still connect. Dropping the child
+/// and leaving it in `asked_blocks` skipped the hash forever
+/// (`feature_bip68_sequence` activateCSV `sync_blocks` 60s).
+#[test]
+fn catchup_child_before_parent_still_connects() {
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::Network;
+    use rbitcoin_primitives::Height;
+    use tokio::runtime::Builder;
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        use bitcoin::p2p::message::RawNetworkMessage;
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        FramedMessage {
+            magic,
+            command,
+            payload: full[24..].to_vec(),
+        }
+    }
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (src_dir, src_q) = tmp_store("catchup-ooo-src");
+        let src = ChainHub::new(src_q, ChainParams::regtest(), Milestone::NONE);
+        src.ensure_genesis().unwrap();
+        src.generate_to_script(2, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .unwrap();
+        let headers: Vec<bitcoin::block::Header> = (1..=2)
+            .map(|h| src.query.wire_header_at_height(Height(h)).unwrap())
+            .collect();
+        let parent = headers[0].block_hash();
+        let child = headers[1].block_hash();
+
+        let (dir, q) = tmp_store("catchup-ooo-dst");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut pending_headers = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut pending_cmpct = HashMap::new();
+        let mut from_peer = HashMap::new();
+        let mut requested = HashSet::new();
+        let mut wants_headers = false;
+        let mut wtxid = false;
+        let mut send_cmpct = false;
+        let mut cmpct_ver = 2u32;
+        let mut ban = 0u32;
+
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Headers(headers.clone())),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut requested,
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        while out_rx.try_recv().is_ok() {}
+        assert!(requested.contains(&parent) && requested.contains(&child));
+
+        let child_block = src
+            .query
+            .reconstruct_archived_block(&child.to_byte_array())
+            .unwrap()
+            .expect("child body");
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Block(child_block)),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut requested,
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        while out_rx.try_recv().is_ok() {}
+
+        let parent_block = src
+            .query
+            .reconstruct_archived_block(&parent.to_byte_array())
+            .unwrap()
+            .expect("parent body");
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Block(parent_block)),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut requested,
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            hub.tip_hash(),
+            Some(child),
+            "child delivered before parent must connect once the parent does"
+        );
+
+        let _ = std::fs::remove_dir_all(src_dir);
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
 /// Same catch-up as above, but the peer answers with `CmpctBlock` (node-to-node
 /// `sendcmpct` / `MSG_CMPCT_BLOCK` getdata). Accepting compact must drop the
 /// hash from `requested` or drain's serve window stays full.

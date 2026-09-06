@@ -1629,6 +1629,18 @@ fn queue_block_getdata(
     Ok(())
 }
 
+fn take_requested_block(hub: &ChainHub, requested: &mut HashSet<BlockHash>, hash: &BlockHash) {
+    requested.remove(hash);
+    hub.forget_asked_block(hash);
+}
+
+fn net_error_needs_parent(e: &NetError) -> bool {
+    matches!(
+        e,
+        NetError::Protocol("unknown parent") | NetError::Protocol("gap above tip")
+    )
+}
+
 /// Incomplete compact block waiting for `blocktxn`.
 struct PendingCmpct {
     hsi: HeaderAndShortIds,
@@ -2614,7 +2626,7 @@ async fn on_block(
     }
     let _ = hub.ensure_header(&block.header);
     follow.pending_cmpct.remove(&hash);
-    follow.requested_blocks.remove(&hash);
+    take_requested_block(hub, &mut follow.requested_blocks, &hash);
     follow.pending_headers.entry(hash).or_insert(block.header);
     if !any_header_path_meets_minwork(hub, &mut follow.pending_headers, hash) {
         follow.pending_blocks.insert(hash, block.clone());
@@ -2630,6 +2642,19 @@ async fn on_block(
         }
         Err(e) if net_error_is_store_not_found(&e) => {
             rbitcoin_log::warn!("p2p: accept dropped {hash} (store not found — keep session): {e}");
+        }
+        Err(e) if net_error_needs_parent(&e) => {
+            follow.pending_blocks.insert(hash, block.clone());
+            drain_pending(
+                hub,
+                out_tx,
+                &mut follow.pending_blocks,
+                &mut follow.pending_headers,
+                &mut follow.requested_blocks,
+                getdata_use_compact(hub, follow.cmpct_version),
+                session,
+            )
+            .await?;
         }
         Err(e) => {
             // Rule rejects (`bad-txns-nonfinal`, BIP68/112 locktime,
@@ -2719,21 +2744,23 @@ async fn on_cmpctblock(
                 let _ = queue_getheaders(out_tx, hub, session, false, None);
             }
         } else if hub.has_block(&hash) {
-            follow.requested_blocks.remove(&hash);
+            take_requested_block(hub, &mut follow.requested_blocks, &hash);
         } else if let Some(block) = try_fill_cmpct(hub, &hsi, 2) {
-            follow.requested_blocks.remove(&hash);
+            take_requested_block(hub, &mut follow.requested_blocks, &hash);
             follow.pending_cmpct.remove(&hash);
             relay_new_pow_valid_block(hub, &block, session);
-            let accepted = matches!(
-                hub.accept_received_block_async(block).await,
-                Ok(AcceptOutcome::Accepted { .. })
-            );
-            if accepted {
-                maybe_select_hb_if_relay(hub, session);
-            } else if !hub.knows_header(&hsi.header.prev_blockhash) {
-                // Filled a better-work compact whose parent bodies
-                // we lack (`mempool_reorg` 20-block submitblock).
-                let _ = queue_getheaders(out_tx, hub, session, true, None);
+            match hub.accept_received_block_async(block.clone()).await {
+                Ok(AcceptOutcome::Accepted { .. }) => {
+                    maybe_select_hb_if_relay(hub, session);
+                }
+                Err(e) if net_error_needs_parent(&e) => {
+                    follow.pending_blocks.insert(hash, block);
+                }
+                _ => {
+                    if !hub.knows_header(&hsi.header.prev_blockhash) {
+                        let _ = queue_getheaders(out_tx, hub, session, true, None);
+                    }
+                }
             }
             drain_pending(
                 hub,
@@ -2821,9 +2848,9 @@ async fn on_blocktxn(
         match apply_cmpct_blocktxn(hub, &pc, bt) {
             Ok(block) => {
                 relay_new_pow_valid_block(hub, &block, session);
-                match hub.accept_received_block_async(block).await {
+                match hub.accept_received_block_async(block.clone()).await {
                     Ok(AcceptOutcome::Accepted { .. }) => {
-                        follow.requested_blocks.remove(&hash);
+                        take_requested_block(hub, &mut follow.requested_blocks, &hash);
                         maybe_select_hb_if_relay(hub, session);
                         if let Some(s) = session {
                             if let Some(h) = hub.tip_height() {
@@ -2845,7 +2872,21 @@ async fn on_blocktxn(
                         .await?;
                     }
                     Ok(_) => {
-                        follow.requested_blocks.remove(&hash);
+                        take_requested_block(hub, &mut follow.requested_blocks, &hash);
+                        drain_pending(
+                            hub,
+                            out_tx,
+                            &mut follow.pending_blocks,
+                            &mut follow.pending_headers,
+                            &mut follow.requested_blocks,
+                            getdata_use_compact(hub, follow.cmpct_version),
+                            session,
+                        )
+                        .await?;
+                    }
+                    Err(e) if net_error_needs_parent(&e) => {
+                        take_requested_block(hub, &mut follow.requested_blocks, &hash);
+                        follow.pending_blocks.insert(hash, block);
                         drain_pending(
                             hub,
                             out_tx,
@@ -3669,7 +3710,7 @@ async fn drain_pending_once(
                 | Ok(AcceptOutcome::IgnoredWeaker) => {
                     progress = true;
                 }
-                Err(NetError::Protocol("unknown parent")) => {
+                Err(e) if net_error_needs_parent(&e) => {
                     pending_blocks.insert(h, block);
                 }
                 // Invalid body: reject the block, keep the peer. BIP-152

@@ -65,6 +65,13 @@ before 1.0).
   `block_fork_differential`). Failed branch tips are marked invalid and
   dropped; `accept_branch` refuses invalidated hashes. Fork-diff `setup_side`
   parks the sibling without applying held work.
+- **Catch-up child-before-parent bodies connect after the parent:** a
+  child whose parent header was already stored is `gap above tip`, not
+  `unknown parent`, so it was dropped. `asked_blocks` also kept the hash
+  after receive, so drain would not re-ask. Hold that body like an
+  unknown parent, apply held children when the parent connects, and
+  forget `asked_blocks` on receive (`feature_bip68_sequence` activateCSV
+  `sync_blocks` 60s).
 
 - **Reorg-n differential parks tip on stem after reject:** `compare_fork_n_one`
   left the hub on the side chain when the child was rejected, so the next

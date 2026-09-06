@@ -1626,7 +1626,10 @@ impl ChainHub {
             Ok(AcceptOutcome::Accepted { height }) => {
                 self.held_bodies.write().unwrap().remove(&hash);
                 self.held_seq.write().unwrap().remove(&hash);
-                Ok(AcceptOutcome::Accepted { height })
+                match self.try_apply_held()? {
+                    Some(o @ AcceptOutcome::Accepted { .. }) => Ok(o),
+                    _ => Ok(AcceptOutcome::Accepted { height }),
+                }
             }
             Ok(AcceptOutcome::AlreadyHave) => {
                 self.held_bodies.write().unwrap().remove(&hash);
@@ -1641,7 +1644,9 @@ impl ChainHub {
                 }
             }
             Err(NetError::Protocol(s))
-                if s.contains("side block") || s.contains("unknown parent") =>
+                if s.contains("side block")
+                    || s.contains("unknown parent")
+                    || s.contains("gap above tip") =>
             {
                 self.hold_body(block);
                 match self.try_apply_held()? {
