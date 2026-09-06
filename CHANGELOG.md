@@ -11,6 +11,9 @@ before 1.0).
 
 ### Changed
 
+- **Node start catch-up is a `CatchUp` enum:** not four independent bools.
+  Indexes, IBD, and Electrum/Esplora start are named phases. Electrum and
+  Esplora share one hub-tip broadcast bridge.
 - **Code shape:** [`docs/code-shape.md`](docs/code-shape.md) owns control
   flow, naming, and composition (CONTRIBUTING principle 10).
   [`docs/quality.md`](docs/quality.md) **Q-61** is the 0.6.0 readability
