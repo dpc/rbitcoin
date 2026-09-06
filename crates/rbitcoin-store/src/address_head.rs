@@ -134,6 +134,16 @@ pub fn is_probe_exhausted_error(err: &StoreError) -> bool {
     )
 }
 
+/// `NetError::Consensus` display of store `Corrupt` (not a block rule).
+pub fn is_store_corrupt_display(s: &str) -> bool {
+    const PROBE: &str = "address head probe exhausted on insert";
+    let probe = StoreError::Corrupt(PROBE);
+    if s == probe.to_string() {
+        return is_probe_exhausted_error(&probe);
+    }
+    s.starts_with("corrupt record:")
+}
+
 #[inline]
 fn note_probe_depth_on_insert(depth: u32) {
     if depth <= PROBE_DEPTH_WARN {
@@ -1485,6 +1495,11 @@ mod tests {
         let e = StoreError::Corrupt("address head probe exhausted on insert");
         assert!(is_probe_exhausted_error(&e));
         assert!(!is_probe_exhausted_error(&StoreError::NotFound));
+        assert!(is_store_corrupt_display(&e.to_string()));
+        assert!(is_store_corrupt_display(
+            "corrupt record: leftover identity broken"
+        ));
+        assert!(!is_store_corrupt_display("bad-txnmrklroot"));
     }
 
     #[test]

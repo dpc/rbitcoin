@@ -255,34 +255,52 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 ## Core differential
 
-Nightly (not a required PR check) `fuzz.yml` runs nine cargo-fuzz targets:
+Nightly (not a required PR check) `fuzz.yml` runs **16** cargo-fuzz jobs plus
+in-tree extras (`store_reorg`, later `script_kernel_differential` /
+`p2p_sequence_differential`):
 
 | Target | What | Oracle |
 |--------|------|--------|
-| `block_wire` | `check_block_wire` (ASan) | none |
-| `v2_contents` | BIP324 `parse_v2_contents` + `try_decode` (ASan) | none |
-| `v2_session` | BIP324 handshake + fuzzed application contents vs a live v31.1 `bitcoind` v2 peer (ASan on our process). Finding = our crash / ASan / failed handshake. Core TCP drop on garbage is expected, not a consensus split. **Not** accept/reject. | official **v31.1** `bitcoind` tarball (`scripts/core-functional/fetch-bitcoind.sh`), `-listen=1` |
+| `block_wire` | `check_block_wire` (ASan, `block.dict`) | none |
+| `v2_contents` | BIP324 `parse_v2_contents` + `try_decode` (ASan, `v2.dict`) | none |
+| `addrv2_wire` | BIP155 `addrv2` payload parse (ASan, `addrv2.dict`) | none |
+| `inv_getdata_wire` | `inv` / `getdata` payload parse (ASan, `inv.dict`) | none |
+| `electrum_json` | Electrum JSON-RPC line parse (ASan, `electrum.dict`) | none |
+| `v2_session` | BIP324 handshake + structured ping/pong vs a live v31.1 `bitcoind` v2 peer (ASan). Matching `pong` is a comparison. Garbage slice remains for encoder ASan. | official **v31.1** `bitcoind` tarball (`scripts/core-functional/fetch-bitcoind.sh`), `-listen=1` |
 | `cmpct_differential` | empty-mempool BIP152 `try_reconstruct` missing indexes vs Core `getblocktxn` on a fuzzed `cmpctblock` (ASan). Malformed compact that Core drops is skip. **Not** accept/reject; **not** two-node reorg. | same tarball, `-listen=1` |
 | `block_differential` | height-1 `ChainHub::accept_received_block` vs Core `submitblock`, **accept vs reject only** | same tarball |
 | `block_spend_differential` | height-101 spend of a mature pad coinbase, same path and oracle | same tarball |
 | `script_differential` | height-101 same-block spend whose **executed scriptPubKey** is fuzzer-owned, same path and oracle | same tarball |
 | `block_fork_differential` | 2-block heavier fork off the pad (sibling of a pad+1 stem), same path and oracle | same tarball |
 | `cmpct_reorg_differential` | same fork child, but hub delivers **child then parent** through `drain_pending` (014/020); Core `submitblock`s parent then child. Accept vs reject of C / final tip | same tarball |
+| `block_reorg_n_differential` | `DIFF_REORG_N` heavier side vs 1-block stem; same rewind/restore as fork | same tarball |
+| `block_csv_differential` | BIP68 relative lock (full `u32` nSequence + version + MTP `time_shift`) vs Core `submitblock` | same tarball |
 | `mempool_differential` | `MempoolHub::test_accept` vs Core `testmempoolaccept`. **Consensus-class only** — Core standardness / fee / RBF / dust is skip (COMPAT) | same tarball, `-acceptnonstdtxn=1` |
 | `script_verify_differential` | `verify_tx_scripts_detached` vs Core `testmempoolaccept` of the parent+spend package. Same policy skip | same tarball, `-acceptnonstdtxn=1` |
+| `store_reorg` | Tiny-hub `{extend, sibling, rewind}` connect churn (ASan, no Core). Store `Corrupt` / probe-exhausted **panics** | none |
+| `script_kernel_differential` | In-process `verify_tx_scripts_detached_forks` vs `bitcoinconsensus::verify_with_flags` (ASan, **fuzz workspace only**) | Core interpreter via `bitcoinconsensus` crate |
+| `p2p_sequence_differential` | Up to 8 `{ping, headers, block}` steps vs live Core v2 + `compare_one` for block | same tarball, `-listen=1` |
 
 ```bash
 ./scripts/fuzz-run.sh                           # block_wire (ASan)
 ./scripts/fuzz-run.sh v2_contents               # BIP324 contents (ASan)
-./scripts/fuzz-run.sh v2_session                # live Core v2 peer, ASan, -timeout=90
-./scripts/fuzz-run.sh cmpct_differential        # compact missing indexes vs getblocktxn, ASan, -timeout=90
+./scripts/fuzz-run.sh addrv2_wire               # BIP155 payload (ASan)
+./scripts/fuzz-run.sh inv_getdata_wire          # inv/getdata payload (ASan)
+./scripts/fuzz-run.sh electrum_json             # Electrum JSON line (ASan)
+./scripts/fuzz-run.sh v2_session                # live Core v2 peer, ping/pong compare, ASan
+./scripts/fuzz-run.sh cmpct_differential        # compact missing indexes vs getblocktxn, ASan
 ./scripts/fuzz-run.sh block_differential        # fetch bitcoind, --sanitizer none
 ./scripts/fuzz-run.sh block_spend_differential  # 100-block pad, --sanitizer none, -timeout=180
-./scripts/fuzz-run.sh script_differential       # mutate executed scriptPubKey, --sanitizer none, -timeout=180
-./scripts/fuzz-run.sh block_fork_differential   # pad+stem, 2-block fork, --sanitizer none, -timeout=180
-./scripts/fuzz-run.sh cmpct_reorg_differential  # child-first drain_pending vs Core, --sanitizer none, -timeout=180
-./scripts/fuzz-run.sh mempool_differential      # test_accept vs testmempoolaccept, --sanitizer none
+./scripts/fuzz-run.sh script_differential       # mutate executed scriptPubKey, --sanitizer none
+./scripts/fuzz-run.sh block_fork_differential   # pad+stem, 2-block fork, --sanitizer none
+./scripts/fuzz-run.sh cmpct_reorg_differential  # child-first drain_pending vs Core
+./scripts/fuzz-run.sh block_reorg_n_differential # N-block side vs 1-block stem
+./scripts/fuzz-run.sh block_csv_differential    # BIP68 nSequence + version + MTP
+./scripts/fuzz-run.sh mempool_differential      # test_accept vs testmempoolaccept
 ./scripts/fuzz-run.sh script_verify_differential # detached scripts vs testmempoolaccept package
+./scripts/fuzz-run.sh store_reorg                # tiny hub connect/disconnect, ASan, no Core
+./scripts/fuzz-run.sh script_kernel_differential # ours vs libbitcoinconsensus, ASan, no Core
+./scripts/fuzz-run.sh p2p_sequence_differential  # ping/headers/block vs Core, --sanitizer none
 ```
 
 `block_differential` prepares every candidate on **regtest genesis** (`prev`
@@ -307,14 +325,30 @@ global `ChainParams::regtest()` is unchanged. Harness/oracle failure exits
 a test to green by changing production in the harness PR.
 
 `v2_session` completes VERSION/VERACK on the encrypted session
-(`V2PlainSession`), then writes fuzzed application contents. It does not
-compare `submitblock` verdicts.
+(`V2PlainSession`), then sends a first-byte-selected well-formed message
+(`ping`/`pong`/`sendcmpct`/`verack`/`getheaders`) or a garbage slice.
+A `ping` whose `pong` nonce matches counts as a comparison. Core TCP drop
+on leftover garbage is not a consensus split.
+
+`block_csv_differential` maps `[seq:u32 le][ver:u8][time_shift:u16 le]`
+(short leftover zeros). Version 0 → tx v1 (CSV ignored); otherwise v2.
+`time_shift` is added to the spend header time so MTP can satisfy or fail
+`SEQUENCE_LOCKTIME_TYPE_FLAG`.
+
+Skip-rate gate: after `Done N runs` with N≥1000, `comparisons/runs` must
+be ≥ **0.01** for submitblock diffs. Skip-heavy jobs (`mempool_differential`,
+`script_verify_differential`, `cmpct_differential`, `v2_session`) need
+≥ **0.005**. Zero comparisons always fail. Unset `FUZZ_MAX_TOTAL_TIME` is
+**600** (3600 when `date +%u` is Sunday).
 
 `cmpct_differential` sends `sendcmpct(1, 2)` then a fuzzed height-1
-`cmpctblock`. Empty mempool on both sides: our missing indexes must match
-Core `getblocktxn`. Seed is a 2-tx compact (coinbase prefilled, one short-id
-→ missing `[1]`). Disagreement panics. It does not compare accept/reject
-and does not drive a two-node reorg.
+`cmpctblock`. Each input restamps a unique grinded header (prev = genesis)
+so Core treats it as a new compact. Spawn `setmocktime`s Core to regtest
+genesis time (`CanDirectFetch` / not IBD). Empty mempool: our missing
+indexes must match Core `getblocktxn`. After a compared request, Core
+`invalidateblock`s that header. Seed is a 2-tx compact (coinbase prefilled,
+one short-id → missing `[1]`). Disagreement panics. It does not compare
+accept/reject and does not drive a two-node reorg.
 
 `cmpct_reorg_differential` uses the same pad+stem and fork child as
 `block_fork_differential`, but the hub never `accept_received_block`s B or C.
@@ -330,12 +364,6 @@ HB `cmpctblock` announce.
 RPC-only `bitcoind` is spawned with `-acceptnonstdtxn=1` (v31.1 regtest
 requires standardness by default) so the OP_TRUE pad spend compares
 consensus instead of bouncing at `IsStandardTx`.
-
-Skip-rate gate: `submitblock` diffs fail when `Done N runs` (N≥1000) and
-comparisons < 10. Skip-heavy jobs (`cmpct_differential`,
-`mempool_differential`, `script_verify_differential`) require ≥1
-comparison (seed proves the oracle); mutations that destroy wire or stay
-policy-skip are expected.
 
 ## P2P serve bench (host only)
 

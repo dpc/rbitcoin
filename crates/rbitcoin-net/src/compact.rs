@@ -7,11 +7,13 @@
 use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::block::Header;
 use bitcoin::consensus::encode::deserialize;
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::p2p::message::NetworkMessage;
+use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin::p2p::message_compact_blocks::{CmpctBlock, SendCmpct};
 use bitcoin::p2p::Magic;
 use bitcoin::{Block, BlockHash, Target, Transaction};
-use rbitcoin_consensus::{genesis_block, ChainParams};
+use rbitcoin_consensus::{genesis_block, grind_regtest_pow, ChainParams, REGTEST_BLOCK_SPACING};
 use std::collections::HashMap;
 
 use crate::error::NetError;
@@ -73,9 +75,27 @@ pub fn encode_sendcmpct_hb_v2() -> Result<Vec<u8>, NetError> {
     }))
 }
 
+/// BIP324 `ping`.
+pub fn encode_ping_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::Ping(nonce))
+}
+
 /// BIP324 `pong`.
 pub fn encode_pong_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
     encode_v2_contents(NetworkMessage::Pong(nonce))
+}
+
+/// BIP324 `verack`.
+pub fn encode_verack_v2() -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::Verack)
+}
+
+/// BIP324 `getheaders` with empty locator (Core stays connected).
+pub fn encode_getheaders_empty_v2() -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::GetHeaders(GetHeadersMessage::new(
+        Vec::new(),
+        BlockHash::from_byte_array([0; 32]),
+    )))
 }
 
 /// Core v2 frame after we send `cmpctblock`.
@@ -83,6 +103,7 @@ pub fn encode_pong_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
 pub enum CmpctPeerFrame {
     GetBlockTxn(Vec<u64>),
     Ping(u64),
+    Pong(u64),
     Other,
 }
 
@@ -94,6 +115,7 @@ pub fn classify_v2_cmpct_peer(contents: &[u8]) -> CmpctPeerFrame {
                 CmpctPeerFrame::GetBlockTxn(r.txs_request.indexes.clone())
             }
             NetworkMessage::Ping(n) => CmpctPeerFrame::Ping(*n),
+            NetworkMessage::Pong(n) => CmpctPeerFrame::Pong(*n),
             _ => CmpctPeerFrame::Other,
         },
         Err(_) => CmpctPeerFrame::Other,
@@ -109,6 +131,23 @@ pub fn cmpct_hsi_regtest_connectable(hsi: &HeaderAndShortIds) -> bool {
     hsi.header
         .validate_pow(Target::from_compact(hsi.header.bits))
         .is_ok()
+}
+
+/// Decode a compact announcement and restamp a unique grinded height-1 header.
+pub fn prepare_cmpct_fuzz_hsi(data: &[u8]) -> Option<HeaderAndShortIds> {
+    let mut hsi = decode_cmpct_hsi(data)?;
+    let genesis = genesis_block(&ChainParams::regtest());
+    hsi.header.prev_blockhash = genesis.block_hash();
+    hsi.header.bits = genesis.header.bits;
+    let mix = sha256::Hash::hash(data);
+    let extra = u32::from_le_bytes(mix.to_byte_array()[..4].try_into().ok()?);
+    hsi.header.time = genesis
+        .header
+        .time
+        .saturating_add(REGTEST_BLOCK_SPACING)
+        .saturating_add(extra % 10_000);
+    grind_regtest_pow(&mut hsi.header);
+    cmpct_hsi_regtest_connectable(&hsi).then_some(hsi)
 }
 
 /// Core: prefilled indexes must decode in-range. Out-of-range is a
@@ -595,9 +634,13 @@ mod tests {
     fn classify_v2_ping_and_sendcmpct_encode() {
         let ping = crate::v2::encode_v2_contents(NetworkMessage::Ping(7)).unwrap();
         assert_eq!(classify_v2_cmpct_peer(&ping), CmpctPeerFrame::Ping(7));
+        let ping2 = encode_ping_v2(7).unwrap();
+        assert_eq!(ping, ping2);
         let pong = encode_pong_v2(7).unwrap();
-        assert_eq!(classify_v2_cmpct_peer(&pong), CmpctPeerFrame::Other);
+        assert_eq!(classify_v2_cmpct_peer(&pong), CmpctPeerFrame::Pong(7));
         encode_sendcmpct_hb_v2().unwrap();
+        encode_verack_v2().unwrap();
+        encode_getheaders_empty_v2().unwrap();
         assert_eq!(classify_v2_cmpct_peer(&[]), CmpctPeerFrame::Other);
     }
 
@@ -615,6 +658,26 @@ mod tests {
             Some(&[1u64][..])
         );
         encode_cmpctblock_v2(&hsi).unwrap();
+    }
+
+    #[test]
+    fn prepare_cmpct_fuzz_hsi_unique_connectable_headers() {
+        let mut hsi = mined_h1_two_tx_hsi();
+        let raw_a = bitcoin::consensus::encode::serialize(&hsi);
+        hsi.nonce = 0x22;
+        let raw_b = bitcoin::consensus::encode::serialize(&hsi);
+        let a = prepare_cmpct_fuzz_hsi(&raw_a).unwrap();
+        let b = prepare_cmpct_fuzz_hsi(&raw_b).unwrap();
+        assert!(cmpct_hsi_regtest_connectable(&a));
+        assert!(cmpct_hsi_regtest_connectable(&b));
+        let genesis = genesis_block(&ChainParams::regtest());
+        assert_eq!(a.header.prev_blockhash, genesis.block_hash());
+        assert_eq!(b.header.prev_blockhash, genesis.block_hash());
+        assert_ne!(a.header.block_hash(), b.header.block_hash());
+        assert_eq!(
+            cmpct_missing_empty_mempool(&a).as_deref(),
+            Some(&[1u64][..])
+        );
     }
 
     #[test]

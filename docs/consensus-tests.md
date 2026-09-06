@@ -142,4 +142,7 @@ version floors and exact +2h).
 3. For Core corpora: every row must pass; never reintroduce allowlist/skip debt.
 4. Assert on the **error signal** string/variant so removing the check fails the test.
 
-Dependency gate: `cargo tree -i bitcoinconsensus` must not resolve.
+Dependency gate: `cargo tree -i bitcoinconsensus` must not resolve
+(product workspace). The isolated [`fuzz/`](../fuzz/) workspace may depend on
+it as a **fuzz-oracle-only** interpreter (`script_kernel_differential`); that
+crate is not a product consensus path.

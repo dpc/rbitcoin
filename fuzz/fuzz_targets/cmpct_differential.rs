@@ -9,15 +9,14 @@ use std::time::Duration;
 use libfuzzer_sys::fuzz_target;
 use rbitcoin_fuzz::{spawn_bitcoind_p2p, tmp_dir, CoreChild};
 use rbitcoin_net::{
-    classify_v2_cmpct_peer, cmpct_hsi_regtest_connectable, cmpct_missing_empty_mempool,
-    decode_cmpct_hsi, encode_cmpctblock_v2, encode_pong_v2, encode_sendcmpct_hb_v2, CmpctPeerFrame,
-    NetError, V2PlainSession,
+    classify_v2_cmpct_peer, cmpct_missing_empty_mempool, encode_cmpctblock_v2, encode_pong_v2,
+    encode_sendcmpct_hb_v2, prepare_cmpct_fuzz_hsi, CmpctPeerFrame, NetError, V2PlainSession,
 };
 use tokio::net::TcpStream;
 use tokio::runtime::{Builder, Runtime};
 
 struct Base {
-    _core: CoreChild,
+    core: CoreChild,
     p2p: SocketAddr,
     rt: Runtime,
     session: Mutex<Option<V2PlainSession>>,
@@ -66,7 +65,7 @@ fn base() -> &'static Base {
             .block_on(connect_session(p2p))
             .unwrap_or_else(|e| harness_failure(&format!("initial handshake: {e}")));
         Base {
-            _core: core,
+            core,
             p2p,
             rt,
             session: Mutex::new(Some(session)),
@@ -132,7 +131,7 @@ async fn drain_frames(
                         }
                     }
                 }
-                CmpctPeerFrame::Other => {}
+                CmpctPeerFrame::Pong(_) | CmpctPeerFrame::Other => {}
             },
         }
     }
@@ -164,12 +163,9 @@ enum SendOutcome {
 }
 
 fn send_one(b: &Base, data: &[u8]) -> SendOutcome {
-    let Some(hsi) = decode_cmpct_hsi(data) else {
+    let Some(hsi) = prepare_cmpct_fuzz_hsi(data) else {
         return SendOutcome::Live;
     };
-    if !cmpct_hsi_regtest_connectable(&hsi) {
-        return SendOutcome::Live;
-    }
     let Some(ours) = cmpct_missing_empty_mempool(&hsi) else {
         return SendOutcome::Live;
     };
@@ -200,6 +196,8 @@ fn send_one(b: &Base, data: &[u8]) -> SendOutcome {
             if core_idx != ours {
                 panic!("cmpct missing-index split: ours={ours:?} core={core_idx:?}");
             }
+            let hash = hsi.header.block_hash().to_string();
+            let _ = b.core.rpc.core_invalidate_hash(&hash);
             SendOutcome::Compared
         }
         Ok(None) => SendOutcome::Live,

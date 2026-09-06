@@ -1,0 +1,11 @@
+# Electrum JSON-RPC method fragments
+"server.ping"
+"server.version"
+"blockchain.scripthash.subscribe"
+"blockchain.headers.subscribe"
+"blockchain.scripthash.get_history"
+"blockchain.scripthash.get_balance"
+"blockchain.transaction.get"
+"blockchain.transaction.broadcast"
+"{\"id\":1,\"method\":"
+"\"params\":[]}"

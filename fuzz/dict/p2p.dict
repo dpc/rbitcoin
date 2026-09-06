@@ -1,0 +1,12 @@
+# BIP324 / P2P command fragments
+"ping"
+"pong"
+"verack"
+"version"
+"sendcmpct"
+"getheaders"
+"headers"
+"\x00"
+"\x01"
+"\x0d"
+"\x0e"

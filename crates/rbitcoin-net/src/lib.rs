@@ -28,11 +28,12 @@ pub use block_diff::{
     compare_script_one, compare_script_verify_one, compare_spend_one, diff_regtest_params,
     genesis_diff_tip, is_core_connectivity_skip, is_core_mempool_policy_skip, mine_diff_pad,
     mine_diff_stem, parse_submitblock_json, parse_testmempoolaccept_json,
-    prepare_csv_age_candidate, prepare_script_candidate, prepare_spend_candidate,
-    rewind_oracle_until, setup_side_block, split_http_body, submit_pad_to_oracle,
+    prepare_csv_age_candidate, prepare_height1_candidate, prepare_script_candidate,
+    prepare_spend_candidate, rewind_oracle_until, setup_side_block, split_http_body,
+    store_reorg_apply, store_reorg_corrupt_is_finding, store_reorg_step, submit_pad_to_oracle,
     submit_side_to_oracle, verdict_from_accept, verdict_from_core_reply, wait_for_file,
-    BlockOracle, CompareOne, DiffPad, DiffTip, DiffVerdict, OracleReply, DIFF_MATURE_PAD_HEIGHT,
-    DIFF_REORG_N, DIFF_TEST_PAD_HEIGHT,
+    BlockOracle, CompareOne, DiffPad, DiffTip, DiffVerdict, OracleReply, StoreReorgOp,
+    BLOCK_STRUCT_CTRL, DIFF_MATURE_PAD_HEIGHT, DIFF_REORG_N, DIFF_TEST_PAD_HEIGHT,
 };
 pub use cache::BlockCache;
 pub use chain::{
@@ -44,8 +45,9 @@ pub use chain::{
 pub use codec::{MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ, MAX_PROTOCOL_MESSAGE_LENGTH};
 pub use compact::{
     classify_v2_cmpct_peer, cmpct_hsi_regtest_connectable, cmpct_missing_empty_mempool,
-    decode_cmpct_hsi, encode_cmpctblock_v2, encode_pong_v2, encode_sendcmpct_hb_v2,
-    prefilled_indexes_ok, try_reconstruct, CmpctPeerFrame,
+    decode_cmpct_hsi, encode_cmpctblock_v2, encode_getheaders_empty_v2, encode_ping_v2,
+    encode_pong_v2, encode_sendcmpct_hb_v2, encode_verack_v2, prefilled_indexes_ok,
+    prepare_cmpct_fuzz_hsi, try_reconstruct, CmpctPeerFrame,
 };
 pub use error::NetError;
 pub use eviction::{eviction_netgroup, select_inbound_eviction, InboundEvictCandidate};

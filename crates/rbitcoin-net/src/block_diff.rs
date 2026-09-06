@@ -5,9 +5,11 @@ use crate::error::NetError;
 use crate::peer::{drain_pending_now, PendingBlocks};
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::{deserialize, serialize};
+use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{
-    Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+    Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
+    Witness,
 };
 use rbitcoin_consensus::{
     genesis_block, mine_empty_regtest, mine_regtest_paying, prepare_regtest_candidate, ChainParams,
@@ -89,6 +91,8 @@ pub const DIFF_MUT_ANNEX: u8 = 0x20;
 pub const DIFF_MUT_SHUFFLE: u8 = 0x40;
 /// `prepare_script_candidate` prefix: version + witness then scriptPubKey.
 pub const SCRIPT_FUZZ_CTRL: u8 = 0x80;
+/// Structured `{n_tx, has_witness, extra_size}` prefix for spend / height-1 prepare.
+pub const BLOCK_STRUCT_CTRL: u8 = 0x81;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffTip {
@@ -129,6 +133,120 @@ pub fn genesis_diff_tip(params: &ChainParams) -> DiffTip {
         time: g.header.time,
         height: 0,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreReorgOp {
+    Extend,
+    Sibling,
+    Rewind,
+}
+
+impl StoreReorgOp {
+    pub fn from_byte(b: u8) -> Self {
+        match b % 3 {
+            0 => Self::Extend,
+            1 => Self::Sibling,
+            _ => Self::Rewind,
+        }
+    }
+}
+
+pub fn store_reorg_corrupt_is_finding(err: &NetError) -> bool {
+    matches!(err, NetError::Consensus(s) if rbitcoin_store::is_store_corrupt_display(s))
+}
+
+fn store_reorg_map_err(e: NetError) -> String {
+    if store_reorg_corrupt_is_finding(&e) {
+        format!("store corrupt: {e}")
+    } else {
+        format!("net: {e}")
+    }
+}
+
+fn store_reorg_check_tip(
+    hub: &ChainHub,
+    height: u32,
+    hash: Option<BlockHash>,
+) -> Result<(), String> {
+    if hub.tip_height() != Some(height) {
+        return Err(format!("tip_height {:?} != {height}", hub.tip_height()));
+    }
+    if let Some(want) = hash {
+        if hub.tip_hash() != Some(want) {
+            return Err(format!("tip_hash {:?} != {want}", hub.tip_hash()));
+        }
+    }
+    Ok(())
+}
+
+fn store_reorg_accept(hub: &ChainHub, block: Block, expect_h: Option<u32>) -> Result<bool, String> {
+    let hash = block.block_hash();
+    match hub.accept_received_block(block) {
+        Ok(AcceptOutcome::Accepted { height }) => {
+            if let Some(e) = expect_h {
+                if height != e {
+                    return Err(format!("height {height} != {e}"));
+                }
+            }
+            store_reorg_check_tip(hub, height, Some(hash))?;
+            Ok(true)
+        }
+        Ok(AcceptOutcome::AlreadyHave | AcceptOutcome::IgnoredWeaker) => Ok(true),
+        Err(e) if store_reorg_corrupt_is_finding(&e) => Err(format!("store corrupt: {e}")),
+        Err(_) => Ok(false),
+    }
+}
+
+/// One `{extend | sibling | rewind}` step. `Ok(true)` means a connect ran.
+pub fn store_reorg_step(hub: &ChainHub, op: StoreReorgOp) -> Result<bool, String> {
+    let height = hub.tip_height().ok_or("no tip height")?;
+    let hash = hub.tip_hash().ok_or("no tip hash")?;
+    match op {
+        StoreReorgOp::Rewind => {
+            if height == 0 {
+                return Ok(false);
+            }
+            hub.rewind_to_height(height - 1)
+                .map_err(store_reorg_map_err)?;
+            store_reorg_check_tip(hub, height - 1, None)?;
+            Ok(false)
+        }
+        StoreReorgOp::Extend => {
+            if height >= 32 {
+                return Ok(false);
+            }
+            let hdr = hub.tip_header().ok_or("no tip header")?;
+            let mut b = mine_empty_regtest(
+                hash,
+                hdr.time.saturating_add(REGTEST_BLOCK_SPACING),
+                height + 1,
+            );
+            stamp_diff_coinbase(&mut b, next_diff_cb_uniq());
+            remine_diff_header(&mut b);
+            store_reorg_accept(hub, b, Some(height + 1))
+        }
+        StoreReorgOp::Sibling => {
+            if height == 0 {
+                return Ok(false);
+            }
+            let hdr = hub.tip_header().ok_or("no tip header")?;
+            let mut b = mine_empty_regtest(hdr.prev_blockhash, hdr.time.saturating_add(1), height);
+            stamp_diff_coinbase(&mut b, next_diff_cb_uniq());
+            remine_diff_header(&mut b);
+            store_reorg_accept(hub, b, None)
+        }
+    }
+}
+
+pub fn store_reorg_apply(hub: &ChainHub, data: &[u8]) -> Result<u32, String> {
+    let mut n = 0u32;
+    for &b in data.iter().take(32) {
+        if store_reorg_step(hub, StoreReorgOp::from_byte(b))? {
+            n = n.saturating_add(1);
+        }
+    }
+    Ok(n)
 }
 
 pub fn mine_diff_pad(hub: &ChainHub, last: u32) -> Result<DiffPad, &'static str> {
@@ -467,6 +585,39 @@ pub fn parse_script_fuzz_ctrl(data: &[u8]) -> (TxVersion, Witness, &[u8]) {
     )
 }
 
+fn parse_block_struct_ctrl(data: &[u8]) -> Option<(u8, bool, u8)> {
+    if data.first() != Some(&BLOCK_STRUCT_CTRL) || data.len() < 4 {
+        return None;
+    }
+    Some((data[1].min(16), data[2] != 0, data[3]))
+}
+
+fn dummy_struct_tx(uniq: u32, witness: bool, extra_size: u8) -> Transaction {
+    let mut spk = vec![0x51];
+    spk.resize(spk.len() + extra_size as usize, 0);
+    let mut tx = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([uniq as u8; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1000),
+            script_pubkey: ScriptBuf::from_bytes(spk),
+        }],
+    };
+    if witness {
+        tx.input[0].witness = Witness::from_slice(&[&[1u8]]);
+    }
+    tx
+}
+
 fn mine_diff_paying(
     prev: BlockHash,
     time: u32,
@@ -481,6 +632,39 @@ fn mine_diff_paying(
 }
 
 pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
+    if let Some((n_tx, witness, extra_size)) = parse_block_struct_ctrl(data) {
+        let n = n_tx.max(1);
+        let height = tip.height.saturating_add(1);
+        let uniq = next_diff_cb_uniq();
+        let mut spend = default_op_true_spend(mature, uniq);
+        if witness {
+            if let Some(i) = spend.input.first_mut() {
+                i.witness = Witness::from_slice(&[&[1u8]]);
+            }
+        }
+        if extra_size > 0 {
+            if let Some(o) = spend.output.first_mut() {
+                let mut spk = o.script_pubkey.to_bytes();
+                spk.resize(spk.len() + extra_size as usize, 0);
+                o.script_pubkey = ScriptBuf::from_bytes(spk);
+            }
+        }
+        let mut txs = vec![spend];
+        for i in 1..n {
+            txs.push(dummy_struct_tx(
+                uniq.wrapping_add(i as u32),
+                witness,
+                extra_size,
+            ));
+        }
+        return Some(mine_diff_paying(
+            tip.hash,
+            tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            txs,
+        ));
+    }
     let parsed: Block = deserialize(data).ok()?;
     if parsed.txdata.is_empty() {
         return None;
@@ -570,22 +754,30 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
     ))
 }
 
-/// Spend `mature` with BIP68 relative-height `nSequence` (tx version 2).
+/// Spend `mature` with BIP68 `nSequence`. Layout: `[seq:u32 le][ver:u8][time_shift:u16 le]`.
+/// Short leftover bytes parse as zero. `ver == 0` → tx version 1, else 2.
 pub fn prepare_csv_age_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
     if data.is_empty() {
         return None;
     }
-    let rel = if data.len() >= 2 {
-        u16::from_le_bytes([data[0], data[1]])
+    let mut buf = [0u8; 7];
+    let n = data.len().min(7);
+    buf[..n].copy_from_slice(&data[..n]);
+    let seq = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let version = if buf[4] == 0 {
+        TxVersion::ONE
     } else {
-        u16::from(data[0])
+        TxVersion::TWO
     };
+    let time_shift = u32::from(u16::from_le_bytes([buf[5], buf[6]]));
     let mut spend = default_op_true_spend(mature, next_diff_cb_uniq());
-    spend.version = TxVersion::TWO;
-    spend.input[0].sequence = Sequence::from_consensus(u32::from(rel));
+    spend.version = version;
+    spend.input[0].sequence = Sequence::from_consensus(seq);
     Some(mine_diff_paying(
         tip.hash,
-        tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+        tip.time
+            .saturating_add(REGTEST_BLOCK_SPACING)
+            .saturating_add(time_shift),
         tip.height.saturating_add(1),
         ScriptBuf::from_bytes(vec![0x51]),
         vec![spend],
@@ -796,6 +988,9 @@ pub fn verdict_from_accept(
     match r {
         Ok(AcceptOutcome::Accepted { .. }) => Ok(DiffVerdict::Accept),
         Ok(AcceptOutcome::AlreadyHave | AcceptOutcome::IgnoredWeaker) => Ok(DiffVerdict::Skip),
+        Err(NetError::Consensus(s)) if rbitcoin_store::is_store_corrupt_display(&s) => {
+            Err("store: corrupt")
+        }
         Err(NetError::Protocol(_) | NetError::Consensus(_)) => Ok(DiffVerdict::Reject),
         Err(NetError::Io(_) | NetError::Timeout | NetError::Disconnected) => Err("harness"),
         Err(_) => Err("harness"),
@@ -973,17 +1168,32 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-pub fn compare_one(
-    hub: &ChainHub,
-    tip: &mut DiffTip,
-    oracle: &dyn BlockOracle,
-    data: &[u8],
-) -> CompareOne {
-    let Ok(mut block) = deserialize::<Block>(data) else {
-        return CompareOne::NotABlock;
-    };
+pub fn prepare_height1_candidate(tip: &DiffTip, data: &[u8]) -> Option<Block> {
+    if let Some((n_tx, witness, extra_size)) = parse_block_struct_ctrl(data) {
+        let height = tip.height.saturating_add(1);
+        let uniq = next_diff_cb_uniq();
+        let mut extras = Vec::new();
+        for i in 0..n_tx {
+            extras.push(dummy_struct_tx(
+                uniq.wrapping_add(i as u32),
+                witness,
+                extra_size,
+            ));
+        }
+        let mut block = mine_diff_paying(
+            tip.hash,
+            tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            extras,
+        );
+        stamp_diff_coinbase(&mut block, uniq);
+        remine_diff_header(&mut block);
+        return Some(block);
+    }
+    let mut block: Block = deserialize(data).ok()?;
     if block.txdata.is_empty() {
-        return CompareOne::NotABlock;
+        return None;
     }
     if block.txdata.len() > 1 {
         let n = block.txdata.len();
@@ -1000,6 +1210,18 @@ pub fn compare_one(
     );
     stamp_diff_coinbase(&mut block, uniq);
     remine_diff_header(&mut block);
+    Some(block)
+}
+
+pub fn compare_one(
+    hub: &ChainHub,
+    tip: &mut DiffTip,
+    oracle: &dyn BlockOracle,
+    data: &[u8],
+) -> CompareOne {
+    let Some(block) = prepare_height1_candidate(tip, data) else {
+        return CompareOne::NotABlock;
+    };
     compare_prepared(hub, tip, oracle, block)
 }
 
@@ -1843,6 +2065,13 @@ mod tests {
             CompareOne::Agreed { accept: false } => {}
             other => panic!("script-verify OP_RETURN: {other:?}"),
         }
+        let mock = MockOracle::new(OracleReply::Reason(
+            "mandatory-script-verify-flag-failed (OP_RETURN)".into(),
+        ));
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x6a]) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("mandatory OP_RETURN must compare: {other:?}"),
+        }
     }
 
     #[test]
@@ -1887,7 +2116,37 @@ mod tests {
             verdict_from_accept(Err(NetError::Consensus("bad-txnmrklroot".into()))).unwrap(),
             DiffVerdict::Reject
         );
+        let probe = rbitcoin_store::StoreError::Corrupt("address head probe exhausted on insert");
+        assert!(rbitcoin_store::is_probe_exhausted_error(&probe));
+        let harness = verdict_from_accept(Err(NetError::Consensus(probe.to_string())));
+        assert_eq!(harness, Err("store: corrupt"));
+        assert_eq!(
+            verdict_from_accept(Err(NetError::Consensus(
+                "corrupt record: leftover identity broken".into()
+            ))),
+            Err("store: corrupt")
+        );
         assert!(verdict_from_accept(Err(NetError::Io(std::io::Error::other("x")))).is_err());
+    }
+
+    #[test]
+    fn store_reorg_three_ops_do_not_corrupt() {
+        let (dir, hub, _tip) = tmp_diff_hub();
+        let n = store_reorg_apply(
+            &hub,
+            &[
+                0, // extend
+                1, // sibling
+                2, // rewind
+            ],
+        )
+        .expect("happy path");
+        assert!(n >= 1, "extend must connect n={n}");
+        let probe = rbitcoin_store::StoreError::Corrupt("address head probe exhausted on insert");
+        let e = NetError::Consensus(probe.to_string());
+        assert!(store_reorg_corrupt_is_finding(&e));
+        assert_eq!(verdict_from_accept(Err(e)).unwrap_err(), "store: corrupt");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2274,6 +2533,28 @@ mod tests {
     }
 
     #[test]
+    fn prepare_spend_struct_ctrl_n_tx_three_and_witness() {
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let mature = height1_mature_out();
+        let three = prepare_spend_candidate(&dummy, mature, &[BLOCK_STRUCT_CTRL, 3, 0, 0]).unwrap();
+        assert_eq!(three.txdata.len(), 4);
+        let wit = prepare_spend_candidate(&dummy, mature, &[BLOCK_STRUCT_CTRL, 1, 1, 0]).unwrap();
+        assert_eq!(wit.txdata.len(), 2);
+        assert!(rbitcoin_consensus::block_has_witness(&wit));
+        let h1 = prepare_height1_candidate(
+            &genesis_diff_tip(&diff_regtest_params()),
+            &[BLOCK_STRUCT_CTRL, 3, 1, 8],
+        )
+        .unwrap();
+        assert_eq!(h1.txdata.len(), 4);
+        assert!(rbitcoin_consensus::block_has_witness(&h1));
+    }
+
+    #[test]
     fn prepare_spend_with_tx1_gets_unique_txid() {
         let params = diff_regtest_params();
         let g = genesis_block(&params);
@@ -2458,11 +2739,14 @@ mod tests {
             height: DIFF_TEST_PAD_HEIGHT,
         };
         let mature = height1_mature_out();
-        let got = prepare_csv_age_candidate(&dummy, mature, &[5, 0]).unwrap();
+        let got = prepare_csv_age_candidate(&dummy, mature, &[5, 0, 0, 0, 2, 7, 0]).unwrap();
         assert_eq!(got.txdata[1].version, TxVersion::TWO);
         assert_eq!(got.txdata[1].input[0].sequence, Sequence::from_consensus(5));
         assert_eq!(got.txdata[1].input[0].previous_output, mature);
         assert_eq!(got.header.prev_blockhash, dummy.hash);
+        assert_eq!(got.header.time, 1 + REGTEST_BLOCK_SPACING + 7);
+        let v1 = prepare_csv_age_candidate(&dummy, mature, &[5, 0, 0, 0]).unwrap();
+        assert_eq!(v1.txdata[1].version, TxVersion::ONE);
         assert!(prepare_csv_age_candidate(&dummy, mature, b"").is_none());
     }
 
@@ -2472,15 +2756,81 @@ mod tests {
         let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
         let mut tip = pad.tip.clone();
         let mock = MockOracle::new(OracleReply::NullAccept);
-        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[1, 0]) {
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[1, 0, 0, 0, 2]) {
             CompareOne::Agreed { accept: true } => {}
             other => panic!("csv rel=1: {other:?}"),
         }
         assert_eq!(hub.tip_height(), Some(DIFF_MATURE_PAD_HEIGHT));
         let mock = MockOracle::new(OracleReply::Reason("non-BIP68-final".into()));
-        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[200, 0]) {
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[200, 0, 0, 0, 2]) {
             CompareOne::Agreed { accept: false } => {}
             other => panic!("csv rel=200: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn csv_fuzz_bytes(seq: u32, ver: u8, shift: u16) -> Vec<u8> {
+        let mut b = Vec::from(seq.to_le_bytes());
+        b.push(ver);
+        b.extend_from_slice(&shift.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn compare_csv_age_one_version_one_ignores_height_lock() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        let data = csv_fuzz_bytes(200, 0, 0);
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &data) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("csv v1 rel=200: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_csv_age_one_disable_flag_accepts() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        let data = csv_fuzz_bytes((1 << 31) | 200, 2, 0);
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &data) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("csv disable: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_csv_age_one_time_type_small_accepts_large_rejects() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+        let type_flag = 1u32 << 22;
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_csv_age_one(
+            &hub,
+            &mut tip,
+            &mock,
+            pad.mature,
+            &csv_fuzz_bytes(type_flag | 1, 2, 0),
+        ) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("csv time n=1: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason("non-BIP68-final".into()));
+        match compare_csv_age_one(
+            &hub,
+            &mut tip,
+            &mock,
+            pad.mature,
+            &csv_fuzz_bytes(type_flag | 0xffff, 2, 0),
+        ) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("csv time n=ffff: {other:?}"),
         }
         let _ = fs::remove_dir_all(dir);
     }

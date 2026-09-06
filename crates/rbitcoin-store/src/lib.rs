@@ -57,11 +57,11 @@ mod var_table;
 
 pub use crate::compact::output_flags;
 pub use address_head::{
-    bits_for_scale, entry_bytes_for_bits, is_probe_exhausted_error, layout_for_count,
-    load_needs_roll, page_index, probe_depth_stats_snapshot, probe_index, sample_probe_depth_stats,
-    AddressHead, HeadLayout, HEAD_LOAD_CEILING, HEAD_LOAD_START, HEAD_LOAD_WARN, MAINNET_BITS,
-    MAX_BITS, MAX_PROBE, MIN_BITS, PAGE_SLOTS, PAGE_SLOT_BITS, PROBE_DEPTH_WARN,
-    PROBE_REGION_BYTES, TINY_BITS,
+    bits_for_scale, entry_bytes_for_bits, is_probe_exhausted_error, is_store_corrupt_display,
+    layout_for_count, load_needs_roll, page_index, probe_depth_stats_snapshot, probe_index,
+    sample_probe_depth_stats, AddressHead, HeadLayout, HEAD_LOAD_CEILING, HEAD_LOAD_START,
+    HEAD_LOAD_WARN, MAINNET_BITS, MAX_BITS, MAX_PROBE, MIN_BITS, PAGE_SLOTS, PAGE_SLOT_BITS,
+    PROBE_DEPTH_WARN, PROBE_REGION_BYTES, TINY_BITS,
 };
 #[cfg(any(test, debug_assertions))]
 pub use block_queue::take_raw_clone_n;

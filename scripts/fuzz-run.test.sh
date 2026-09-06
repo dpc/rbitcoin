@@ -21,13 +21,17 @@ assert_ok() {
   fi
 }
 
-out="$(FUZZ_DRY_RUN=1 "$RUN" addrv2_wire)"
+out="$(FUZZ_DRY_RUN=1 FUZZ_WEEKDAY=6 "$RUN" addrv2_wire)"
 assert_ok "addrv2_wire dry-run bin" \
   grep -qx "FUZZ_BIN=addrv2_wire" <<<"$out"
 assert_ok "addrv2_wire dry-run sanitizer address" \
   grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "addrv2_wire dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/addrv2.dict" <<<"$out"
+assert_ok "addrv2_wire dry-run default time 600" \
+  grep -qx "FUZZ_MAX_TOTAL_TIME=600" <<<"$out"
 
-out="$(FUZZ_DRY_RUN=1 "$RUN" v2_contents)"
+out="$(FUZZ_DRY_RUN=1 FUZZ_WEEKDAY=6 "$RUN" v2_contents)"
 assert_ok "v2_contents dry-run bin" \
   grep -qx "FUZZ_BIN=v2_contents" <<<"$out"
 assert_ok "v2_contents dry-run sanitizer address" \
@@ -36,6 +40,10 @@ assert_ok "v2_contents dry-run in-process (no -jobs)" \
   grep -qx "FUZZ_JOBS=in-process" <<<"$out"
 assert_ok "v2_contents dry-run timeout 10" \
   grep -qx "FUZZ_TIMEOUT=10" <<<"$out"
+assert_ok "v2_contents dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/v2.dict" <<<"$out"
+assert_ok "v2_contents dry-run default time 600" \
+  grep -qx "FUZZ_MAX_TOTAL_TIME=600" <<<"$out"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN" v2_session)"
 assert_ok "v2_session dry-run bin" \
@@ -50,6 +58,44 @@ assert_ok "v2_session dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
 assert_ok "v2_session dry-run BITCOIND_LISTEN=1" \
   grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+assert_ok "v2_session dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/p2p.dict" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" store_reorg)"
+assert_ok "store_reorg dry-run bin" \
+  grep -qx "FUZZ_BIN=store_reorg" <<<"$out"
+assert_ok "store_reorg dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "store_reorg dry-run no Core" \
+  grep -qx "FUZZ_NO_CORE=1" <<<"$out"
+assert_ok "store_reorg dry-run tiny heads" \
+  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
+assert_ok "store_reorg ops seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/store_reorg_ops.bin"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" script_kernel_differential)"
+assert_ok "script_kernel dry-run bin" \
+  grep -qx "FUZZ_BIN=script_kernel_differential" <<<"$out"
+assert_ok "script_kernel dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "script_kernel dry-run no Core" \
+  grep -qx "FUZZ_NO_CORE=1" <<<"$out"
+assert_ok "script_kernel dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/script.dict" <<<"$out"
+assert_ok "script_kernel dry-run max_len 2000" \
+  grep -qx "FUZZ_MAX_LEN=2000" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" p2p_sequence_differential)"
+assert_ok "p2p_sequence dry-run bin" \
+  grep -qx "FUZZ_BIN=p2p_sequence_differential" <<<"$out"
+assert_ok "p2p_sequence dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+assert_ok "p2p_sequence dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/p2p.dict" <<<"$out"
+assert_ok "p2p_sequence dry-run BITCOIND_LISTEN=1" \
+  grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+assert_ok "p2p_sequence two-ping seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/p2p_seq_two_ping.bin"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN" cmpct_differential)"
 assert_ok "cmpct-differential dry-run bin" \
@@ -64,6 +110,30 @@ assert_ok "cmpct-differential dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
 assert_ok "cmpct-differential dry-run BITCOIND_LISTEN=1" \
   grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 FUZZ_WEEKDAY=6 "$RUN")"
+assert_ok "block_wire dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/block.dict" <<<"$out"
+assert_ok "block_wire dry-run default time 600" \
+  grep -qx "FUZZ_MAX_TOTAL_TIME=600" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" inv_getdata_wire)"
+assert_ok "inv_getdata_wire dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/inv.dict" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" electrum_json)"
+assert_ok "electrum_json dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/electrum.dict" <<<"$out"
+
+t6="$(FUZZ_WEEKDAY=6 "$RUN" --default-time)"
+assert_ok "FUZZ_WEEKDAY=6 is 600" \
+  test "$t6" = "600"
+t7="$(FUZZ_WEEKDAY=7 "$RUN" --default-time)"
+assert_ok "FUZZ_WEEKDAY=7 is 3600" \
+  test "$t7" = "3600"
+texp="$(FUZZ_MAX_TOTAL_TIME=123 FUZZ_WEEKDAY=7 "$RUN" --default-time)"
+assert_ok "explicit FUZZ_MAX_TOTAL_TIME wins over Sunday" \
+  test "$texp" = "123"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN")"
 assert_ok "dry-run default toolchain is nightly" \
@@ -129,6 +199,16 @@ assert_ok "script-differential dry-run timeout 180" \
   grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
 assert_ok "script-differential dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
+assert_ok "script-differential dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/script.dict" <<<"$out"
+assert_ok "script-differential dry-run max_len 2000" \
+  grep -qx "FUZZ_MAX_LEN=2000" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" script_verify_differential)"
+assert_ok "script-verify dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/script.dict" <<<"$out"
+assert_ok "script-verify dry-run max_len 2000" \
+  grep -qx "FUZZ_MAX_LEN=2000" <<<"$out"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN" block_fork_differential)"
 assert_ok "fork-differential dry-run bin" \
@@ -221,27 +301,39 @@ assert_ok "mute skip-rate (1 compare / 10000 runs) fails" \
 {
   echo "block-differential: comparisons=20"
   echo "Done 10000 runs in 120 second(s)"
+} >"$WORKDIR/busy-low.log"
+assert_ok "20/10000 fails the 1% bar" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/busy-low.log"
+{
+  echo "block-differential: comparisons=200"
+  echo "Done 10000 runs in 120 second(s)"
 } >"$WORKDIR/busy.log"
-assert_ok "busy skip-rate (20 compare / 10000 runs) passes" \
+assert_ok "200/10000 passes the 1% bar" \
   "$RUN" --check-log "$WORKDIR/busy.log"
 {
   echo "cmpct-differential: comparisons=1"
   echo "Done 139668 runs in 601 second(s)"
 } >"$WORKDIR/cmpct-mute.log"
-assert_ok "skip-heavy cmpct (1 compare / many runs) passes with min 1" \
-  "$RUN" --check-log "$WORKDIR/cmpct-mute.log" 1
+assert_ok "cmpct 1 compare / many runs fails skip-heavy 0.5%" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/cmpct-mute.log"' 0.005'
+{
+  echo "mempool-differential: comparisons=50"
+  echo "Done 10000 runs in 120 second(s)"
+} >"$WORKDIR/mp-busy.log"
+assert_ok "skip-heavy 50/10000 passes 0.5%" \
+  "$RUN" --check-log "$WORKDIR/mp-busy.log" 0.005
 {
   echo "mempool-differential: comparisons=1"
   echo "Done 10000 runs in 120 second(s)"
 } >"$WORKDIR/mp-mute.log"
-assert_ok "skip-heavy mempool (1 compare / 10000 runs) passes with min 1" \
-  "$RUN" --check-log "$WORKDIR/mp-mute.log" 1
+assert_ok "skip-heavy 1/10000 fails 0.5%" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/mp-mute.log"' 0.005'
 {
   echo "script-verify-differential: comparisons=0"
   echo "Done 10000 runs in 120 second(s)"
 } >"$WORKDIR/sv-zero.log"
 assert_ok "skip-heavy still fails on zero comparisons" \
-  bash -c '! '"$RUN"' --check-log '"$WORKDIR/sv-zero.log"' 1'
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/sv-zero.log"' 0.005'
 
 mkdir -p "$WORKDIR/corpus"
 echo grown >"$WORKDIR/corpus/height1.bin"
@@ -270,6 +362,37 @@ mkdir -p "$WORKDIR/crashers"
 "$RUN" --copy-crashers "$WORKDIR/artifacts" "$WORKDIR/crashers"
 assert_ok "copy-crashers copies artifact files" \
   test -f "$WORKDIR/crashers/crash-abc"
+
+n_script_seeds=0
+for f in "$ROOT"/crates/rbitcoin-consensus/tests/fixtures/script_fuzz_*.bin; do
+  n_script_seeds=$((n_script_seeds + 1))
+  assert_ok "script seed $(basename "$f") non-empty" \
+    test -s "$f"
+done
+assert_ok "at least 8 script_fuzz seeds" \
+  test "$n_script_seeds" -ge 8
+assert_ok "script opcode dict exists" \
+  test -s "$ROOT/fuzz/dict/script.dict"
+assert_ok "block dict exists" \
+  test -s "$ROOT/fuzz/dict/block.dict"
+assert_ok "v2 dict exists" \
+  test -s "$ROOT/fuzz/dict/v2.dict"
+assert_ok "addrv2 dict exists" \
+  test -s "$ROOT/fuzz/dict/addrv2.dict"
+assert_ok "inv dict exists" \
+  test -s "$ROOT/fuzz/dict/inv.dict"
+assert_ok "electrum dict exists" \
+  test -s "$ROOT/fuzz/dict/electrum.dict"
+assert_ok "addrv2 empty seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/addrv2_empty.bin"
+assert_ok "inv one seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/inv_one.bin"
+assert_ok "v2 sendcmpct seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/v2_sendcmpct.bin"
+assert_ok "v2 getheaders seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/v2_getheaders.bin"
+assert_ok "electrum subscribe seed" \
+  test -s "$ROOT/crates/rbitcoin-electrum/tests/fixtures/blockchain_scripthash_subscribe.json"
 
 rm -rf "$WORKDIR"
 

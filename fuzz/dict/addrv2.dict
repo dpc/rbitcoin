@@ -1,0 +1,8 @@
+# BIP155 addrv2: compact size, network ids
+"\x00"
+"\x01"
+"\x02"
+"\x04"
+"\x05"
+"\x06"
+"\xfd"

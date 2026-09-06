@@ -2,19 +2,20 @@
 # Product rustc stays 1.95; this job uses nightly only to drive cargo-fuzz.
 #
 # Operator must push this workflow file (GitHub App cannot).
+# Single cron: Sunday uses fuzz-run.sh default 3600s; other days 600s.
+# workflow_dispatch.inputs.duration overrides when set.
 
 name: fuzz
 
 on:
   schedule:
     - cron: "17 7 * * *"
-    - cron: "17 7 * * 0"
   workflow_dispatch:
     inputs:
       duration:
-        description: libFuzzer -max_total_time seconds (600 nightly, 3600 weekly)
+        description: libFuzzer -max_total_time seconds (leave empty for 600 / Sunday 3600)
         required: false
-        default: "600"
+        default: ""
 
 concurrency:
   group: fuzz-${{ github.ref }}
@@ -24,10 +25,36 @@ permissions:
   contents: read
 
 jobs:
-  block_wire:
-    name: block_wire
+  fuzz:
+    name: ${{ matrix.bin }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      RUSTFLAGS: "-A warnings"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { bin: block_wire, core: false }
+          - { bin: v2_contents, core: false }
+          - { bin: addrv2_wire, core: false }
+          - { bin: inv_getdata_wire, core: false }
+          - { bin: electrum_json, core: false }
+          - { bin: store_reorg, core: false }
+          - { bin: script_kernel_differential, core: false }
+          - { bin: v2_session, core: true }
+          - { bin: cmpct_differential, core: true }
+          - { bin: block_differential, core: true }
+          - { bin: block_spend_differential, core: true }
+          - { bin: script_differential, core: true }
+          - { bin: block_fork_differential, core: true }
+          - { bin: cmpct_reorg_differential, core: true }
+          - { bin: block_reorg_n_differential, core: true }
+          - { bin: block_csv_differential, core: true }
+          - { bin: mempool_differential, core: true }
+          - { bin: script_verify_differential, core: true }
+          - { bin: p2p_sequence_differential, core: true }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,702 +68,37 @@ jobs:
       - name: clang (libFuzzer)
         run: sudo apt-get update && sudo apt-get install -y clang
 
-      # Prebuilt cargo-fuzz — do not cargo install (compiles from crates.io
-      # inside the 20-min job timeout). Pin Action commit (CodeQL).
       - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: cargo-fuzz@0.13.2
 
-      # rust-toolchain.toml is 1.95; cargo-fuzz needs nightly -Zsanitizer.
+      - if: matrix.core
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/rbitcoin/core-bitcoind
+          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: fuzz-${{ matrix.bin }}
+          workspaces: "fuzz -> fuzz/target"
+
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
+          key: fuzz-corpus-${{ matrix.bin }}-${{ github.run_id }}
           restore-keys: |
-            fuzz-corpus-${{ github.job }}-
+            fuzz-corpus-${{ matrix.bin }}-
 
-      - name: cargo fuzz run block_wire
+      - name: cargo fuzz run ${{ matrix.bin }}
         env:
-          RUSTUP_TOOLCHAIN: nightly
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh
+          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration }}
+        run: ./scripts/fuzz-run.sh ${{ matrix.bin }}
 
       - name: upload crashers
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fuzz-crashers-${{ github.job }}
-          path: fuzz/crashers/
-          if-no-files-found: ignore
-
-  v2_contents:
-    name: v2_contents
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-v2-contents
-          workspaces: "fuzz -> fuzz/target"
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-
-      - name: cargo fuzz run v2_contents
-        env:
-          RUSTUP_TOOLCHAIN: nightly
-        run: ./scripts/fuzz-run.sh v2_contents
-
-  v2_session:
-    name: v2_session
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-v2-session
-          workspaces: "fuzz -> fuzz/target"
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-
-      - name: cargo fuzz run v2_session
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh v2_session
-
-  cmpct_differential:
-    name: cmpct_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-cmpct-differential
-          workspaces: "fuzz -> fuzz/target"
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-
-      - name: cargo fuzz run cmpct_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh cmpct_differential
-
-  block_differential:
-    name: block_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-block-differential
-          workspaces: "fuzz -> fuzz/target"
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-
-      - name: cargo fuzz run block_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh block_differential
-
-  block_spend_differential:
-    name: block_spend_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-block-spend
-          workspaces: "fuzz -> fuzz/target"
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-
-      - name: cargo fuzz run block_spend_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh block_spend_differential
-
-  script_differential:
-    name: script_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-script-differential
-          workspaces: "fuzz -> fuzz/target"
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-
-      - name: cargo fuzz run script_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh script_differential
-
-  block_fork_differential:
-    name: block_fork_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-block-fork
-          workspaces: "fuzz -> fuzz/target"
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-
-      - name: cargo fuzz run block_fork_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh block_fork_differential
-
-  cmpct_reorg_differential:
-    name: cmpct_reorg_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-cmpct-reorg
-          workspaces: "fuzz -> fuzz/target"
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-
-      - name: cargo fuzz run cmpct_reorg_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh cmpct_reorg_differential
-
-      - name: upload crashers
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashers-${{ github.job }}
-          path: fuzz/crashers/
-          if-no-files-found: ignore
-
-  block_reorg_n_differential:
-    name: block_reorg_n_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-block-reorg-n
-          workspaces: "fuzz -> fuzz/target"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-      - name: cargo fuzz run block_reorg_n_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh block_reorg_n_differential
-      - name: upload crashers
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashers-${{ github.job }}
-          path: fuzz/crashers/
-          if-no-files-found: ignore
-
-  block_csv_differential:
-    name: block_csv_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-block-csv
-          workspaces: "fuzz -> fuzz/target"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-      - name: cargo fuzz run block_csv_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh block_csv_differential
-      - name: upload crashers
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashers-${{ github.job }}
-          path: fuzz/crashers/
-          if-no-files-found: ignore
-
-  mempool_differential:
-    name: mempool_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-mempool
-          workspaces: "fuzz -> fuzz/target"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-      - name: cargo fuzz run mempool_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh mempool_differential
-      - name: upload crashers
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashers-${{ github.job }}
-          path: fuzz/crashers/
-          if-no-files-found: ignore
-
-  script_verify_differential:
-    name: script_verify_differential
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      RUSTUP_TOOLCHAIN: nightly
-      RUSTFLAGS: "-A warnings"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.cache/rbitcoin/core-bitcoind
-          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-script-verify
-          workspaces: "fuzz -> fuzz/target"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-      - name: cargo fuzz run script_verify_differential
-        env:
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh script_verify_differential
-      - name: upload crashers
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashers-${{ github.job }}
-          path: fuzz/crashers/
-          if-no-files-found: ignore
-
-  addrv2_wire:
-    name: addrv2_wire
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-addrv2
-          workspaces: "fuzz -> fuzz/target"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-      - name: cargo fuzz run addrv2_wire
-        env:
-          RUSTUP_TOOLCHAIN: nightly
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh addrv2_wire
-      - name: upload crashers
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashers-${{ github.job }}
-          path: fuzz/crashers/
-          if-no-files-found: ignore
-
-  inv_getdata_wire:
-    name: inv_getdata_wire
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-inv-getdata
-          workspaces: "fuzz -> fuzz/target"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-      - name: cargo fuzz run inv_getdata_wire
-        env:
-          RUSTUP_TOOLCHAIN: nightly
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh inv_getdata_wire
-      - name: upload crashers
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashers-${{ github.job }}
-          path: fuzz/crashers/
-          if-no-files-found: ignore
-
-  electrum_json:
-    name: electrum_json
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          submodules: false
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
-      - name: clang (libFuzzer)
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
-        with:
-          tool: cargo-fuzz@0.13.2
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: fuzz-electrum-json
-          workspaces: "fuzz -> fuzz/target"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.job }}-${{ github.run_id }}
-          restore-keys: |
-            fuzz-corpus-${{ github.job }}-
-      - name: cargo fuzz run electrum_json
-        env:
-          RUSTUP_TOOLCHAIN: nightly
-          FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.duration || (github.event.schedule == '17 7 * * 0' && '3600' || '600') }}
-        run: ./scripts/fuzz-run.sh electrum_json
-      - name: upload crashers
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fuzz-crashers-${{ github.job }}
+          name: fuzz-crashers-${{ matrix.bin }}
           path: fuzz/crashers/
           if-no-files-found: ignore
