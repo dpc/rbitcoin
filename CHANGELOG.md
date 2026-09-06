@@ -11,6 +11,9 @@ before 1.0).
 
 ### Changed
 
+- **Node start catch-up is a `CatchUp` enum:** not four independent bools.
+  Indexes, IBD, and Electrum/Esplora start are named phases. Electrum and
+  Esplora share one hub-tip broadcast bridge.
 - **P2P follow session is `PeerFollowState`:** `handle_peer_frame` takes one
   session bag instead of twelve mut maps. Compact `sendcmpct` preference is
   `PendingSendCmpct::{None, Lb, Hb}` (`AtomicU8` payload unchanged). Tx and
