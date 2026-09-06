@@ -265,27 +265,39 @@ assert_ok "mute skip-rate (1 compare / 10000 runs) fails" \
 {
   echo "block-differential: comparisons=20"
   echo "Done 10000 runs in 120 second(s)"
+} >"$WORKDIR/busy-low.log"
+assert_ok "20/10000 fails the 1% bar" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/busy-low.log"
+{
+  echo "block-differential: comparisons=200"
+  echo "Done 10000 runs in 120 second(s)"
 } >"$WORKDIR/busy.log"
-assert_ok "busy skip-rate (20 compare / 10000 runs) passes" \
+assert_ok "200/10000 passes the 1% bar" \
   "$RUN" --check-log "$WORKDIR/busy.log"
 {
   echo "cmpct-differential: comparisons=1"
   echo "Done 139668 runs in 601 second(s)"
 } >"$WORKDIR/cmpct-mute.log"
-assert_ok "cmpct 1 compare / many runs fails default floor" \
-  bash -c '! '"$RUN"' --check-log '"$WORKDIR/cmpct-mute.log"
+assert_ok "cmpct 1 compare / many runs fails skip-heavy 0.5%" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/cmpct-mute.log"' 0.005'
+{
+  echo "mempool-differential: comparisons=50"
+  echo "Done 10000 runs in 120 second(s)"
+} >"$WORKDIR/mp-busy.log"
+assert_ok "skip-heavy 50/10000 passes 0.5%" \
+  "$RUN" --check-log "$WORKDIR/mp-busy.log" 0.005
 {
   echo "mempool-differential: comparisons=1"
   echo "Done 10000 runs in 120 second(s)"
 } >"$WORKDIR/mp-mute.log"
-assert_ok "skip-heavy mempool (1 compare / 10000 runs) passes with min 1" \
-  "$RUN" --check-log "$WORKDIR/mp-mute.log" 1
+assert_ok "skip-heavy 1/10000 fails 0.5%" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/mp-mute.log"' 0.005'
 {
   echo "script-verify-differential: comparisons=0"
   echo "Done 10000 runs in 120 second(s)"
 } >"$WORKDIR/sv-zero.log"
 assert_ok "skip-heavy still fails on zero comparisons" \
-  bash -c '! '"$RUN"' --check-log '"$WORKDIR/sv-zero.log"' 1'
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/sv-zero.log"' 0.005'
 
 mkdir -p "$WORKDIR/corpus"
 echo grown >"$WORKDIR/corpus/height1.bin"

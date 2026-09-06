@@ -34,7 +34,7 @@ wire_dict_for_bin() {
 
 fail_if_no_comparisons() {
   local log="$1"
-  local min_busy="${2:-10}"
+  local min_rate="${2:-0.01}"
   if [[ ! -f "$log" ]]; then
     echo "fuzz-run: missing comparison log $log" >&2
     return 1
@@ -48,9 +48,13 @@ fail_if_no_comparisons() {
   echo "fuzz-run: comparisons=$n"
   local runs
   runs="$(grep -Eo 'Done [0-9]+ runs' "$log" | tail -1 | grep -Eo '[0-9]+' | head -1 || true)"
-  if [[ -n "$runs" && "$runs" -ge 1000 && "$n" -lt "$min_busy" ]]; then
-    echo "fuzz-run: mute skip-rate comparisons=$n runs=$runs" >&2
-    return 1
+  if [[ -n "$runs" && "$runs" -ge 1000 ]]; then
+    if ! awk -v n="$n" -v runs="$runs" -v min="$min_rate" 'BEGIN {
+      exit !((n / runs) >= min)
+    }'; then
+      echo "fuzz-run: mute skip-rate comparisons=$n runs=$runs min_rate=$min_rate" >&2
+      return 1
+    fi
   fi
 }
 
@@ -84,7 +88,7 @@ copy_crashers() {
 }
 
 if [[ "${1:-}" == "--check-log" ]]; then
-  fail_if_no_comparisons "${2:?log file}" "${3:-10}"
+  fail_if_no_comparisons "${2:?log file}" "${3:-0.01}"
   exit 0
 fi
 
@@ -269,7 +273,7 @@ if [[ "$BIN" == "v2_session" ]]; then
     copy_crashers fuzz/artifacts "$CRASHERS"
     exit "$st"
   fi
-  fail_if_no_comparisons "$log"
+  fail_if_no_comparisons "$log" 0.005
   exit 0
 fi
 
@@ -291,7 +295,7 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
     copy_crashers fuzz/artifacts "$CRASHERS"
     exit "$st"
   fi
-  fail_if_no_comparisons "$log"
+  fail_if_no_comparisons "$log" 0.005
   exit 0
 fi
 
@@ -371,8 +375,8 @@ if [[ "$st" -ne 0 ]]; then
   copy_crashers fuzz/artifacts "$CRASHERS"
   exit "$st"
 fi
-min_busy=10
+rate=0.01
 if [[ "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" ]]; then
-  min_busy=1
+  rate=0.005
 fi
-fail_if_no_comparisons "$log" "$min_busy"
+fail_if_no_comparisons "$log" "$rate"
