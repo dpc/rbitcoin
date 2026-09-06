@@ -34,7 +34,7 @@ mod status;
 pub use perf_log::{format_tip_perf_sizes, read_proc_rss, ProcRss, TipPerfSizes};
 
 use archive::{rehydrate_block_queue_into_confirm, rehydrate_class_a_into_body_queue};
-use assign_plan::{remove_from_ordered, want_headers_beyond_soft_cap};
+use assign_plan::want_headers_beyond_soft_cap;
 use confirm::{offer_confirm_ready, spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
 
 use assign::{archive_pipeline_saturated, assign_work_ordered, AssignDepth};
@@ -45,7 +45,7 @@ use dial::{
     request_headers,
 };
 use events::{
-    apply_confirm_reject, apply_peer_event, disconnect_all_peers,
+    apply_confirm_events, apply_peer_event, disconnect_all_peers,
     drain_ready_peer_and_archive_events, try_complete_awaiting_reorg, update_confirm_lag,
 };
 use exit::{
@@ -424,35 +424,14 @@ pub async fn ibd_cancellable(
             tokio::task::yield_now().await;
         }
 
-        while let Ok(ev) = confirm_ev_rx.try_recv() {
-            match ev {
-                ConfirmEvent::Accepted { hash } => {
-                    last_progress = Instant::now();
-                    remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
-                    st.body.mark_archived(hash);
-                    let tip = hub.tip_height().unwrap_or(0);
-                    archive_write_next.store(tip.saturating_add(1), Ordering::Relaxed);
-                    st.max_ready_height = st.max_ready_height.max(tip);
-                    max_ready_shared.store(st.max_ready_height, Ordering::Relaxed);
-                }
-                ConfirmEvent::Reject {
-                    height,
-                    hash,
-                    err,
-                    wire,
-                } => {
-                    apply_confirm_reject(
-                        &mut st,
-                        height,
-                        hash,
-                        &err,
-                        Some(hub.query.as_ref()),
-                        Some(hub.as_ref()),
-                        wire,
-                    );
-                }
-            }
-        }
+        apply_confirm_events(
+            &mut st,
+            hub.as_ref(),
+            &confirm_ev_rx,
+            &archive_write_next,
+            &max_ready_shared,
+            &mut last_progress,
+        );
 
         if !drain_ready_peer_and_archive_events(
             &mut st,
@@ -530,35 +509,14 @@ pub async fn ibd_cancellable(
             &max_ready_shared,
         );
         update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
-        while let Ok(ev) = confirm_ev_rx.try_recv() {
-            match ev {
-                ConfirmEvent::Accepted { hash } => {
-                    last_progress = Instant::now();
-                    remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
-                    st.body.mark_archived(hash);
-                    let tip = hub.tip_height().unwrap_or(0);
-                    archive_write_next.store(tip.saturating_add(1), Ordering::Relaxed);
-                    st.max_ready_height = st.max_ready_height.max(tip);
-                    max_ready_shared.store(st.max_ready_height, Ordering::Relaxed);
-                }
-                ConfirmEvent::Reject {
-                    height,
-                    hash,
-                    err,
-                    wire,
-                } => {
-                    apply_confirm_reject(
-                        &mut st,
-                        height,
-                        hash,
-                        &err,
-                        Some(hub.query.as_ref()),
-                        Some(hub.as_ref()),
-                        wire,
-                    );
-                }
-            }
-        }
+        apply_confirm_events(
+            &mut st,
+            hub.as_ref(),
+            &confirm_ev_rx,
+            &archive_write_next,
+            &max_ready_shared,
+            &mut last_progress,
+        );
         if !drain_ready_peer_and_archive_events(
             &mut st,
             hub.as_ref(),
@@ -1016,35 +974,14 @@ pub async fn ibd_cancellable(
                     &max_ready_shared,
                 );
                 update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
-                        while let Ok(ev) = confirm_ev_rx.try_recv() {
-                    match ev {
-                        ConfirmEvent::Accepted { hash } => {
-                            last_progress = Instant::now();
-                            remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
-                            st.body.mark_archived(hash);
-                            let tip = hub.tip_height().unwrap_or(0);
-                            archive_write_next.store(tip.saturating_add(1), Ordering::Relaxed);
-                            st.max_ready_height = st.max_ready_height.max(tip);
-                            max_ready_shared.store(st.max_ready_height, Ordering::Relaxed);
-                        }
-                        ConfirmEvent::Reject {
-                            height,
-                            hash,
-                            err,
-                            wire,
-                        } => {
-                            apply_confirm_reject(
-                                &mut st,
-                                height,
-                                hash,
-                                &err,
-                                Some(hub.query.as_ref()),
-                                Some(hub.as_ref()),
-                                wire,
-                            );
-                        }
-                    }
-                }
+                apply_confirm_events(
+                    &mut st,
+                    hub.as_ref(),
+                    &confirm_ev_rx,
+                    &archive_write_next,
+                    &max_ready_shared,
+                    &mut last_progress,
+                );
                 // Stall with an empty work path: only Ok-exit when truly caught up.
                 // Previously this bare `break` treated "no progress for 30s at tip=0
                 // while peers die" as success → node entered tip mode at height 0.

@@ -295,6 +295,53 @@ impl ConfirmFeed {
     }
 }
 
+/// How IBD treats a confirm-engine reject (computed at the sender).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmRejectClass {
+    SoftMerkle,
+    SoftRetarget,
+    BadPrev,
+    Permanent,
+}
+
+impl ConfirmRejectClass {
+    /// Today's substring map (pin for `confirm_reject_tests` strings).
+    pub(crate) fn from_err_str(err: &str) -> Self {
+        if super::reorg::is_bad_prev_err(err) {
+            return Self::BadPrev;
+        }
+        if err.contains("merkle root mismatch") {
+            return Self::SoftMerkle;
+        }
+        if err.contains("missing retarget first header") {
+            return Self::SoftRetarget;
+        }
+        Self::Permanent
+    }
+
+    pub(crate) fn from_consensus(err: &rbitcoin_consensus::ConsensusError) -> Self {
+        use rbitcoin_consensus::ConsensusError;
+        match err {
+            ConsensusError::BadPrev => Self::BadPrev,
+            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftMerkle,
+            ConsensusError::BadHeader("missing retarget first header") => Self::SoftRetarget,
+            other => Self::from_err_str(&other.to_string()),
+        }
+    }
+
+    pub(crate) fn from_net(err: &crate::error::NetError) -> Self {
+        match err {
+            crate::error::NetError::Mutated(_) => Self::SoftMerkle,
+            crate::error::NetError::BadPrev => Self::BadPrev,
+            other => Self::from_err_str(&other.to_string()),
+        }
+    }
+
+    pub(crate) fn is_soft(self) -> bool {
+        matches!(self, Self::SoftMerkle | Self::SoftRetarget | Self::BadPrev)
+    }
+}
+
 pub(crate) enum ConfirmEvent {
     /// Tip advanced; hash is the confirmed block.
     Accepted { hash: BlockHash },
@@ -302,9 +349,8 @@ pub(crate) enum ConfirmEvent {
     Reject {
         height: u32,
         hash: BlockHash,
+        class: ConfirmRejectClass,
         err: String,
-        /// Rejected tip+1 wire after `take_raw` (BQ row is already gone).
-        wire: Option<std::sync::Arc<bitcoin::Block>>,
     },
 }
 
@@ -1244,7 +1290,7 @@ pub(crate) fn spawn_confirm_engine(
                     Err(e) => {
                         confirm_thr_stats::add_write_work(t0.elapsed());
                         let msg = e.to_string();
-                        if msg.contains("confirm cancelled") || feed_wb.stopped() {
+                        if matches!(e, crate::error::NetError::Cancelled) || feed_wb.stopped() {
                             info!("ibd: confirm write aborted: {msg}");
                             break;
                         }
@@ -1286,8 +1332,8 @@ pub(crate) fn spawn_confirm_engine(
                         let _ = event_tx_wb.send(ConfirmEvent::Reject {
                             height,
                             hash,
+                            class: ConfirmRejectClass::from_net(&e),
                             err: msg,
-                            wire: None,
                         });
                     }
                 }
@@ -1347,7 +1393,9 @@ pub(crate) fn spawn_confirm_engine(
                 |e, meta, dropped| {
                     confirm_thr_stats::add_script_work(Duration::ZERO);
                     let msg = e.to_string();
-                    if msg.contains("confirm cancelled") || feed_sc.stopped() {
+                    if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
+                        || feed_sc.stopped()
+                    {
                         info!("ibd: confirm scripts aborted: {msg}");
                         return false;
                     }
@@ -1367,8 +1415,8 @@ pub(crate) fn spawn_confirm_engine(
                     let _ = event_tx_sc.send(ConfirmEvent::Reject {
                         height,
                         hash,
+                        class: ConfirmRejectClass::from_consensus(&e),
                         err: msg,
-                        wire: None,
                     });
                     true
                 },
@@ -1498,7 +1546,9 @@ pub(crate) fn spawn_confirm_engine(
                     Ok(s) => s,
                     Err(e) => {
                         let msg = e.to_string();
-                        if msg.contains("confirm cancelled") || feed_load.stopped() {
+                        if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
+                            || feed_load.stopped()
+                        {
                             drop(mat_tx);
                             rbitcoin_consensus::unpark_script_publisher();
                             let _ = scripts.join();
@@ -1531,8 +1581,8 @@ pub(crate) fn spawn_confirm_engine(
                         let _ = event_tx_load.send(ConfirmEvent::Reject {
                             height: expect_h,
                             hash: first_hash,
+                            class: ConfirmRejectClass::from_consensus(&e),
                             err: log_msg,
-                            wire: Some(std::sync::Arc::clone(&wire_batch[0].2.block)),
                         });
                         std::thread::sleep(Duration::from_millis(50));
                         continue;
@@ -1644,7 +1694,7 @@ pub(crate) fn spawn_confirm_engine(
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        if msg.contains("confirm cancelled") {
+                        if matches!(e, crate::error::NetError::Cancelled) {
                             info!("ibd: confirm load cancelled @ {expect_h}");
                             drop(mat_tx);
                             rbitcoin_consensus::unpark_script_publisher();
@@ -1670,8 +1720,8 @@ pub(crate) fn spawn_confirm_engine(
                             .send(ConfirmEvent::Reject {
                                 height: expect_h,
                                 hash: first_hash,
+                                class: ConfirmRejectClass::from_net(&e),
                                 err: msg,
-                                wire: Some(std::sync::Arc::clone(&wire_batch[0].2.block)),
                             })
                             .is_err()
                         {

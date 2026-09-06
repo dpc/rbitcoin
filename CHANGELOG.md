@@ -11,6 +11,30 @@ before 1.0).
 
 ### Changed
 
+- **Confirm/net rejects are typed at the sender:** IBD matches
+  `ConfirmRejectClass` (not English). Side blocks, unknown parents, mutated
+  compact bodies, and duplicate mempool txs keep the same log/RPC strings.
+  `io_uring` not available logs as `io_uring unavailable` (no `corrupt record:`
+  prefix).
+- **One-shot confirm load is stamp then pin:** `confirm_wire_load_phase`
+  is `confirm_wire_lookup_stamp` + `confirm_wire_load_from_plan` (same
+  as IBD after BQ TipOnly). Script jobs carry `ScriptVerifyFlags`.
+  CLI flags and IBD cadence unchanged.
+- **Mempool admit/evict helpers:** conflict scan is shared by prepare and the
+  write-lock re-check; eviction is one worst-chunk loop; P2P staged admit
+  is `admit_staged`. Policy strings and persist order unchanged.
+- **Query SH write-behind is `ShWriteBehind`:** same mutexes and condvar as
+  before (confirm enqueue vs Electrum join stay separate). `IndexMode`
+  names the archive-spend and SH-enqueue products. Body-txid head probe is
+  `TxTable::probe_body_match_fk`.
+- **ChainHub holds side bodies in one `HeldBodies` map:** first-seen seq
+  lives next to the body (one `RwLock`, cap 320 FIFO). Invalidated hashes,
+  header-only tips, and mining knobs are named types. RPC/P2P façades
+  unchanged.
+- **IBD confirm-event drain is `apply_confirm_events`:** the main loop still
+  drains before assign and after `offer_confirm_ready` (plus the stall tick).
+  Headers apply is named stages; a repeated header window does not grow the
+  header table. Confirm reject no longer clones unused wire.
 - **Workspace version 0.5.99:** in-tree toward 0.6.0. Published GitHub
   Releases remain 0.5.1; 0.5.2 is the 0.5.1 maintenance branch.
 - **`NodeConfig` is composed option groups:** `DatadirOpts` / `ListenOpts` /

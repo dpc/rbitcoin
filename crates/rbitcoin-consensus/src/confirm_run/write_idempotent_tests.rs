@@ -360,7 +360,12 @@ fn bad_p2pkh_job() -> crate::block::ScriptCheckJob {
         }],
     };
     let tid = tx.compute_txid().to_byte_array();
-    crate::block::ScriptCheckJob::with_txid(tid, prevouts, tx, true, true, true, true, true)
+    crate::block::ScriptCheckJob::with_txid(
+        tid,
+        prevouts,
+        tx,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+    )
 }
 
 /// One-job inline fail keeps the batch height/hash; a later batch still writes.
@@ -989,7 +994,12 @@ fn script_wave_skips_preverified_txids() {
     let mut pre = ScriptPreverified::new();
     pre.insert(tid);
 
-    let job = ScriptCheckJob::with_txid(tid, prevouts, tx, true, true, true, true, true);
+    let job = ScriptCheckJob::with_txid(
+        tid,
+        prevouts,
+        tx,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+    );
     let prepared = Prepared {
         height: Height(1),
         header_fk: Fk(1),
@@ -2526,4 +2536,101 @@ fn direct_write_skips_create_pin_map_idx_without_recent() {
     let idx = q.store().tx_body_range(fk).expect("idx after Class A");
     assert!(idx.1 > 0, "Class A body range must be on idx");
     let _ = std::fs::remove_dir_all(&path);
+}
+
+/// One-shot load and stamp+load_from_plan must produce the same batch.
+#[test]
+fn one_shot_load_matches_stamp_then_load_from_plan() {
+    use super::{
+        confirm_wire_load_from_plan, confirm_wire_load_phase, confirm_wire_lookup_stamp,
+        ScriptPreverified,
+    };
+    use crate::regtest_pad::mine_empty_regtest;
+    use crate::{accept_and_connect_block, ChainParams, Milestone};
+    use rbitcoin_primitives::Height;
+    use rbitcoin_query::Query;
+    use std::sync::{Arc, Once};
+
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+    });
+
+    fn open_q(tag: &str) -> (std::path::PathBuf, Query) {
+        let path = std::env::temp_dir().join(format!(
+            "rbitcoin-load-eq-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let q = Query::open_or_create(&path).unwrap();
+        (path, q)
+    }
+
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+    let b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
+    let run = [(Height(1), b1.clone()), (Height(2), b2.clone())];
+    let none = ScriptPreverified::new();
+
+    let (path_a, qa) = open_q("a");
+    accept_and_connect_block(&qa, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let one_shot =
+        confirm_wire_load_phase(&qa, &params, Milestone::NONE, &run, &none).expect("one-shot load");
+
+    let (path_b, qb) = open_q("b");
+    accept_and_connect_block(&qb, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let arcs: Vec<_> = run
+        .iter()
+        .map(|(h, b)| (*h, Arc::new(b.clone()), None))
+        .collect();
+    let stamped =
+        confirm_wire_lookup_stamp(&qb, &params, Milestone::NONE, &arcs, None).expect("stamp");
+    let from_plan =
+        confirm_wire_load_from_plan(&qb, &params, Milestone::NONE, stamped, None, &none)
+            .expect("load_from_plan");
+
+    assert_eq!(
+        one_shot.batch.heights_hashes(),
+        from_plan.batch.heights_hashes()
+    );
+    assert_eq!(
+        one_shot.batch.parent_count(),
+        from_plan.batch.parent_count()
+    );
+    assert_eq!(one_shot.batch.len(), 2);
+    for (a, b) in one_shot
+        .batch
+        .prepared
+        .iter()
+        .zip(from_plan.batch.prepared.iter())
+    {
+        assert_eq!(a.height, b.height);
+        assert_eq!(a.hash, b.hash);
+        assert_eq!(a.header_fk, b.header_fk);
+        assert_eq!(a.tx_fks, b.tx_fks);
+        assert_eq!(a.fees, b.fees);
+        assert_eq!(a.spends, b.spends);
+        assert_eq!(a.jobs.len(), b.jobs.len());
+        for (ja, jb) in a.jobs.iter().zip(b.jobs.iter()) {
+            assert_eq!(ja.txid, jb.txid);
+            assert_eq!(ja.prevouts, jb.prevouts);
+        }
+    }
+    let pa = one_shot.batch.archive_plan.as_ref().expect("plan A");
+    let pb = from_plan.batch.archive_plan.as_ref().expect("plan B");
+    assert_eq!(pa.planned_fks, pb.planned_fks);
+    assert_eq!(pa.per_header_ranges, pb.per_header_ranges);
+    assert_eq!(pa.spends, pb.spends);
+    assert_eq!(pa.packed.len(), pb.packed.len());
+    assert_eq!(pa.index_tx, pb.index_tx);
+    let _ = std::fs::remove_dir_all(&path_a);
+    let _ = std::fs::remove_dir_all(&path_b);
 }

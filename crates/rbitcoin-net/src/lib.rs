@@ -72,6 +72,7 @@ pub use peers::{
     parse_peer_addr, pick_stale_follow_evict, DialRequest, LivePeer, PeerConnType, PeerHub,
     PeerInfo, PendingSendCmpct, PingAction,
 };
+pub use rbitcoin_mempool::AcceptError;
 pub use rbitcoin_mempool::MempoolGraphStats;
 pub use reactor::BlockingRegion;
 pub use seeds::{

@@ -43,11 +43,13 @@ pub fn verify_tx_scripts_detached_forks(
         let job = ScriptCheckJob::new(
             prevouts,
             tx,
-            bip65_active,
-            bip112_active,
-            bip66_active,
-            bip16_active,
-            taproot_active,
+            crate::block::ScriptVerifyFlags::buried(
+                bip65_active,
+                bip112_active,
+                bip66_active,
+                bip16_active,
+                taproot_active,
+            ),
         );
         crate::script::verify_job_all_inputs(&job)
     })
@@ -59,7 +61,8 @@ pub use block::{
     block_subsidy, check_block_wire, is_final_tx, sequence_locks_satisfied, tx_gbt_sigops,
     validate_block_connect, validate_block_structure, validate_block_structure_hashed,
     validate_block_structure_precomputed, validate_block_structure_with_pres, verify_scripts_pool,
-    witness_commitment_script, TxPrecompute, ValidationContext, LOCKTIME_THRESHOLD,
+    witness_commitment_script, ScriptVerifyFlags, TxPrecompute, ValidationContext,
+    LOCKTIME_THRESHOLD,
 };
 pub use clock::{current_now, wall_now, with_now, NodeClock};
 pub use convert::{block_to_apply, block_to_apply_with_txids, header_to_record};
@@ -483,6 +486,9 @@ pub mod confirm_phase_stats {
 
     /// Wire-prep residual subtimers (ns): `(wire_arc, struct, header, prepare, filter_plan)`.
     ///
+    /// [`crate::confirm_wire_lookup_stamp`] owns these for both IBD TipOnly stamp
+    /// and one-shot [`crate::confirm_wire_load_phase_pipelined`]. Header PoW /
+    /// prev checks are `PREP_HEADER_NS` (not folded into `PREP_STRUCT_NS`).
     /// These sit inside [`LOAD_NS`] but outside pin (confirm_load_stats). Pin and
     /// assemble remain separate (`PARENT_PIN_NS` / [`CONNECT_NS`]).
     #[inline]
@@ -1008,7 +1014,11 @@ mod coverage_tests {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }];
         crate::verify_tx_scripts_detached(prevouts.clone(), tx.clone()).unwrap();
-        let job = ScriptCheckJob::new(prevouts, tx, true, true, true, true, true);
+        let job = ScriptCheckJob::new(
+            prevouts,
+            tx,
+            crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        );
         crate::block::verify_scripts_pool(&[job]).unwrap();
     }
 

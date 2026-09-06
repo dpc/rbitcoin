@@ -829,7 +829,7 @@ impl TxTable {
     ///
     /// Open segment first, then sealed newest→oldest (fuse-gated). Body-check
     /// order prefers deeper probe slots (newest BIP30-shaped create).
-    pub fn get_fk_by_txid(&self, txid: &[u8; 32]) -> Result<Option<Fk>, StoreError> {
+    pub fn probe_body_match_fk(&self, txid: &[u8; 32]) -> Result<Option<Fk>, StoreError> {
         use std::time::Instant;
         let mixed = self.secret.mix_txid(txid);
         let t_probe = Instant::now();
@@ -1541,7 +1541,7 @@ impl TxTable {
     }
 
     pub fn get_by_txid(&self, txid: &[u8; 32]) -> Result<Option<(Fk, TxRecord)>, StoreError> {
-        let Some(fk) = self.get_fk_by_txid(txid)? else {
+        let Some(fk) = self.probe_body_match_fk(txid)? else {
             return Ok(None);
         };
         Ok(Some((fk, self.get(fk)?)))
@@ -1550,7 +1550,7 @@ impl TxTable {
     /// All Class A fks whose body txid equals `txid` (BIP30: more than one).
     ///
     /// Order is **newest-first** (deepest probe match first), matching
-    /// [`Self::get_fk_by_txid`].
+    /// [`Self::probe_body_match_fk`].
     pub fn get_all_by_txid(&self, txid: &[u8; 32]) -> Result<Vec<(Fk, TxRecord)>, StoreError> {
         let mut out: Vec<(Fk, TxRecord)> = Vec::new();
         let mixed = self.secret.mix_txid(txid);

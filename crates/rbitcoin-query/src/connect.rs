@@ -200,7 +200,7 @@ impl Query {
         items: &[ConfirmPrepared],
         create_pins: Option<&crate::FkMap<CreatePin>>,
     ) -> Result<(), QueryError> {
-        if !self.sh_index_enabled() || self.index_mode().is_direct() {
+        if !self.enqueues_sh_writebehind() {
             return Ok(());
         }
         use crate::class_c_phase_stats::{self as sh_stats, add_sh_part};
@@ -230,8 +230,8 @@ impl Query {
         if jobs.is_empty() {
             return Ok(());
         }
-        let mut pending = self.sh_pending.lock().unwrap();
-        let mut head = self.sh_ram_head.lock().unwrap();
+        let mut pending = self.sh.pending.lock().unwrap();
+        let mut head = self.sh.ram_head.lock().unwrap();
         for job in &jobs {
             index_sh_ram_head(&mut head, job);
         }
@@ -245,13 +245,13 @@ impl Query {
     /// block announce do not share disk with `locate_head`.
     pub fn release_sh_writebehind(&self, through: Height) {
         let v = through.0.saturating_add(1);
-        self.sh_released_through.fetch_max(v, Ordering::Release);
-        self.sh_pending_cv.notify_one();
+        self.sh.released_through.fetch_max(v, Ordering::Release);
+        self.sh.pending_cv.notify_one();
     }
 
     /// Last height durable apply is allowed to run (`None` until first release).
     pub fn sh_released_through_height(&self) -> Option<u32> {
-        let v = self.sh_released_through.load(Ordering::Acquire);
+        let v = self.sh.released_through.load(Ordering::Acquire);
         v.checked_sub(1)
     }
 
@@ -264,12 +264,13 @@ impl Query {
     fn clamp_sh_released_before(&self, height: Height) {
         let cap = height.0;
         loop {
-            let cur = self.sh_released_through.load(Ordering::Acquire);
+            let cur = self.sh.released_through.load(Ordering::Acquire);
             if cur <= cap {
                 return;
             }
             if self
-                .sh_released_through
+                .sh
+                .released_through
                 .compare_exchange(cur, cap, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
@@ -279,12 +280,13 @@ impl Query {
     }
 
     fn sh_job_released(&self, job: &ShPendingJob) -> bool {
-        let rel = self.sh_released_through.load(Ordering::Acquire);
+        let rel = self.sh.released_through.load(Ordering::Acquire);
         rel > 0 && job.height.0.saturating_add(1) <= rel
     }
 
     pub(crate) fn pending_sh_create_fks(&self, scripthash: &[u8; 32]) -> Vec<Fk> {
-        self.sh_ram_head
+        self.sh
+            .ram_head
             .lock()
             .unwrap()
             .get(scripthash)
@@ -294,14 +296,16 @@ impl Query {
 
     pub(crate) fn sh_pending_max_height(&self) -> Option<u32> {
         let queued = self
-            .sh_pending
+            .sh
+            .pending
             .lock()
             .unwrap()
             .iter()
             .map(|j| j.height.0)
             .max();
         let applying = self
-            .sh_applying
+            .sh
+            .applying
             .lock()
             .unwrap()
             .as_ref()
@@ -339,23 +343,24 @@ impl Query {
                 result?;
                 continue;
             }
-            let pending = self.sh_pending.lock().unwrap();
-            let applying = self.sh_applying.lock().unwrap();
+            let pending = self.sh.pending.lock().unwrap();
+            let applying = self.sh.applying.lock().unwrap();
             if pending.is_empty() && applying.is_none() {
                 return Ok(());
             }
             drop(applying);
             let _ = self
-                .sh_pending_cv
+                .sh
+                .pending_cv
                 .wait_timeout(pending, std::time::Duration::from_millis(200))
                 .unwrap();
         }
     }
 
-    /// Pop queue → `sh_applying` so readers still join pending at live tip.
+    /// Pop queue → `sh.applying` so readers still join pending at live tip.
     pub(crate) fn take_sh_job_for_apply(&self) -> Option<ShPendingJob> {
-        let mut pending = self.sh_pending.lock().unwrap();
-        let mut applying = self.sh_applying.lock().unwrap();
+        let mut pending = self.sh.pending.lock().unwrap();
+        let mut applying = self.sh.applying.lock().unwrap();
         if applying.is_some() {
             return None;
         }
@@ -369,22 +374,22 @@ impl Query {
     }
 
     fn requeue_sh_job_front(&self, job: ShPendingJob) {
-        self.sh_pending.lock().unwrap().push_front(job);
-        self.sh_pending_cv.notify_one();
+        self.sh.pending.lock().unwrap().push_front(job);
+        self.sh.pending_cv.notify_one();
     }
 
     pub(crate) fn finish_sh_job(&self, height: Height) {
-        let mut applying = self.sh_applying.lock().unwrap();
+        let mut applying = self.sh.applying.lock().unwrap();
         if applying.as_ref().is_some_and(|j| j.height == height) {
             *applying = None;
         }
-        self.sh_pending_cv.notify_all();
+        self.sh.pending_cv.notify_all();
     }
 
     pub(crate) fn apply_sh_job(&self, job: ShPendingJob) -> Result<(), QueryError> {
         let applied = self.apply_sh_job_inner(&job)?;
         if applied {
-            unindex_sh_ram_head(&mut self.sh_ram_head.lock().unwrap(), &job);
+            unindex_sh_ram_head(&mut self.sh.ram_head.lock().unwrap(), &job);
         }
         Ok(())
     }
@@ -392,8 +397,8 @@ impl Query {
     fn apply_sh_job_inner(&self, job: &ShPendingJob) -> Result<bool, QueryError> {
         use crate::class_c_phase_stats::{self as sh_stats, add_sh_part};
 
-        let _appender = self.sh_appender.lock().unwrap();
-        if !self.sh_index_enabled() || self.index_mode().is_direct() {
+        let _appender = self.sh.appender.lock().unwrap();
+        if !self.enqueues_sh_writebehind() {
             return Ok(false);
         }
         if self
@@ -422,7 +427,7 @@ impl Query {
             for r in sh_creates {
                 tip_sh_max_fk = tip_sh_max_fk.max(r.create_tx_fk.0);
             }
-            let mut heads = self.sh_heads.lock().unwrap();
+            let mut heads = self.sh.heads.lock().unwrap();
             let (n, timing) = self
                 .store
                 .scripthash
@@ -443,7 +448,7 @@ impl Query {
     }
 
     pub fn drop_sh_pending_from(&self, height: Height) {
-        let mut pending = self.sh_pending.lock().unwrap();
+        let mut pending = self.sh.pending.lock().unwrap();
         let dropped: Vec<ShPendingJob> = pending
             .iter()
             .filter(|job| job.height.0 >= height.0)
@@ -451,7 +456,7 @@ impl Query {
             .collect();
         pending.retain(|job| job.height.0 < height.0);
         drop(pending);
-        let mut applying = self.sh_applying.lock().unwrap();
+        let mut applying = self.sh.applying.lock().unwrap();
         let applying_job = if applying.as_ref().is_some_and(|j| j.height.0 >= height.0) {
             applying.take()
         } else {
@@ -459,7 +464,7 @@ impl Query {
         };
         drop(applying);
         {
-            let mut head = self.sh_ram_head.lock().unwrap();
+            let mut head = self.sh.ram_head.lock().unwrap();
             for job in &dropped {
                 unindex_sh_ram_head(&mut head, job);
             }
@@ -734,7 +739,7 @@ impl Query {
         let height = self
             .tip_height()
             .ok_or(StoreError::Corrupt("no tip to disconnect"))?;
-        let _appender = self.sh_appender.lock().unwrap();
+        let _appender = self.sh.appender.lock().unwrap();
         if drop_pending {
             self.drop_sh_pending_from(height);
         } else {
@@ -759,7 +764,7 @@ impl Query {
             }
         }
         if !touched_sh.is_empty() {
-            let mut heads = self.sh_heads.lock().unwrap();
+            let mut heads = self.sh.heads.lock().unwrap();
             for sh in touched_sh {
                 match self.store.scripthash.head_value(&sh) {
                     Ok(Some(v)) if !v.is_empty() => {
@@ -847,9 +852,10 @@ pub fn spawn_sh_writebehind(
                     if let Some(job) = query.take_sh_job_for_apply() {
                         break job;
                     }
-                    let g = query.sh_pending.lock().unwrap();
+                    let g = query.sh.pending.lock().unwrap();
                     let (g2, wait) = query
-                        .sh_pending_cv
+                        .sh
+                        .pending_cv
                         .wait_timeout(g, std::time::Duration::from_millis(200))
                         .unwrap();
                     drop(g2);

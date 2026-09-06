@@ -277,14 +277,11 @@ impl ShJoinNeed {
         create_identity: true,
         spender_identity: true,
     };
-    pub(crate) const LISTUNSPENT: Self = Self {
-        create_identity: false,
-        spender_identity: false,
-    };
     pub(crate) const BALANCE: Self = Self {
         create_identity: false,
         spender_identity: false,
     };
+    pub(crate) const LISTUNSPENT: Self = Self::BALANCE;
     pub(crate) const CHAIN_STATS: Self = Self::BALANCE;
 }
 
@@ -389,7 +386,7 @@ impl Query {
     /// When `to_height` is set, creates with Class C height `>= to_height` are not
     /// expanded (their spends cannot fall in the window). Visibility is
     /// [`Store::is_confirmed_strong_at`] against `view.height`.
-    pub(crate) fn join_creates_and_spends(
+    pub(crate) fn sh_join(
         &self,
         scripthash: &[u8; 32],
         need: ShJoinNeed,
@@ -485,7 +482,7 @@ impl Query {
         {
             return Ok(());
         }
-        let joined = self.join_creates_and_spends(scripthash, ShJoinNeed::BALANCE, None, view)?;
+        let joined = self.sh_join(scripthash, ShJoinNeed::BALANCE, None, view)?;
         *slot = Some(ShJoinSlot {
             scripthash: *scripthash,
             tip_hash: view.hash,
@@ -776,8 +773,7 @@ impl Query {
         filter: &HistoryFilter,
         view: &ChainView,
     ) -> Result<Vec<ScriptHashHistoryItem>, QueryError> {
-        let joined =
-            self.join_creates_and_spends(scripthash, ShJoinNeed::HISTORY, filter.to_height, view)?;
+        let joined = self.sh_join(scripthash, ShJoinNeed::HISTORY, filter.to_height, view)?;
         Ok(history_items_from_joined(&joined, filter))
     }
 
@@ -904,7 +900,7 @@ impl Query {
         scripthash: &[u8; 32],
         view: &ChainView,
     ) -> Result<ScriptHashBalance, QueryError> {
-        let joined = self.join_creates_and_spends(scripthash, ShJoinNeed::BALANCE, None, view)?;
+        let joined = self.sh_join(scripthash, ShJoinNeed::BALANCE, None, view)?;
         self.balance_from_joined(&joined)
     }
 
@@ -1007,8 +1003,7 @@ impl Query {
         scripthash: &[u8; 32],
         view: &ChainView,
     ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
-        let mut joined =
-            self.join_creates_and_spends(scripthash, ShJoinNeed::LISTUNSPENT, None, view)?;
+        let mut joined = self.sh_join(scripthash, ShJoinNeed::LISTUNSPENT, None, view)?;
         self.fill_create_txids(&mut joined, true)?;
         self.listunspent_from_joined(&joined)
     }
@@ -1136,8 +1131,7 @@ impl Query {
         scripthash: &[u8; 32],
         view: &ChainView,
     ) -> Result<ScriptHashChainStats, QueryError> {
-        let joined =
-            self.join_creates_and_spends(scripthash, ShJoinNeed::CHAIN_STATS, None, view)?;
+        let joined = self.sh_join(scripthash, ShJoinNeed::CHAIN_STATS, None, view)?;
         self.chain_stats_from_joined(&joined)
     }
 
@@ -1183,6 +1177,8 @@ mod history_filter_tests {
 
     #[test]
     fn sh_join_need_display() {
+        assert_eq!(ShJoinNeed::LISTUNSPENT, ShJoinNeed::BALANCE);
+        assert_eq!(ShJoinNeed::CHAIN_STATS, ShJoinNeed::BALANCE);
         assert_eq!(ShJoinNeed::HISTORY.to_string(), "cs");
         assert_eq!(ShJoinNeed::LISTUNSPENT.to_string(), "-");
         assert_eq!(ShJoinNeed::BALANCE.to_string(), "-");

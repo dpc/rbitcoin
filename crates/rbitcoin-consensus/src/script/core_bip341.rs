@@ -23,7 +23,11 @@ fn load_root() -> Value {
 }
 
 fn taproot_job(tx: Transaction, prevouts: Vec<TxOut>) -> ScriptCheckJob {
-    ScriptCheckJob::new(prevouts, tx, true, true, true, true, true)
+    ScriptCheckJob::new(
+        prevouts,
+        tx,
+        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+    )
 }
 
 fn utxos_spent(v: &Value) -> Result<Vec<TxOut>, String> {

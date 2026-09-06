@@ -631,7 +631,7 @@ impl Query {
         use std::time::Instant;
 
         let mut spends: Vec<([u8; 32], u32, Fk, u32)> = Vec::new();
-        let archive_spends = self.spend_index_enabled() && self.index_mode().is_tip();
+        let archive_spends = self.writes_archive_spends();
         let index_tx = self.tx_index_enabled();
 
         let t_collect = Instant::now();

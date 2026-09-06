@@ -22,6 +22,8 @@ pub enum StoreError {
     BudgetFull(&'static str),
     /// Cooperative abort (SIGINT / IBD stop) — not data corruption.
     Cancelled(&'static str),
+    /// io_uring cannot be opened in this process — not on-disk corruption.
+    Unavailable,
     /// Operator layout / open-option error (not on-disk corruption).
     Layout(String),
     /// Published chain prefix moved (reorg) during a confirmed-tx read. Retry.
@@ -61,6 +63,7 @@ impl fmt::Display for StoreError {
             StoreError::Corrupt(m) => write!(f, "corrupt record: {m}"),
             StoreError::BudgetFull(m) => write!(f, "budget full: {m}"),
             StoreError::Cancelled(m) => write!(f, "cancelled: {m}"),
+            StoreError::Unavailable => f.write_str("io_uring unavailable"),
             StoreError::Layout(m) => write!(f, "{m}"),
             StoreError::Stale(m) => write!(f, "{m}"),
         }
@@ -102,6 +105,7 @@ mod tests {
             StoreError::Corrupt("broken"),
             StoreError::BudgetFull("block_queue"),
             StoreError::Cancelled("stop"),
+            StoreError::Unavailable,
             StoreError::Layout("inwit is on a cold datadir".into()),
             StoreError::Stale("chain view moved"),
         ];
@@ -116,8 +120,9 @@ mod tests {
         assert!(texts[6].contains("corrupt record: broken"));
         assert!(texts[7].contains("budget full: block_queue"));
         assert!(texts[8].contains("cancelled: stop"));
-        assert_eq!(texts[9], "inwit is on a cold datadir");
-        assert_eq!(texts[10], "chain view moved");
+        assert_eq!(texts[9], "io_uring unavailable");
+        assert_eq!(texts[10], "inwit is on a cold datadir");
+        assert_eq!(texts[11], "chain view moved");
         for e in &arms {
             assert!(e.source().is_none());
         }

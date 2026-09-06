@@ -163,58 +163,105 @@ pub(crate) fn assign_work_ordered(
 
     let tip_holes = contiguous_tip_holes(st, hub, TIP_HOLE_MAX);
     issued += cover_tip_holes(st, hub, cfg, &alive, &tip_holes);
-
-    // 1b) Most-work reorg: pull mid-path / sibling bodies by **hash** (BQ is
-    // height first-wins and may hold a different block at the same height).
-    // Mids sit at height ≤ tip so tip-batch expire never clears them.
-    // Always reserve a few slots for reorg need even when densify filled the
-    // window — without mids tip stays frozen on the loser fork.
-    let reorg_need = st.reorg.need_getdata();
-    if !reorg_need.is_empty() {
-        use bitcoin::hashes::Hash as _;
-        let reserve = reorg_need.len().min(8);
-        let mut room = cfg.window.saturating_sub(st.inflight.len()).max(reserve);
-        let mut peer_i = st.assign_rot;
-        for h in reorg_need {
-            if room == 0 {
-                break;
-            }
-            if st.inflight.contains_key(&h) {
-                continue;
-            }
-            if hub.has_block(&h) {
-                continue;
-            }
-            // Ready only when **this hash** is on BQ (not merely the height slot).
-            if hub.query.block_queue_has_hash(&h.to_byte_array()) {
-                continue;
-            }
-            // Shared with tip-hole cover: zombie pending without matching wire.
-            demote_zombie_pending_for_fetch(&mut st.body, hub, h, st.hash_height.get(&h).copied());
-            if st.body.skip_download(hub, &h) {
-                continue;
-            }
-            for _ in 0..alive.len() {
-                let pid = alive[peer_i % alive.len()];
-                peer_i += 1;
-                if !peer_has_slot(st, pid, cfg.per_peer) {
-                    continue;
-                }
-                if issue_one(st, pid, h, &mut room, &mut issued) {
-                    break;
-                }
-            }
-        }
-        st.assign_rot = peer_i;
-    }
+    issued += assign_reorg_need(st, hub, cfg, &alive);
 
     if matches!(depth, AssignDepth::Critical) {
         finish_assign(loop_stats, t0, issued);
         return;
     }
 
+    assign_densify(
+        st,
+        hub,
+        cfg,
+        &alive,
+        DensifyCtx {
+            loop_stats,
+            t0,
+            issued,
+            path_lo,
+            tip_batch_hi,
+            tip_holes: &tip_holes,
+            tip_rate_blocks_per_s,
+        },
+    );
+}
+
+fn assign_reorg_need(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    cfg: &IbdConfig,
+    alive: &[usize],
+) -> u64 {
+    let reorg_need = st.reorg.need_getdata();
+    if reorg_need.is_empty() {
+        return 0;
+    }
+    use bitcoin::hashes::Hash as _;
+    let reserve = reorg_need.len().min(8);
+    let mut room = cfg.window.saturating_sub(st.inflight.len()).max(reserve);
+    let mut peer_i = st.assign_rot;
+    let mut issued = 0u64;
+    for h in reorg_need {
+        if room == 0 {
+            break;
+        }
+        if st.inflight.contains_key(&h) {
+            continue;
+        }
+        if hub.has_block(&h) {
+            continue;
+        }
+        if hub.query.block_queue_has_hash(&h.to_byte_array()) {
+            continue;
+        }
+        demote_zombie_pending_for_fetch(&mut st.body, hub, h, st.hash_height.get(&h).copied());
+        if st.body.skip_download(hub, &h) {
+            continue;
+        }
+        for _ in 0..alive.len() {
+            let pid = alive[peer_i % alive.len()];
+            peer_i += 1;
+            if !peer_has_slot(st, pid, cfg.per_peer) {
+                continue;
+            }
+            if issue_one(st, pid, h, &mut room, &mut issued) {
+                break;
+            }
+        }
+    }
+    st.assign_rot = peer_i;
+    issued
+}
+
+struct DensifyCtx<'a> {
+    loop_stats: &'a LoopStats,
+    t0: Instant,
+    issued: u64,
+    path_lo: u32,
+    tip_batch_hi: u32,
+    tip_holes: &'a [BlockHash],
+    tip_rate_blocks_per_s: Option<f64>,
+}
+
+fn assign_densify(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    cfg: &IbdConfig,
+    alive: &[usize],
+    ctx: DensifyCtx<'_>,
+) {
+    let DensifyCtx {
+        loop_stats,
+        t0,
+        mut issued,
+        path_lo,
+        tip_batch_hi,
+        tip_holes,
+        tip_rate_blocks_per_s,
+    } = ctx;
     let tip_hole = !tip_holes.is_empty();
-    let (pack_median, pack_tight) = pack_ewma_bps(&st.slots, &alive);
+    let (pack_median, pack_tight) = pack_ewma_bps(&st.slots, alive);
     let caps: HashMap<usize, usize> = alive
         .iter()
         .map(|&pid| {
@@ -231,7 +278,7 @@ pub(crate) fn assign_work_ordered(
             )
         })
         .collect();
-    issued += steal_hung_densify(st, hub, &alive, tip_batch_hi, &caps);
+    issued += steal_hung_densify(st, hub, alive, tip_batch_hi, &caps);
 
     let mut room = cfg.window.saturating_sub(st.inflight.len());
     if room == 0 {
@@ -275,7 +322,7 @@ pub(crate) fn assign_work_ordered(
         return;
     }
 
-    let ranked = rank_peers_by_speed(&st.slots, &alive, &HashSet::new());
+    let ranked = rank_peers_by_speed(&st.slots, alive, &HashSet::new());
     let mut densify_q = densify;
     for &pid in &ranked {
         if room == 0 || densify_q.is_empty() {
