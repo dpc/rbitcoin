@@ -5874,6 +5874,53 @@ fn tip_event_for_announce_on_lagged_uses_current_hub_tip() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn snapshot_omits_peer_after_tcp_fin() {
+    use crate::peers::{PeerConnType, PeerHub};
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:0.1.0(testnode0)/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = hub.register(addr, addr, &ver, true, PeerConnType::Inbound);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let la = listener.local_addr().unwrap();
+    let client = TcpStream::connect(la).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    peer.attach_tcp_shutdown(server.try_clone().unwrap());
+    assert_eq!(hub.snapshot().len(), 1);
+    client.shutdown(Shutdown::Both).unwrap();
+    let mut saw = false;
+    for _ in 0..50 {
+        if peer.tcp_fin() {
+            saw = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(saw, "cloned fd must see FIN");
+    assert!(
+        hub.snapshot().is_empty(),
+        "getpeerinfo must omit a FIN'd session (mempool_reorg disconnect_nodes 5s)"
+    );
+    drop(client);
+    drop(server);
+}
+
 /// Burst tip advances (> tip broadcast capacity) must still reach a follow peer
 /// without waiting for the 120s headers poll (`sync_blocks` is 60s).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

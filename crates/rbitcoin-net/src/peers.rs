@@ -319,6 +319,22 @@ impl LivePeer {
         *self.tcp_shutdown.lock().unwrap_or_else(|e| e.into_inner()) = Some(stream);
     }
 
+    pub fn tcp_fin(&self) -> bool {
+        let g = self.tcp_shutdown.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tcp) = g.as_ref() else {
+            return false;
+        };
+        let _ = tcp.set_nonblocking(true);
+        let mut b = [0u8; 1];
+        match tcp.peek(&mut b) {
+            Ok(0) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => false,
+            Err(_) => true,
+            Ok(_) => false,
+        }
+    }
+
     fn take_writer_abort(&self) -> Option<tokio::task::AbortHandle> {
         self.writer_abort
             .lock()
@@ -1339,7 +1355,11 @@ impl PeerHub {
     pub fn snapshot(&self) -> Vec<PeerInfo> {
         let now = self.now_secs();
         let g = self.live.read().unwrap_or_else(|e| e.into_inner());
-        let mut v: Vec<_> = g.values().map(|p| p.snapshot(now)).collect();
+        let mut v: Vec<_> = g
+            .values()
+            .filter(|p| !p.tcp_fin())
+            .map(|p| p.snapshot(now))
+            .collect();
         v.sort_by_key(|p| p.id);
         v
     }
