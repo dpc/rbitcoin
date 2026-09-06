@@ -11,6 +11,20 @@ before 1.0).
 
 ### Changed
 
+- **Node start catch-up is a `CatchUp` enum:** not four independent bools.
+  Indexes, IBD, and Electrum/Esplora start are named phases. Electrum and
+  Esplora share one hub-tip broadcast bridge.
+- **P2P follow session is `PeerFollowState`:** `handle_peer_frame` takes one
+  session bag instead of twelve mut maps. Compact `sendcmpct` preference is
+  `PendingSendCmpct::{None, Lb, Hb}` (`AtomicU8` payload unchanged). Tx and
+  wtxid GetData share `serve_mempool_getdata`.
+- **Esplora asof/live scripthash reads share `sh_at_view`:** utxo,
+  chain page, and combined txs no longer copy the pin fork.
+- **Electrum asof/live scripthash reads share `sh_at_view`:** history,
+  balance, and listunspent no longer copy a 4-way pin fork.
+- **CLI / conf share `NodeConfig::apply_kv`:** argv still has its own
+  flag match and help text; conf `key=value` goes through one setter.
+  Parsed flags live in `CliAccum` instead of ~40 `mut` locals.
 - **Display-order 32-byte hash hex** lives in `rbitcoin-primitives`
   (`display_hash_hex` / `parse_display_hash32`). RPC, Electrum, and Esplora
   call that pair instead of each reversing then encoding.

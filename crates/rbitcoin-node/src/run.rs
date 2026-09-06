@@ -2,12 +2,12 @@ use crate::config::NodeConfig;
 use crate::error::NodeError;
 use crate::regtest_rpc::HubRegtest;
 use bitcoin::consensus::Encodable;
-use rbitcoin_electrum::{run_electrum, ElectrumConfig, TipNotify};
-use rbitcoin_esplora::{run_esplora, EsploraConfig};
+use rbitcoin_electrum::{run_electrum, ElectrumConfig, ElectrumHandle, TipNotify};
+use rbitcoin_esplora::{run_esplora, EsploraConfig, EsploraHandle};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, format_serve_perf, format_tip_perf_sizes, read_proc_rss, sample_reset_serve_perf,
-    AddrMan, IbdConfig, MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
+    AddrMan, ChainHub, IbdConfig, MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -194,40 +194,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             milestone.height
         );
     }
-    // Restart: durable SH head stays Tip (write-behind catch-up). Else Direct
-    // IBD with SH deferred until post-horizon Class A collect.
-    handle.query.set_sh_index_enabled(config.shindex);
-    if let Err(e) = handle.query.set_sptweaks_enabled(
-        config.sptweaks,
-        rbitcoin_primitives::Height(params.taproot_height()),
-    ) {
-        warn!("sp_tweaks: enable failed: {e}");
-    } else if config.sptweaks {
-        info!("sp_tweaks: enabled origin={}", params.taproot_height());
-    }
-    if config.shindex && handle.query.sh_use_writebehind() {
-        let _ = handle.query.sync_sh_seal_from_include_hwm();
-        handle.query.enter_tip_index_mode();
-        info!(
-            "node: durable scripthash head — resume IndexMode::Tip \
-             (skip Class A recollect; catch-up uses write-behind)"
-        );
-    } else {
-        handle
-            .query
-            .enter_direct_index_mode_sh(config.shindex)
-            .map_err(|e| NodeError::Config(format!("index direct mode: {e}")))?;
-        if config.shindex {
-            info!(
-                "ibd: IndexMode::Direct (archive tx.head; confirm spend batch; \
-                 SH deferred until post-IBD Class A collect)"
-            );
-        } else {
-            info!(
-                "ibd: IndexMode::Direct without scripthash (shindex off; tip follow independent of SH)"
-            );
-        }
-    }
+    apply_startup_index_mode(&handle.query, &config, params.taproot_height())?;
     let listen = config
         .p2p_listen
         .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], default_port(config.network))));
@@ -422,104 +389,27 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     } else {
         addrman.take_outbound(candidate_n)
     };
-    // True only after IBD reports true catch-up (or no peers to dial).
-    // Mid-chain peer death must not enter tip mode (materialize durable indexes).
-    let mut catch_up_complete = ibd_targets.is_empty();
-    let mut ibd_dial_failed_all = false;
-    if !ibd_targets.is_empty() && !shutdown.requested() {
-        let target_peers = max_out.clamp(8, 32);
-        let ibd_cfg = IbdConfig {
-            window: rbitcoin_net::DEFAULT_IBD_WINDOW,
-            per_peer: rbitcoin_net::DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER,
-            target_peers,
-            // 5s caused reassign storms (clearing 200+ inflight before peers
-            // could deliver mid-chain blocks). Default 30s is enough.
-            stall: std::time::Duration::from_secs(30),
-            peers: Some(std::sync::Arc::clone(&shared_peers)),
-            ..IbdConfig::default()
-        };
-        info!(
-            "ibd: catch-up candidates={} target_peers={} (window={}, per_peer={})…",
-            ibd_targets.len(),
-            ibd_cfg.target_peers,
-            ibd_cfg.window,
-            ibd_cfg.per_peer
-        );
-        // Cooperative cancel only: IBD polls `shutdown.flag` and exits its own
-        // teardown path. Do **not** `select!`+drop the IBD future on SIGINT —
-        // that used to drop a nested multi-thread runtime mid-async and panic
-        // (`Cannot drop a runtime in an async context`), making Ctrl+C slow/noisy.
-        let cancel = Some(Arc::clone(&shutdown.flag));
-        match node.sync_cancellable(&ibd_targets, ibd_cfg, cancel).await {
-            Ok(n) => {
-                if shutdown.requested() {
-                    warn!(
-                        "ibd: catch-up interrupted accepted≈{n} tip={:?}",
-                        node.tip_height()
-                    );
-                } else {
-                    // IBD only Ok-exits on true catch-up (or cancel). Mid-chain
-                    // peer death returns Err so we never materialize tip indexes early.
-                    // Defense: never claim complete at genesis tip with zero accepts
-                    // (stall-exit regression used to enter tip mode at height 0).
-                    let tip = node.tip_height().unwrap_or(0);
-                    if tip == 0 && n == 0 {
-                        warn!(
-                            "ibd: returned ok with tip=0 accepted=0 — treating as incomplete (no tip mode)"
-                        );
-                        catch_up_complete = false;
-                    } else {
-                        info!("ibd: catch-up accepted≈{n} tip={:?}", node.tip_height());
-                        catch_up_complete = true;
-                    }
-                }
-            }
-            Err(e) => {
-                if shutdown.requested() {
-                    warn!("signal: IBD cancelled ({e})");
-                } else {
-                    let tip = node.tip_height().unwrap_or(0);
-                    if tip > 0 && node.hub.query.index_mode().is_tip() {
-                        warn!(
-                            "ibd: incomplete: {e}; tip={tip:?} — tip indexes present, continuing tip-follow"
-                        );
-                        catch_up_complete = true;
-                        ibd_dial_failed_all = true;
-                    } else {
-                        warn!(
-                            "ibd: incomplete: {e}; tip={tip:?} — keeping catch-up indexes (no tip mode; restart to resume)"
-                        );
-                    }
-                }
-            }
-        }
-        if let Ok(g) = shared_peers.lock() {
-            addrman = g.clone();
-        }
-        if let Err(e) = addrman.save(&peers_path) {
-            warn!("peers: save {}: {e}", peers_path.display());
-        } else {
-            info!(
-                "peers: saved {} address(es) to {}",
-                addrman.len(),
-                peers_path.display()
-            );
-        }
-    } else if ibd_targets.is_empty() {
-        info!("ibd: no outbound peers; serving only (use --connect or seeds)");
-        catch_up_complete = true;
-    }
+    let catch_up = run_ibd_or_skip(
+        &node,
+        &ibd_targets,
+        max_out,
+        &shared_peers,
+        &mut addrman,
+        &peers_path,
+        &shutdown,
+    )
+    .await;
 
     // Still enter tip-follow when work is below `-minimumchainwork` so later
     // blocks can raise the tip. Relay / getheaders stay gated on the hub floor.
-    if catch_up_complete && !tip_meets_min_work(&config, &node.hub) {
+    if catch_up.is_complete() && !tip_meets_min_work(&config, &node.hub) {
         info!("ibd: tip work below -minimumchainwork — following without relay");
     }
 
     // tip_follow_ready ≠ sh_tip_ready: follow/relay do not wait on SH materialize.
     let mut tip_follow_ready = false;
     let mut sh_tip_ready = false;
-    if catch_up_complete && !shutdown.requested() {
+    if catch_up.is_complete() && !shutdown.requested() {
         let gates = enter_tip_mode(
             &node.hub.query,
             Some(Arc::clone(&shutdown.flag)),
@@ -549,7 +439,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         } else if shutdown.requested() {
             warn!("node: tip entry interrupted — restart to resume");
         }
-    } else if !catch_up_complete && !shutdown.requested() {
+    } else if !catch_up.is_complete() && !shutdown.requested() {
         warn!(
             "node: catch-up not complete tip={:?} — skip tip mode; restart to resume IBD",
             node.tip_height()
@@ -618,7 +508,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if tip_follow_ready && !shutdown.requested() {
         let follow_n = targets.len().min(max_out.min(3));
         const FOLLOW_CONNECT_SECS: u64 = 8;
-        if ibd_dial_failed_all {
+        if catch_up.dial_failed_all() {
             for peer in targets.iter().take(follow_n) {
                 if let Err(e) = node.peers.dial(*peer, PeerConnType::OutboundFullRelay) {
                     warn!("node: follow dial {peer}: {e}");
@@ -663,116 +553,24 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         }
     }
 
-    let mut electrum_handles = Vec::new();
-    let mut electrum_bridge = None;
-    if sh_tip_ready {
-        if let Some(addr) = config.electrum_listen {
-            if !shutdown.requested() {
-                let q = node.hub.query.clone();
-                let (electrum_tip_tx, _) = broadcast::channel::<TipNotify>(64);
-                let mut hub_tips = node.hub.subscribe_tips();
-                let bridge_tx = electrum_tip_tx.clone();
-                let bridge_stop = Arc::clone(&shutdown.flag);
-                electrum_bridge = Some(tokio::spawn(async move {
-                    loop {
-                        if bridge_stop.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        match hub_tips.recv().await {
-                            Ok(ev) => {
-                                let mut buf = Vec::with_capacity(80);
-                                if ev.header.consensus_encode(&mut buf).is_err() {
-                                    continue;
-                                }
-                                let _ = bridge_tx.send(TipNotify {
-                                    height: ev.height,
-                                    header_hex: rbitcoin_primitives::hex_encode(buf),
-                                    reorg_from_height: if ev.reorg_branch_len > 0 {
-                                        Some(ev.height.saturating_sub(ev.reorg_branch_len))
-                                    } else {
-                                        None
-                                    },
-                                });
-                            }
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }));
-                let ecfg = ElectrumConfig::for_params(addr, &params);
-                let max_conn = ecfg.limits.max_connections;
-                let max_line = ecfg.limits.max_request_bytes;
-                let idle_secs = ecfg.limits.idle_timeout.as_secs();
-                match run_electrum(
-                    ecfg,
-                    q,
-                    params.clone(),
-                    electrum_tip_tx,
-                    Some(mempool.clone()),
-                )
-                .await
-                {
-                    Ok(h) => {
-                        info!(
-                            "electrum TCP on {} (Query + mempool; max_conn={} max_line={} idle={}s; TLS via reverse proxy if public)",
-                            h.local_addr, max_conn, max_line, idle_secs
-                        );
-                        electrum_handles.push(h);
-                    }
-                    Err(e) => warn!("electrum TCP start warning: {e}"),
-                }
-            }
-        }
-    }
-
-    let mut esplora_handles = Vec::new();
-    let mut esplora_tip_bridge = None;
-    if sh_tip_ready {
-        if let Some(addr) = config.esplora_listen {
-            if !shutdown.requested() {
-                let q = node.hub.query.clone();
-                let btc_net = match config.network {
-                    rbitcoin_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
-                    rbitcoin_primitives::Network::Testnet => bitcoin::Network::Testnet,
-                    rbitcoin_primitives::Network::Signet => bitcoin::Network::Signet,
-                    rbitcoin_primitives::Network::Regtest => bitcoin::Network::Regtest,
-                };
-                let (esplora_tip_tx, _) = broadcast::channel::<TipEvent>(64);
-                let mut hub_tips = node.hub.subscribe_tips();
-                let bridge_tx = esplora_tip_tx.clone();
-                let bridge_stop = Arc::clone(&shutdown.flag);
-                esplora_tip_bridge = Some(tokio::spawn(async move {
-                    loop {
-                        if bridge_stop.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        match hub_tips.recv().await {
-                            Ok(ev) => {
-                                let _ = bridge_tx.send(ev);
-                            }
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }));
-                let ecfg = EsploraConfig::with_network(addr, btc_net);
-                let max_conn = ecfg.limits.max_connections;
-                let max_body = ecfg.limits.max_request_bytes;
-                let idle_secs = ecfg.limits.idle_timeout.as_secs();
-                let max_ws = ecfg.max_ws_connections;
-                match run_esplora(ecfg, q, Some(mempool.clone()), Some(esplora_tip_tx)).await {
-                    Ok(h) => {
-                        info!(
-                        "esplora HTTP+WS on {} (REST + /v1/ws; max_conn={} max_body={} idle={}s max_ws={}; TLS via reverse proxy if public)",
-                        h.local_addr, max_conn, max_body, idle_secs, max_ws
-                    );
-                        esplora_handles.push(h);
-                    }
-                    Err(e) => warn!("esplora HTTP start warning: {e}"),
-                }
-            }
-        }
-    }
+    let (electrum_handles, electrum_bridge) = start_electrum_if_ready(
+        sh_tip_ready,
+        config.electrum_listen,
+        &shutdown,
+        &node.hub,
+        &params,
+        &mempool,
+    )
+    .await;
+    let (esplora_handles, esplora_tip_bridge) = start_esplora_if_ready(
+        sh_tip_ready,
+        config.esplora_listen,
+        config.network,
+        &shutdown,
+        &node.hub,
+        &mempool,
+    )
+    .await;
 
     let mut rpc_handle: Option<RpcHandle> = None;
     if let Some(addr) = config.rpc_listen {
@@ -1035,7 +833,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 if shutdown.requested() {
                     break;
                 }
-                if catch_up_complete {
+                if catch_up.is_complete() {
                     if !stale_follow_needs_room(follow_live, max_out) {
                         info!(
                             "node: tip may be stale (height={tip}, no update ≥{STALE_TIP_SECS}s, follow_live={follow_live}) — connecting {peer} for a higher tip"
@@ -1191,6 +989,332 @@ fn spawn_sptweaks_backfill(
     });
 }
 
+/// IBD horizon after `sync_cancellable` (or no peers to dial).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CatchUp {
+    Incomplete,
+    Complete { dial_failed_all: bool },
+}
+
+impl CatchUp {
+    pub(crate) fn complete() -> Self {
+        Self::Complete {
+            dial_failed_all: false,
+        }
+    }
+
+    pub(crate) fn complete_dial_failed() -> Self {
+        Self::Complete {
+            dial_failed_all: true,
+        }
+    }
+
+    pub(crate) fn is_complete(self) -> bool {
+        matches!(self, Self::Complete { .. })
+    }
+
+    pub(crate) fn dial_failed_all(self) -> bool {
+        matches!(
+            self,
+            Self::Complete {
+                dial_failed_all: true
+            }
+        )
+    }
+}
+
+pub(crate) fn catch_up_after_ok(accepted: u32, tip: u32, shutdown: bool) -> CatchUp {
+    if shutdown || (tip == 0 && accepted == 0) {
+        CatchUp::Incomplete
+    } else {
+        CatchUp::complete()
+    }
+}
+
+pub(crate) fn catch_up_after_err(tip: u32, index_is_tip: bool, shutdown: bool) -> CatchUp {
+    if !shutdown && tip > 0 && index_is_tip {
+        CatchUp::complete_dial_failed()
+    } else {
+        CatchUp::Incomplete
+    }
+}
+
+fn apply_startup_index_mode(
+    query: &Query,
+    config: &NodeConfig,
+    taproot_height: u32,
+) -> Result<(), NodeError> {
+    query.set_sh_index_enabled(config.shindex);
+    if let Err(e) =
+        query.set_sptweaks_enabled(config.sptweaks, rbitcoin_primitives::Height(taproot_height))
+    {
+        warn!("sp_tweaks: enable failed: {e}");
+    } else if config.sptweaks {
+        info!("sp_tweaks: enabled origin={taproot_height}");
+    }
+    if config.shindex && query.sh_use_writebehind() {
+        let _ = query.sync_sh_seal_from_include_hwm();
+        query.enter_tip_index_mode();
+        info!(
+            "node: durable scripthash head — resume IndexMode::Tip \
+             (skip Class A recollect; catch-up uses write-behind)"
+        );
+    } else {
+        query
+            .enter_direct_index_mode_sh(config.shindex)
+            .map_err(|e| NodeError::Config(format!("index direct mode: {e}")))?;
+        if config.shindex {
+            info!(
+                "ibd: IndexMode::Direct (archive tx.head; confirm spend batch; \
+                 SH deferred until post-IBD Class A collect)"
+            );
+        } else {
+            info!(
+                "ibd: IndexMode::Direct without scripthash (shindex off; tip follow independent of SH)"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_ibd_or_skip(
+    node: &P2PNode,
+    ibd_targets: &[SocketAddr],
+    max_out: usize,
+    shared_peers: &std::sync::Arc<std::sync::Mutex<AddrMan>>,
+    addrman: &mut AddrMan,
+    peers_path: &std::path::Path,
+    shutdown: &Shutdown,
+) -> CatchUp {
+    if ibd_targets.is_empty() {
+        info!("ibd: no outbound peers; serving only (use --connect or seeds)");
+        return CatchUp::complete();
+    }
+    if shutdown.requested() {
+        return CatchUp::Incomplete;
+    }
+    let target_peers = max_out.clamp(8, 32);
+    let ibd_cfg = IbdConfig {
+        window: rbitcoin_net::DEFAULT_IBD_WINDOW,
+        per_peer: rbitcoin_net::DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER,
+        target_peers,
+        // 5s caused reassign storms (clearing 200+ inflight before peers
+        // could deliver mid-chain blocks). Default 30s is enough.
+        stall: std::time::Duration::from_secs(30),
+        peers: Some(std::sync::Arc::clone(shared_peers)),
+        ..IbdConfig::default()
+    };
+    info!(
+        "ibd: catch-up candidates={} target_peers={} (window={}, per_peer={})…",
+        ibd_targets.len(),
+        ibd_cfg.target_peers,
+        ibd_cfg.window,
+        ibd_cfg.per_peer
+    );
+    // Cooperative cancel only: IBD polls `shutdown.flag` and exits its own
+    // teardown path. Do **not** `select!`+drop the IBD future on SIGINT —
+    // that used to drop a nested multi-thread runtime mid-async and panic
+    // (`Cannot drop a runtime in an async context`), making Ctrl+C slow/noisy.
+    let cancel = Some(Arc::clone(&shutdown.flag));
+    let catch_up = match node.sync_cancellable(ibd_targets, ibd_cfg, cancel).await {
+        Ok(n) => {
+            if shutdown.requested() {
+                warn!(
+                    "ibd: catch-up interrupted accepted≈{n} tip={:?}",
+                    node.tip_height()
+                );
+            } else {
+                let tip = node.tip_height().unwrap_or(0);
+                if tip == 0 && n == 0 {
+                    warn!(
+                        "ibd: returned ok with tip=0 accepted=0 — treating as incomplete (no tip mode)"
+                    );
+                } else {
+                    info!("ibd: catch-up accepted≈{n} tip={:?}", node.tip_height());
+                }
+            }
+            catch_up_after_ok(n, node.tip_height().unwrap_or(0), shutdown.requested())
+        }
+        Err(e) => {
+            if shutdown.requested() {
+                warn!("signal: IBD cancelled ({e})");
+            } else {
+                let tip = node.tip_height().unwrap_or(0);
+                if tip > 0 && node.hub.query.index_mode().is_tip() {
+                    warn!(
+                        "ibd: incomplete: {e}; tip={tip:?} — tip indexes present, continuing tip-follow"
+                    );
+                } else {
+                    warn!(
+                        "ibd: incomplete: {e}; tip={tip:?} — keeping catch-up indexes (no tip mode; restart to resume)"
+                    );
+                }
+            }
+            catch_up_after_err(
+                node.tip_height().unwrap_or(0),
+                node.hub.query.index_mode().is_tip(),
+                shutdown.requested(),
+            )
+        }
+    };
+    if let Ok(g) = shared_peers.lock() {
+        *addrman = g.clone();
+    }
+    if let Err(e) = addrman.save(peers_path) {
+        warn!("peers: save {}: {e}", peers_path.display());
+    } else {
+        info!(
+            "peers: saved {} address(es) to {}",
+            addrman.len(),
+            peers_path.display()
+        );
+    }
+    catch_up
+}
+
+fn spawn_hub_tip_bridge<T, F>(
+    mut hub_tips: broadcast::Receiver<TipEvent>,
+    tx: broadcast::Sender<T>,
+    stop: Arc<AtomicBool>,
+    map: F,
+) -> tokio::task::JoinHandle<()>
+where
+    T: Clone + Send + 'static,
+    F: Fn(TipEvent) -> Option<T> + Send + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            match hub_tips.recv().await {
+                Ok(ev) => {
+                    if let Some(v) = map(ev) {
+                        let _ = tx.send(v);
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+fn electrum_tip_notify(ev: TipEvent) -> Option<TipNotify> {
+    let mut buf = Vec::with_capacity(80);
+    if ev.header.consensus_encode(&mut buf).is_err() {
+        return None;
+    }
+    Some(TipNotify {
+        height: ev.height,
+        header_hex: rbitcoin_primitives::hex_encode(buf),
+        reorg_from_height: if ev.reorg_branch_len > 0 {
+            Some(ev.height.saturating_sub(ev.reorg_branch_len))
+        } else {
+            None
+        },
+    })
+}
+
+async fn start_electrum_if_ready(
+    sh_tip_ready: bool,
+    addr: Option<SocketAddr>,
+    shutdown: &Shutdown,
+    hub: &ChainHub,
+    params: &rbitcoin_consensus::ChainParams,
+    mempool: &std::sync::Arc<MempoolHub>,
+) -> (Vec<ElectrumHandle>, Option<tokio::task::JoinHandle<()>>) {
+    let Some(addr) = addr else {
+        return (Vec::new(), None);
+    };
+    if !sh_tip_ready || shutdown.requested() {
+        return (Vec::new(), None);
+    }
+    let q = hub.query.clone();
+    let (electrum_tip_tx, _) = broadcast::channel::<TipNotify>(64);
+    let hub_tips = hub.subscribe_tips();
+    let bridge = spawn_hub_tip_bridge(
+        hub_tips,
+        electrum_tip_tx.clone(),
+        Arc::clone(&shutdown.flag),
+        electrum_tip_notify,
+    );
+    let ecfg = ElectrumConfig::for_params(addr, params);
+    let max_conn = ecfg.limits.max_connections;
+    let max_line = ecfg.limits.max_request_bytes;
+    let idle_secs = ecfg.limits.idle_timeout.as_secs();
+    match run_electrum(
+        ecfg,
+        q,
+        params.clone(),
+        electrum_tip_tx,
+        Some(Arc::clone(mempool)),
+    )
+    .await
+    {
+        Ok(h) => {
+            info!(
+                "electrum TCP on {} (Query + mempool; max_conn={} max_line={} idle={}s; TLS via reverse proxy if public)",
+                h.local_addr, max_conn, max_line, idle_secs
+            );
+            (vec![h], Some(bridge))
+        }
+        Err(e) => {
+            warn!("electrum TCP start warning: {e}");
+            (Vec::new(), Some(bridge))
+        }
+    }
+}
+
+async fn start_esplora_if_ready(
+    sh_tip_ready: bool,
+    addr: Option<SocketAddr>,
+    network: Network,
+    shutdown: &Shutdown,
+    hub: &ChainHub,
+    mempool: &std::sync::Arc<MempoolHub>,
+) -> (Vec<EsploraHandle>, Option<tokio::task::JoinHandle<()>>) {
+    let Some(addr) = addr else {
+        return (Vec::new(), None);
+    };
+    if !sh_tip_ready || shutdown.requested() {
+        return (Vec::new(), None);
+    }
+    let q = hub.query.clone();
+    let btc_net = match network {
+        rbitcoin_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
+        rbitcoin_primitives::Network::Testnet => bitcoin::Network::Testnet,
+        rbitcoin_primitives::Network::Signet => bitcoin::Network::Signet,
+        rbitcoin_primitives::Network::Regtest => bitcoin::Network::Regtest,
+    };
+    let (esplora_tip_tx, _) = broadcast::channel::<TipEvent>(64);
+    let hub_tips = hub.subscribe_tips();
+    let bridge = spawn_hub_tip_bridge(
+        hub_tips,
+        esplora_tip_tx.clone(),
+        Arc::clone(&shutdown.flag),
+        Some,
+    );
+    let ecfg = EsploraConfig::with_network(addr, btc_net);
+    let max_conn = ecfg.limits.max_connections;
+    let max_body = ecfg.limits.max_request_bytes;
+    let idle_secs = ecfg.limits.idle_timeout.as_secs();
+    let max_ws = ecfg.max_ws_connections;
+    match run_esplora(ecfg, q, Some(Arc::clone(mempool)), Some(esplora_tip_tx)).await {
+        Ok(h) => {
+            info!(
+                "esplora HTTP+WS on {} (REST + /v1/ws; max_conn={} max_body={} idle={}s max_ws={}; TLS via reverse proxy if public)",
+                h.local_addr, max_conn, max_body, idle_secs, max_ws
+            );
+            (vec![h], Some(bridge))
+        }
+        Err(e) => {
+            warn!("esplora HTTP start warning: {e}");
+            (Vec::new(), Some(bridge))
+        }
+    }
+}
+
 /// Result of post-IBD tip entry: follow/mempool gates vs Electrum SH gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TipModeGates {
@@ -1204,7 +1328,7 @@ pub(crate) struct TipModeGates {
 ///
 /// **Preconditions (enforced by IBD, not repaired here):** Direct catch-up already
 /// wrote durable **`tx.head`** (archive) and **spend annotations** (confirm).
-/// Incomplete IBD must not call this (`catch_up_complete` only after full horizon).
+/// Incomplete IBD must not call this (`CatchUp::Complete` only after full horizon).
 ///
 /// **SH methods (exactly two):**
 /// - Durable head: stay/flip [`IndexMode::Tip`], discard leftover runs, Electrum
@@ -1496,6 +1620,45 @@ mod tests {
             saw_poll,
             "stale interval must produce Poll while perf ticks every 15ms"
         );
+    }
+
+    #[test]
+    fn catch_up_ok_genesis_zero_accepts_is_incomplete() {
+        assert_eq!(catch_up_after_ok(0, 0, false), CatchUp::Incomplete);
+        assert_eq!(catch_up_after_ok(3, 3, true), CatchUp::Incomplete);
+    }
+
+    #[test]
+    fn catch_up_ok_with_blocks_is_complete() {
+        assert_eq!(
+            catch_up_after_ok(3, 3, false),
+            CatchUp::Complete {
+                dial_failed_all: false
+            }
+        );
+        assert_eq!(
+            catch_up_after_ok(0, 1, false),
+            CatchUp::Complete {
+                dial_failed_all: false
+            }
+        );
+        assert!(CatchUp::complete().is_complete());
+        assert!(!CatchUp::complete().dial_failed_all());
+        assert!(!CatchUp::Incomplete.is_complete());
+    }
+
+    #[test]
+    fn catch_up_err_with_tip_indexes_dials_failed() {
+        assert_eq!(
+            catch_up_after_err(10, true, false),
+            CatchUp::Complete {
+                dial_failed_all: true
+            }
+        );
+        assert!(CatchUp::complete_dial_failed().dial_failed_all());
+        assert_eq!(catch_up_after_err(10, false, false), CatchUp::Incomplete);
+        assert_eq!(catch_up_after_err(0, true, false), CatchUp::Incomplete);
+        assert_eq!(catch_up_after_err(10, true, true), CatchUp::Incomplete);
     }
 
     #[test]

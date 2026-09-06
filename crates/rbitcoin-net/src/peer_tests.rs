@@ -348,7 +348,7 @@ fn header_getdata_is_compact_after_sendcmpct() {
         .build()
         .unwrap();
     rt.block_on(async {
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(vec![hdr])),
             &hub,
             &out_tx,
@@ -432,7 +432,7 @@ fn submitheader_parent_p2p_child_header_getdatas_body() {
         .build()
         .unwrap();
     rt.block_on(async {
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(vec![b7.header])),
             &hub,
             &out_tx,
@@ -784,7 +784,7 @@ fn minchainwork_does_not_getdata_below_floor() {
         }
 
         // Core getheaders reply is a batch (not one header per tip).
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(hdrs[..49].to_vec())),
             &hub,
             &out_tx,
@@ -816,7 +816,7 @@ fn minchainwork_does_not_getdata_below_floor() {
             "non-noban must not store a low-work headers tree"
         );
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(hdrs.clone())),
             &hub,
             &out_tx,
@@ -906,7 +906,7 @@ fn minchainwork_one_header_announces_ignore_height_14() {
 
         // Official generate announces one header per mined tip.
         for hdr in &hdrs {
-            handle_peer_frame(
+            handle_peer_frame_for_test(
                 frame_for(NetworkMessage::Headers(vec![*hdr])),
                 &hub,
                 &out_tx,
@@ -1010,7 +1010,7 @@ fn blocksonly_tx_and_inv_raise_ban() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Tx(dummy_tx)),
             &hub,
             &out_tx,
@@ -1034,7 +1034,7 @@ fn blocksonly_tx_and_inv_raise_ban() {
         );
 
         ban = 0;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Inv(vec![Inventory::WTx(
                 bitcoin::Wtxid::from_byte_array([
                     0x34, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1236,7 +1236,7 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 tx.compute_wtxid(),
             )])),
@@ -1793,7 +1793,7 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 fresh.compute_wtxid(),
             )])),
@@ -1919,7 +1919,7 @@ fn blocksonly_relay_perm_tx_invs_other_inbound() {
         let mut pending_cmpct = HashMap::new();
         let mut from_first = HashMap::new();
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Tx(tx.clone())),
             &hub,
             &out_tx,
@@ -2122,7 +2122,7 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
         cached.header.prev_blockhash = tip;
         // Same-hash cached invalid: header hash is the failed one.
         hub.note_invalid_block(cached.header.block_hash());
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: cached,
             })),
@@ -2146,7 +2146,7 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
 
         let mut child = HeaderAndShortIds::from_block(&gen, 2, 2, &[0]).unwrap();
         child.header.prev_blockhash = failed;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: child,
             })),
@@ -2181,7 +2181,7 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
                 tx: gen.txdata[0].clone(),
             }],
         };
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: bad_idx,
             })),
@@ -2262,7 +2262,7 @@ fn handle_peer_frame_control_and_inv_paths() {
             NetworkMessage::GetAddr,
             NetworkMessage::Ping(42),
         ] {
-            handle_peer_frame(
+            handle_peer_frame_for_test(
                 frame_for(msg),
                 &hub,
                 &out_tx,
@@ -2311,7 +2311,7 @@ fn handle_peer_frame_control_and_inv_paths() {
             vec![hub.tip_hash().unwrap()],
             BlockHash::from_byte_array([0u8; 32]),
         );
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetHeaders(gh)),
             &hub,
             &out_tx,
@@ -2334,7 +2334,7 @@ fn handle_peer_frame_control_and_inv_paths() {
 
         // Inv for unknown block → GetHeaders (never getdata without a header).
         let want_h = BlockHash::from_byte_array([0xee; 32]);
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(want_h)])),
             &hub,
             &out_tx,
@@ -2379,7 +2379,7 @@ fn handle_peer_frame_control_and_inv_paths() {
             bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 1,
         };
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(vec![child])),
             &hub,
             &out_tx,
@@ -2402,7 +2402,7 @@ fn handle_peer_frame_control_and_inv_paths() {
 
         // GetData for known tip block (cache miss → reconstruct).
         let tip = hub.tip_hash().unwrap();
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::WitnessBlock(tip)])),
             &hub,
             &out_tx,
@@ -2423,7 +2423,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         assert_eq!(served_block(out_rx.try_recv().unwrap()).block_hash(), tip);
 
         // CompactBlock getdata for tip.
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::CompactBlock(tip)])),
             &hub,
             &out_tx,
@@ -2448,7 +2448,7 @@ fn handle_peer_frame_control_and_inv_paths() {
 
         // GetBlockTxn with bad index → ban score.
         use bitcoin::bip152::BlockTransactionsRequest;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
                 txs_request: BlockTransactionsRequest {
                     block_hash: tip,
@@ -2475,7 +2475,7 @@ fn handle_peer_frame_control_and_inv_paths() {
 
         // GetBlockTxn good index 0 (coinbase).
         ban = 0;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
                 txs_request: BlockTransactionsRequest {
                     block_hash: tip,
@@ -2506,7 +2506,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         // Deeper than 10: full block, not blocktxn (`p2p_compactblocks` :635).
         hub.generate_to_script(12, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
                 txs_request: BlockTransactionsRequest {
                     block_hash: tip,
@@ -2538,7 +2538,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         );
 
         // Unsolicited BlockTxn → mild ban.
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::BlockTxn(BlockTxn {
                 transactions: BlockTransactions {
                     block_hash: BlockHash::from_byte_array([0xdd; 32]),
@@ -2570,7 +2570,7 @@ fn handle_peer_frame_control_and_inv_paths() {
             .unwrap()
             .unwrap();
         let hsi = HeaderAndShortIds::from_block(&gen_block, 9, 2, &[]).unwrap();
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: hsi,
             })),
@@ -2595,7 +2595,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         let _ = out_rx.try_recv();
 
         // Unknown command (including the retired rbtpkg name) is a no-op.
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Unknown {
                 command: bitcoin::p2p::message::CommandString::try_from("rbtpkg").unwrap(),
                 payload: vec![1, 2, 3],
@@ -2618,7 +2618,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         .unwrap();
 
         // SendCmpct with unsupported version is ignored.
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::SendCmpct(SendCmpct {
                 send_compact: false,
                 version: 99,
@@ -2644,7 +2644,7 @@ fn handle_peer_frame_control_and_inv_paths() {
 
         // Inventory::Block (non-witness) for unknown → GetHeaders.
         let want2 = BlockHash::from_byte_array([0xcc; 32]);
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Inv(vec![Inventory::Block(want2)])),
             &hub,
             &out_tx,
@@ -2668,7 +2668,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         }
 
         // Inv for known tip → no GetData.
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(tip)])),
             &hub,
             &out_tx,
@@ -2689,7 +2689,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         assert!(out_rx.try_recv().is_err());
 
         // GetData Inventory::Block for tip (non-witness arm).
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::Block(tip)])),
             &hub,
             &out_tx,
@@ -2715,7 +2715,7 @@ fn handle_peer_frame_control_and_inv_paths() {
             .reconstruct_block_by_hash(&tip.to_byte_array())
             .unwrap()
             .unwrap();
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Block(gen_block2)),
             &hub,
             &out_tx,
@@ -2754,7 +2754,7 @@ fn handle_peer_frame_control_and_inv_paths() {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         };
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Tx(dummy_tx)),
             &hub,
             &out_tx,
@@ -2774,7 +2774,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         .unwrap();
 
         // Catch-all unknown command.
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Unknown {
                 command: bitcoin::p2p::message::CommandString::try_from("zzzzzz").unwrap(),
                 payload: vec![],
@@ -2850,7 +2850,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         let mut ban = 0u32;
 
         let unknown_txid = bitcoin::Txid::from_byte_array([0x42; 32]);
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Inv(vec![
                 Inventory::WitnessTransaction(unknown_txid),
                 Inventory::WTx(bitcoin::Wtxid::from_byte_array([0x43; 32])),
@@ -2879,7 +2879,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         }
 
         // GetData for missing tx → notfound (Core ProcessGetData).
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![
                 Inventory::WitnessTransaction(unknown_txid),
                 Inventory::WTx(bitcoin::Wtxid::from_byte_array([0x43; 32])),
@@ -2933,7 +2933,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
             }],
         };
         let junk_txid = junk.compute_txid();
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Tx(junk)),
             &hub,
             &out_tx,
@@ -2978,7 +2978,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         let mut payload = Vec::with_capacity(4 + raw.len());
         payload.extend_from_slice(&(raw.len() as u32).to_le_bytes());
         payload.extend_from_slice(&raw);
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Unknown {
                 command: bitcoin::p2p::message::CommandString::try_from("rbtpkg").unwrap(),
                 payload,
@@ -3127,7 +3127,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 recent.compute_wtxid(),
             )])),
@@ -3155,7 +3155,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         }
 
         sess.note_announced_wtx(recent.compute_wtxid());
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 recent.compute_wtxid(),
             )])),
@@ -3180,7 +3180,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
             other => panic!("announced recent must serve tx, got {other:?}"),
         }
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 disconnected.compute_wtxid(),
             )])),
@@ -3235,7 +3235,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
             .unwrap()
             .accept_tx(&later)
             .expect("accept later");
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 later.compute_wtxid(),
             )])),
@@ -3312,7 +3312,7 @@ fn invalid_getdata_type0_still_serves_tip_block() {
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::Unknown {
                 inv_type: 0,
                 hash: [0u8; 32],
@@ -3339,7 +3339,7 @@ fn invalid_getdata_type0_still_serves_tip_block() {
             "type-0 getdata must not emit a reply"
         );
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::Block(tip)])),
             &hub,
             &out_tx,
@@ -3853,7 +3853,7 @@ fn inv_of_already_asked_block_does_not_getdata() {
         let mut cmpct_ver = 2u32;
         let mut ban = 0u32;
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(vec![hdr])),
             &hub,
             &out_tx,
@@ -3879,7 +3879,7 @@ fn inv_of_already_asked_block_does_not_getdata() {
         let (out_tx2, mut out_rx2) = mpsc::unbounded_channel();
         let mut pending_headers2 = HashMap::new();
         let mut requested2 = HashSet::new();
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(hash)])),
             &hub,
             &out_tx2,
@@ -3959,7 +3959,7 @@ fn bloom_disabled_messages_request_disconnect() {
     for msg in msgs {
         let mut ban = 0u32;
         rt.block_on(async {
-            handle_peer_frame(
+            handle_peer_frame_for_test(
                 frame_for(msg),
                 &hub,
                 &out_tx,
@@ -4037,7 +4037,7 @@ fn oversize_locator_request_disconnect() {
     ] {
         let mut ban = 0u32;
         rt.block_on(async {
-            handle_peer_frame(
+            handle_peer_frame_for_test(
                 frame_for(msg),
                 &hub,
                 &out_tx,
@@ -4065,7 +4065,7 @@ fn oversize_locator_request_disconnect() {
     // Exactly MAX_LOCATOR_SZ stays connected (ban untouched).
     let mut ban = 0u32;
     rt.block_on(async {
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetHeaders(GetHeadersMessage::new(
                 within, stop,
             ))),
@@ -4254,7 +4254,7 @@ fn redundant_verack_is_ignored_and_logged() {
         let mut ban = 0u32;
 
         rbitcoin_log::capture_logs(true);
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Verack),
             &hub,
             &out_tx,
@@ -4411,7 +4411,7 @@ fn addrfetch_multi_addr_disconnects() {
         .build()
         .unwrap();
     rt.block_on(async {
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Addr(vec![(1u32, one.clone())])),
             &hub,
             &out_tx,
@@ -4435,7 +4435,7 @@ fn addrfetch_multi_addr_disconnects() {
         );
         assert_eq!(ban, 0);
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Addr(vec![
                 (1u32, one.clone()),
                 (1u32, one.clone()),
@@ -4475,7 +4475,7 @@ fn addrfetch_multi_addr_disconnects() {
             addr: AddrV2::Ipv4(Ipv4Addr::new(192, 0, 0, 8)),
             port: 18444,
         };
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::AddrV2(vec![v2.clone(), v2])),
             &hub,
             &out_tx,
@@ -4779,7 +4779,7 @@ fn connecting_ancient_weaker_headers_request_disconnect() {
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(vec![side])),
             &hub,
             &out_tx,
@@ -4813,7 +4813,7 @@ fn connecting_ancient_weaker_headers_request_disconnect() {
         peers.set_noban(true);
         let mut ban = 0u32;
         let mut pending_headers = HashMap::new();
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(vec![side])),
             &hub,
             &out_tx,
@@ -4907,7 +4907,7 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
         let mut requested = HashSet::new();
         let mut ban = 0u32;
         let inv: Vec<Inventory> = hashes.iter().map(|h| Inventory::WitnessBlock(*h)).collect();
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(inv)),
             &hub,
             &out_tx,
@@ -5015,7 +5015,7 @@ fn catchup_headers_getdata_stays_in_serve_window() {
         let mut cmpct_ver = 2u32;
         let mut ban = 0u32;
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(headers.clone())),
             &hub,
             &out_tx,
@@ -5048,7 +5048,7 @@ fn catchup_headers_getdata_stays_in_serve_window() {
                 .reconstruct_archived_block(&h.to_byte_array())
                 .unwrap()
                 .expect("src body");
-            handle_peer_frame(
+            handle_peer_frame_for_test(
                 frame_for(NetworkMessage::Block(block)),
                 &hub,
                 &out_tx,
@@ -5160,7 +5160,7 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
         let mut cmpct_ver = 2u32;
         let mut ban = 0u32;
 
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(headers.clone())),
             &hub,
             &out_tx,
@@ -5189,7 +5189,7 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
                 .unwrap()
                 .expect("src body");
             let hsi = HeaderAndShortIds::from_block(&block, 1, 2, &[0]).unwrap();
-            handle_peer_frame(
+            handle_peer_frame_for_test(
                 frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                     compact_block: hsi,
                 })),
@@ -5328,7 +5328,7 @@ fn full_headers_batch_continues_from_last_header() {
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::Headers(headers)),
             &hub,
             &out_tx,
@@ -5622,7 +5622,7 @@ fn compact_tip_announce_must_not_wrap_serve_inflight() {
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::CompactBlock(hash)])),
             &hub,
             &out_tx,
@@ -5731,7 +5731,7 @@ fn compact_tip_announce_must_not_consume_serve_slots() {
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::GetData(vec![Inventory::CompactBlock(hash)])),
             &hub,
             &out_tx,
@@ -5817,7 +5817,7 @@ fn coinbase_compact_fills_without_mempool() {
         let mut send_cmpct = true;
         let mut cmpct_ver = 2u32;
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: hsi,
             })),
@@ -6366,7 +6366,7 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
         let mut ban = 0u32;
-        handle_peer_frame(
+        handle_peer_frame_for_test(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: hsi,
             })),
