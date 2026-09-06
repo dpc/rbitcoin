@@ -33,10 +33,13 @@ impl NodeClock {
 }
 
 pub fn wall_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    unix_secs(SystemTime::now())
+}
+
+fn unix_secs(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs()
 }
 
 thread_local! {
@@ -75,5 +78,16 @@ mod tests {
         assert!(current_now() > 0);
         with_now(42, || assert_eq!(current_now(), 42));
         assert_ne!(current_now(), 42);
+    }
+
+    #[test]
+    fn unix_secs_epoch_is_zero() {
+        assert_eq!(unix_secs(UNIX_EPOCH), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "system clock before Unix epoch")]
+    fn unix_secs_panics_before_epoch() {
+        unix_secs(UNIX_EPOCH - std::time::Duration::from_secs(1));
     }
 }
