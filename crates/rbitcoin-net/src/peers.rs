@@ -1435,7 +1435,15 @@ impl PeerHub {
         let g = self.live.read().unwrap_or_else(|e| e.into_inner());
         let mut v: Vec<_> = g
             .values()
-            .filter(|p| !p.handshake_complete() || !p.tcp_fin())
+            .filter(|p| {
+                if p.stop.load(Ordering::SeqCst) {
+                    return false;
+                }
+                // Connecting rows stay visible during BIP324 (EARLY_KEY_RESPONSE
+                // may FIN the clone while the row is still the getpeerinfo target).
+                // Completed sessions hide on TCP FIN (`mempool_reorg` disconnect_nodes).
+                !p.handshake_complete() || !p.tcp_fin()
+            })
             .map(|p| p.snapshot(now))
             .collect();
         v.sort_by_key(|p| p.id);
@@ -1736,6 +1744,40 @@ mod tests {
         assert!(
             hub.snapshot().is_empty(),
             "disconnect_id must unregister before the session task exits"
+        );
+    }
+
+    #[test]
+    fn snapshot_hides_fin_completed_keeps_connecting() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let local = std::net::TcpStream::connect(addr).unwrap();
+        let (far, _) = listener.accept().unwrap();
+        drop(far);
+        let _ = local.shutdown(std::net::Shutdown::Both);
+
+        let hub = PeerHub::new();
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let connecting = hub.register_connecting(a, a, true, PeerConnType::Inbound);
+        connecting.attach_tcp_shutdown(local.try_clone().unwrap());
+        assert_eq!(
+            hub.snapshot().len(),
+            1,
+            "connecting peer stays in getpeerinfo during v2 handshake"
+        );
+
+        let done = hub.register(a, a, &ver("/rbitcoin:test/"), false, PeerConnType::Inbound);
+        done.attach_tcp_shutdown(local);
+        assert!(
+            hub.snapshot().iter().all(|p| p.id != done.id),
+            "completed FIN'd peer must not appear in getpeerinfo"
+        );
+        connecting.request_disconnect();
+        assert!(
+            hub.snapshot().iter().all(|p| p.id != connecting.id),
+            "stopped connecting peer is omitted"
         );
     }
 
