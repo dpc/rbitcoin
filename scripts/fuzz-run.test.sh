@@ -317,6 +317,12 @@ assert_ok "200/10000 passes the 1% bar" \
 assert_ok "cmpct 1 compare / many runs fails skip-heavy 0.5%" \
   bash -c '! '"$RUN"' --check-log '"$WORKDIR/cmpct-mute.log"' 0.005'
 {
+  echo "cmpct-differential: comparisons=1"
+  echo "Done 69993 runs in 601 second(s)"
+} >"$WORKDIR/cmpct-seed-only.log"
+assert_ok "cmpct ≥1 compare passes with no rate floor" \
+  "$RUN" --check-log "$WORKDIR/cmpct-seed-only.log" 0
+{
   echo "mempool-differential: comparisons=50"
   echo "Done 10000 runs in 120 second(s)"
 } >"$WORKDIR/mp-busy.log"

@@ -9,6 +9,13 @@ before 1.0).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`store_reorg` extend after a heavier held fork:** `try_apply_held` may
+  return `Accepted` above the next height; that is not store corruption.
+- **`cmpct_differential` mute-rate:** random bytes almost never stay a
+  BIP152 `cmpctblock`. Gate is ≥1 comparison, not 0.5% of libFuzzer execs.
+
 ### Changed
 
 - **IBD outbound diversity stays, but last-resort no longer fills the spare slot:**
