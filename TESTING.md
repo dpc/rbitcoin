@@ -393,7 +393,8 @@ gate. `run.sh` may only invoke inventory `run` names (see
 The nightly job (`.github/workflows/core-functional.yml` →
 `scripts/core-functional/nightly.sh`) warns — it does not fail — when a
 newer Bitcoin Core release exists than the inventory pin. Label
-**`core-functional`** on harness PRs. Default `cargo test` does **not**
+**`core-functional`** on harness PRs and on **ship** version-bump PRs
+([`docs/releases.md`](docs/releases.md)). Default `cargo test` does **not**
 invoke Core’s Python suite.
 
 ```bash

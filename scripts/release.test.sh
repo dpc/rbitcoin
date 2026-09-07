@@ -63,9 +63,13 @@ EOF
 }
 EOF
   cat >"$dest/CHANGELOG.md" <<'EOF'
+## [Unreleased]
+
 ## [9.9.9]
 
-Release notes for the hermetic pin.
+### Highlights
+
+- **Pin:** hermetic release.sh notes.
 EOF
   git_c -C "$dest" init -q -b master
   git_c -C "$dest" add Cargo.toml nix/rbitcoin.nix CHANGELOG.md
@@ -133,3 +137,6 @@ if [[ "$FAIL" -ne 0 ]]; then
   exit 1
 fi
 echo "release.test.sh: $PASS passed"
+
+echo
+bash "$ROOT/scripts/release-flow.test.sh"

@@ -11,6 +11,10 @@ before 1.0).
 
 ### Changed
 
+- **Release process:** [`docs/releases.md`](docs/releases.md) (via
+  [`AGENTS.md`](AGENTS.md)) owns tag / `vX.Y.x` / `.99` bump. Ship PRs
+  write CHANGELOG `### Highlights`; `./scripts/release-notes.sh` is the
+  GitHub Release text. `release-extra` runs Core functional on ship PRs.
 - **Confirm/net rejects are typed at the sender:** IBD matches
   `ConfirmRejectClass` (not English). Side blocks, unknown parents, mutated
   compact bodies, and duplicate mempool txs keep the same log/RPC strings.

@@ -240,8 +240,9 @@ on Windows) rather than the full workspace suite.
 ### Release binaries (portable static, byte-identical)
 
 Do **not** treat host or nix-shell `cargo build --release` as the operator
-binary. Musl pin, `repro-build.sh` / `repro-check.sh`, and `scripts/release.sh`:
-[`docs/reproducible-builds.md`](./docs/reproducible-builds.md). Operator install:
+binary. Musl pin, `repro-build.sh` / `repro-check.sh`, and the tag/branch
+scripts: [`docs/reproducible-builds.md`](./docs/reproducible-builds.md),
+[`docs/releases.md`](./docs/releases.md). Operator install:
 [`OPERATOR.md`](./OPERATOR.md). PR `windows` / `macos` jobs smoke native store
 IO; they do not package zips. GitHub Releases:
 [`.github/workflows/release.yml`](./.github/workflows/release.yml).

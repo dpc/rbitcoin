@@ -61,6 +61,13 @@ joins) gets a **named** `ibd: perf` timer **in the same commit**. Inventory:
 Process RAM vs page cache, body-queue soft assign, production evict APIs:
 [`docs/ibd-memory.md`](docs/ibd-memory.md).
 
+## Releases
+
+**do a minor release** / **do a patch release** / **do a major release**
+(or cut / tag a GitHub Release): follow [`docs/releases.md`](docs/releases.md).
+That file is the only playbook (changelog cut, Highlights, tag, `vX.Y.x`,
+`.99` bump). Do not copy it here.
+
 ## Ship via worktree + pull request
 
 ```text
@@ -119,8 +126,9 @@ Required jobs: **`fmt`**, **`deny`**, **`clippy`**, **`ast-grep`**, **`test`**,
 `./scripts/ast-grep.sh` (rules live in `lint/ast-grep/`; do not copy them here).
 `windows` / `macos` are native
 store + `--smoke` (not operator zips). Operator binaries are GitHub Releases
-(`release.yml`). Label **`core-functional`** when the PR touches the Core
-functional harness.
+(`release.yml`). Releases (minor / patch / major): [`docs/releases.md`](docs/releases.md).
+Label **`core-functional`** when the PR touches the Core functional harness
+(and on every **ship** version-bump PR).
 
 `origin` fetch/pull is HTTPS; `pushurl` is SSH (operator). This VM has **no**
 GitHub App SSH key. The App token from `~/.config/rbitcoin-grok/gh-login.sh`
