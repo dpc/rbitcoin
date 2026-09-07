@@ -83,8 +83,8 @@ before 1.0).
   call that pair instead of each reversing then encoding.
 - **Code shape:** [`docs/code-shape.md`](docs/code-shape.md) owns control
   flow, naming, and composition (CONTRIBUTING principle 10).
-  [`docs/quality.md`](docs/quality.md) **Q-61** is the 0.6.0 readability
-  backlog.
+  [`docs/quality.md`](docs/quality.md) **Q-61** named extracts landed
+  (Completed); residual god-file peels are **R-10**.
 - **Release builds skip store/query IO spies:** `tx_full_gets` /
   `body_ok_reads` increment only under `debug_assertions`, not on the
   operator hot path.
@@ -776,6 +776,13 @@ before 1.0).
   (`sanitizer is incompatible with statically linked libc`).
   `scripts/fuzz-run.sh` now passes rustc's host triple (gnu on the
   GHA runner).
+
+## [0.5.2] — 2026-08-23
+
+Tagged on the **0.5.1** maintenance line (`v0.5.x`), not as a master ancestor.
+The same tapscript fix is on master.
+
+### Fixed
 
 - **Tapscript initial witness stack ([023](docs/external_findings/023-tapscript-initial-stack-limits.md)):**
   after the BIP342 OP_SUCCESS scan, tapscript now rejects an initial

@@ -203,7 +203,8 @@ That is **not** the operator binary (`nix build .#rbitcoin-musl`). Details:
     instead of a 30-field god struct; one owner per algorithm. Do not split
     Core-faithful opcode loops or io_uring machines to beat a line count.
     Full rules and extract policy: [`docs/code-shape.md`](./docs/code-shape.md).
-    Ranked 0.6.0 work: [`docs/quality.md`](./docs/quality.md) **Q-61**.
+    Named 0.6.0 extracts (**Q-61**) are Completed; residual peels:
+    [`docs/quality.md`](./docs/quality.md) **R-10**.
 
 ## Workflow
 
