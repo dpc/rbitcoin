@@ -179,7 +179,7 @@ impl P2PNode {
         })
     }
 
-    /// Bind an additional listen socket (Core multi-`-bind`, including `=onion`).
+    /// Bind an additional listen socket (Core multi-`-bind`).
     pub async fn add_listen(&mut self, listen: SocketAddr) -> Result<SocketAddr, NetError> {
         let listener = TcpListener::bind(listen).await?;
         let local_addr = listener.local_addr()?;
@@ -403,10 +403,6 @@ fn spawn_inbound_accept(
                     let tip_rx = hub.subscribe_tips();
                     let peers = peers.clone();
                     let ua = user_agent.clone();
-                    let bind = match stream.local_addr() {
-                        Ok(a) => a,
-                        Err(_) => our,
-                    };
                     let sessions = session_tasks.clone();
                     let (ah_tx, ah_rx) =
                         tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
@@ -414,7 +410,7 @@ fn spawn_inbound_accept(
                         let _session_slot = permit;
                         let (_ver, reader, writer, wire, tcp_shutdown, sess) =
                             match inbound_connect_and_handshake(
-                                stream, magic, our, peer_addr, height, &ua, &peers, bind,
+                                stream, magic, our, peer_addr, height, &ua, &peers, our,
                             )
                             .await
                             {
