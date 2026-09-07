@@ -133,3 +133,6 @@ if [[ "$FAIL" -ne 0 ]]; then
   exit 1
 fi
 echo "release.test.sh: $PASS passed"
+
+echo
+bash "$ROOT/scripts/release-flow.test.sh"

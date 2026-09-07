@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
 # Tag and push vX.Y.Z so GitHub Actions release.yml builds operator snapshots.
 #
-# Typical: merge the version-bump PR into master locally, then:
-#   ./scripts/release.sh              # check, annotated tag, push master + tag
-#   ./scripts/release.sh --dry-run    # checks only
-#   ./scripts/release.sh --no-push    # tag locally, do not push
+# Typical (agent / docs/releases.md): merge the version-bump PR, checkout the
+# merge commit, then:
+#   ./scripts/release-post.sh         # tag, push tag, create vX.Y.x when X.Y.0
+#   ./scripts/release.sh              # tag only (also pushes the branch)
+#   ./scripts/release.sh --tag-only   # push the tag, not the branch
+#   ./scripts/release.sh --dry-run
 #
 # Version is workspace.package.version (Cargo.toml). Files that must match:
 # Cargo.toml, nix/rbitcoin.nix, CHANGELOG.md ## [X.Y.Z]. Tag is vX.Y.Z.
-# Pushes the current branch (master) and the tag. Does not force-push or
-# rewrite remotes.
+# Patch 99 is the in-tree sentinel and is never tagged.
+# Allowed branches: master, main, vX.Y.x. Does not force-push or rewrite remotes.
 set -euo pipefail
 
 ROOT=""
 DRY=0
 PUSH=1
+TAG_ONLY=0
 ALLOW_BRANCH=""
 ALLOW_DIVERGED=0
 REMOTE="origin"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 usage() {
-  echo "usage: $0 [--dry-run] [--no-push] [--allow-branch NAME] [--allow-diverged] [--remote NAME] [--root DIR]" >&2
+  echo "usage: $0 [--dry-run] [--no-push] [--tag-only] [--allow-branch NAME] [--allow-diverged] [--remote NAME] [--root DIR]" >&2
   exit 2
 }
 
@@ -28,6 +32,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1 ;;
     --no-push) PUSH=0 ;;
+    --tag-only) TAG_ONLY=1 ;;
     --allow-branch)
       [[ $# -ge 2 ]] || usage
       ALLOW_BRANCH="$2"
@@ -51,97 +56,63 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$ROOT" ]]; then
-  ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+  ROOT="$(cd "$HERE/.." && pwd)"
 fi
 cd "$ROOT"
+# shellcheck source=release-lib.sh
+source "$HERE/release-lib.sh"
 
-die() { echo "error: $*" >&2; exit 1; }
-
-cargo_workspace_version() {
-  awk '
-    /^\[workspace.package\]/ { p = 1; next }
-    p && /^\[/ { exit }
-    p && /^version = "/ {
-      gsub(/"/, "", $3)
-      print $3
-      exit
-    }
-  ' "$ROOT/Cargo.toml"
-}
-
-nix_package_version() {
-  awk '
-    /^[[:space:]]*version = "/ {
-      gsub(/[";]/, "", $3)
-      print $3
-      exit
-    }
-  ' "$ROOT/nix/rbitcoin.nix"
-}
-
-changelog_has_heading() {
-  local ver="$1"
-  grep -qE "^## \\[${ver}\\]" "$ROOT/CHANGELOG.md"
-}
-
-changelog_notes() {
-  local ver="$1"
-  awk -v ver="$ver" '
-    $0 ~ ("^## \\[" ver "\\]") { p = 1; next }
-    p && /^## \[/ { exit }
-    p { print }
-  ' "$ROOT/CHANGELOG.md" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
-}
-
-ver="$(cargo_workspace_version)"
-[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Cargo.toml workspace version is not X.Y.Z: ${ver:-empty}"
+ver="$(release_cargo_workspace_version)"
+[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || release_die "Cargo.toml workspace version is not X.Y.Z: ${ver:-empty}"
+release_parse_semver "$ver" || release_die "Cargo.toml workspace version is not X.Y.Z: ${ver:-empty}"
+release_is_ship || release_die "workspace $ver is not a ship version (patch 99 is in-tree only)"
 tag="v${ver}"
 
-nix_ver="$(nix_package_version)"
-[[ "$nix_ver" == "$ver" ]] || die "nix/rbitcoin.nix version=$nix_ver != Cargo.toml $ver"
+nix_ver="$(release_nix_package_version)"
+[[ "$nix_ver" == "$ver" ]] || release_die "nix/rbitcoin.nix version=$nix_ver != Cargo.toml $ver"
 
-changelog_has_heading "$ver" || die "CHANGELOG.md has no ## [$ver] heading"
+release_changelog_has_heading "$ver" || release_die "CHANGELOG.md has no ## [$ver] heading"
 
-notes="$(changelog_notes "$ver")"
-[[ -n "$(printf '%s\n' "$notes" | grep -v '^[[:space:]]*$')" ]] || die "CHANGELOG.md ## [$ver] section is empty"
+notes="$(release_changelog_notes "$ver")"
+[[ -n "$(printf '%s\n' "$notes" | grep -v '^[[:space:]]*$')" ]] || release_die "CHANGELOG.md ## [$ver] section is empty"
 
 if [[ -n "$(git status --porcelain)" ]]; then
-  die "working tree is not clean"
+  release_die "working tree is not clean"
 fi
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
 if [[ -n "$ALLOW_BRANCH" ]]; then
-  [[ "$branch" == "$ALLOW_BRANCH" ]] || die "on $branch, expected --allow-branch $ALLOW_BRANCH"
-elif [[ "$branch" != "master" && "$branch" != "main" ]]; then
-  die "on $branch; merge first or pass --allow-branch $branch"
+  [[ "$branch" == "$ALLOW_BRANCH" ]] || release_die "on $branch, expected --allow-branch $ALLOW_BRANCH"
+elif [[ "$branch" != "master" && "$branch" != "main" ]] && ! release_is_maint_branch "$branch"; then
+  release_die "on $branch; merge first or pass --allow-branch $branch"
 fi
 
 if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-  die "local tag $tag already exists"
+  release_die "local tag $tag already exists"
 fi
 if git remote get-url "$REMOTE" >/dev/null 2>&1; then
   ls_rc=0
   git ls-remote --exit-code "$REMOTE" "refs/tags/${tag}" >/dev/null 2>&1 || ls_rc=$?
   if [[ "$ls_rc" -eq 0 ]]; then
-    die "remote $REMOTE already has $tag"
+    release_die "remote $REMOTE already has $tag"
   elif [[ "$ls_rc" -ne 2 ]]; then
-    die "git ls-remote $REMOTE refs/tags/${tag} failed (exit $ls_rc)"
+    release_die "git ls-remote $REMOTE refs/tags/${tag} failed (exit $ls_rc)"
   fi
 elif [[ "$DRY" -eq 0 && "$PUSH" -eq 1 ]]; then
-  die "no git remote $REMOTE"
+  release_die "no git remote $REMOTE"
 fi
 
 if [[ "$PUSH" -eq 1 ]]; then
   git fetch "$REMOTE" "+refs/heads/${branch}:refs/remotes/${REMOTE}/${branch}" \
-    || die "git fetch $REMOTE $branch failed"
+    || release_die "git fetch $REMOTE $branch failed"
   remote_head="$(git rev-parse "refs/remotes/${REMOTE}/${branch}")"
   head="$(git rev-parse HEAD)"
   if [[ "$head" != "$remote_head" && "$ALLOW_DIVERGED" -ne 1 ]]; then
-    die "HEAD is not ${REMOTE}/${branch} ($head vs $remote_head); pass --allow-diverged"
+    release_die "HEAD is not ${REMOTE}/${branch} ($head vs $remote_head); pass --allow-diverged"
   fi
 fi
 
-echo "release: version=$ver tag=$tag branch=$branch dry=$DRY push=$PUSH"
+echo "release: version=$ver tag=$tag branch=$branch dry=$DRY push=$PUSH tag_only=$TAG_ONLY"
 echo "---- CHANGELOG $ver ----"
 echo "$notes"
 echo "------------------------"
@@ -159,11 +130,20 @@ echo "release: created annotated $tag at $(git rev-parse --short HEAD)"
 
 if [[ "$PUSH" -eq 0 ]]; then
   echo "release: not pushed (--no-push). Push with:"
-  echo "  git push ${REMOTE} refs/heads/${branch} refs/tags/${tag}"
+  if [[ "$TAG_ONLY" -eq 1 ]]; then
+    echo "  git push ${REMOTE} refs/tags/${tag}"
+  else
+    echo "  git push ${REMOTE} refs/heads/${branch} refs/tags/${tag}"
+  fi
   exit 0
 fi
 
-git push "$REMOTE" "refs/heads/${branch}" "refs/tags/${tag}"
-echo "release: pushed ${branch} + ${tag} → $REMOTE"
+if [[ "$TAG_ONLY" -eq 1 ]]; then
+  git push "$REMOTE" "refs/tags/${tag}"
+  echo "release: pushed ${tag} → $REMOTE"
+else
+  git push "$REMOTE" "refs/heads/${branch}" "refs/tags/${tag}"
+  echo "release: pushed ${branch} + ${tag} → $REMOTE"
+fi
 echo "release: GitHub Actions .github/workflows/release.yml builds musl/Windows/Darwin"
 echo "release: https://github.com/reardencode/rbitcoin/releases/tag/${tag}"
