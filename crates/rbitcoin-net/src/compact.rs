@@ -196,18 +196,22 @@ pub fn encode_tx_v2(tx: &Transaction) -> Result<Vec<u8>, NetError> {
     encode_v2_contents(NetworkMessage::Tx(tx.clone()))
 }
 
-fn cmpct_fuzz_dummy_tx(salt: u8) -> Transaction {
+fn cmpct_fuzz_dummy_tx(mix: sha256::Hash, i: usize) -> Transaction {
+    let mut preimage = [0u8; 40];
+    preimage[..32].copy_from_slice(mix.as_byte_array());
+    preimage[32..].copy_from_slice(&(i as u64).to_le_bytes());
+    let id = sha256::Hash::hash(&preimage).to_byte_array();
     Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint {
-                txid: Txid::from_byte_array([salt; 32]),
+                txid: Txid::from_byte_array(id),
                 vout: 0,
             },
             script_sig: ScriptBuf::new(),
             sequence: Sequence::MAX,
-            witness: Witness::from_slice(&[vec![salt]]),
+            witness: Witness::from_slice(&[id.to_vec()]),
         }],
         output: vec![TxOut {
             value: Amount::from_sat(1_000),
@@ -235,15 +239,8 @@ fn structured_cmpct_case(data: &[u8]) -> CmpctFuzzCase {
     } else {
         0x11
     };
-    let mut extras: Vec<Transaction> = (0..n_extra)
-        .map(|i| {
-            let salt = data
-                .get(12 + i)
-                .copied()
-                .unwrap_or((i as u8).saturating_add(1));
-            cmpct_fuzz_dummy_tx(if salt == 0 { 1 } else { salt })
-        })
-        .collect();
+    let mix = sha256::Hash::hash(data);
+    let mut extras: Vec<Transaction> = (0..n_extra).map(|i| cmpct_fuzz_dummy_tx(mix, i)).collect();
     if flags & CMPCT_FUZZ_FLAG_DUP != 0 {
         if let Some(last) = extras.last().cloned() {
             extras.push(last);
@@ -269,7 +266,6 @@ fn structured_cmpct_case(data: &[u8]) -> CmpctFuzzCase {
         Vec::new()
     };
     let genesis = genesis_block(&ChainParams::regtest());
-    let mix = sha256::Hash::hash(data);
     let extra_time = u32::from_le_bytes(mix.to_byte_array()[..4].try_into().unwrap_or([0; 4]));
     let time = genesis
         .header
@@ -845,6 +841,12 @@ mod tests {
         assert_ne!(a.hsi.header.block_hash(), b.hsi.header.block_hash());
         assert!(a.fill_txs.is_empty());
         assert_eq!(cmpct_missing_for_case(&a).as_deref(), Some(&[1u64][..]));
+        let two = prepare_cmpct_fuzz_case(&[0, 2, 0, 0]).unwrap();
+        assert_eq!(
+            cmpct_missing_for_case(&two).as_deref(),
+            Some(&[1u64, 2][..])
+        );
+        assert_ne!(two.hsi.short_ids[0], two.hsi.short_ids[1]);
     }
 
     #[test]
