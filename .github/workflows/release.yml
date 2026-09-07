@@ -251,15 +251,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          notes="rbitcoin ${tag}
-
-          Linux **musl x86_64** is the operator binary (statically linked).
-          Windows is CRT-static PE (no IoRing). Darwin aarch64 is ad-hoc
-          codesigned, **not notarized** (\`xattr -d com.apple.quarantine\`).
-
-          Schema is still 0.x (refuse/wipe on incompatible open). Default
-          mainnet \`--milestone 840000\` skips historical scripts.
-          "
+          notes="$(./scripts/release-notes.sh "${tag#v}")"
           gh release create "$tag" \
             --repo "${{ github.repository }}" \
             --title "rbitcoin ${tag}" \
