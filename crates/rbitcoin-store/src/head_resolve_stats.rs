@@ -40,10 +40,12 @@ static MISS_PEEKS: AtomicU64 = AtomicU64::new(0);
 /// Keys resolved from the unflushed head-insert map (write-behind).
 static PENDING_HITS: AtomicU64 = AtomicU64::new(0);
 
-/// First TipOnly leftover miss in the last resolve batch (`0` = none).
-/// 1=head 2=body 3=idx 4=fence — see [`LeftoverMissOn`].
-static LAST_MISS_ON: AtomicU64 = AtomicU64::new(0);
-static LAST_MISS_CANDS: AtomicU64 = AtomicU64::new(0);
+// Per-thread leftover class so parallel resolve tests cannot steal another
+// batch's Head/Fence/Body. Stamp reads this on the same thread that resolved.
+thread_local! {
+    static LAST_MISS_ON: AtomicU64 = const { AtomicU64::new(0) };
+    static LAST_MISS_CANDS: AtomicU64 = const { AtomicU64::new(0) };
+}
 
 fn miss_on_code(on: LeftoverMissOn) -> u64 {
     match on {
@@ -71,24 +73,26 @@ fn miss_on_from_code(code: u64) -> Option<LeftoverMissOn> {
 /// (`leftover_miss_dumps_probe_diag`) and could clear `diag=1` on the
 /// operator reject line before it was read.
 pub fn clear_leftover_miss() {
-    LAST_MISS_ON.store(0, Ordering::Relaxed);
-    LAST_MISS_CANDS.store(0, Ordering::Relaxed);
+    LAST_MISS_ON.with(|a| a.store(0, Ordering::Relaxed));
+    LAST_MISS_CANDS.with(|a| a.store(0, Ordering::Relaxed));
 }
 
 /// Record the first leftover miss in this batch (later calls ignored).
 pub fn note_leftover_miss(on: LeftoverMissOn, n_cands: u64) {
-    if LAST_MISS_ON
-        .compare_exchange(0, miss_on_code(on), Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
-    {
-        LAST_MISS_CANDS.store(n_cands, Ordering::Relaxed);
-    }
+    LAST_MISS_ON.with(|slot| {
+        if slot
+            .compare_exchange(0, miss_on_code(on), Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            LAST_MISS_CANDS.with(|c| c.store(n_cands, Ordering::Relaxed));
+        }
+    });
 }
 
-/// Last leftover miss table + probe cand count (`None` if the batch hit every key).
+/// Last leftover miss table + probe cand count on this thread (`None` if the batch hit every key).
 pub fn take_leftover_miss() -> Option<(LeftoverMissOn, u64)> {
-    let code = LAST_MISS_ON.swap(0, Ordering::Relaxed);
-    let cands = LAST_MISS_CANDS.swap(0, Ordering::Relaxed);
+    let code = LAST_MISS_ON.with(|a| a.swap(0, Ordering::Relaxed));
+    let cands = LAST_MISS_CANDS.with(|a| a.swap(0, Ordering::Relaxed));
     miss_on_from_code(code).map(|on| (on, cands))
 }
 
