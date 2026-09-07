@@ -11,6 +11,13 @@ before 1.0).
 
 ### Changed
 
+- **IBD outbound diversity stays, but last-resort no longer fills the spare slot:**
+  unused-netgroup preference is per dial tier; a handshake with no block
+  bytes is a failed connect plus 10-minute cooldown; recently attempted
+  addrs are skipped while others remain; redial asks for at least two
+  peers when below target. Learned book cap is 4096, evicting
+  incompatible/failed entries when full so getaddr can still grow the
+  pool (DNS seeds already exceeded the old 256 cap).
 - **Release process:** [`docs/releases.md`](docs/releases.md) (via
   [`AGENTS.md`](AGENTS.md)) owns tag / `vX.Y.x` / `.99` bump. Ship PRs
   write CHANGELOG `### Highlights`; `./scripts/release-notes.sh` is the
