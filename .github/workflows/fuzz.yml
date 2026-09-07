@@ -68,12 +68,12 @@ jobs:
       - name: clang (libFuzzer)
         run: sudo apt-get update && sudo apt-get install -y clang
 
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2.87.5
         with:
           tool: cargo-fuzz@0.13.2
 
       - if: matrix.core
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/rbitcoin/core-bitcoind
           key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
@@ -83,7 +83,7 @@ jobs:
           shared-key: fuzz-${{ matrix.bin }}
           workspaces: "fuzz -> fuzz/target"
 
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ matrix.bin }}-${{ github.run_id }}
