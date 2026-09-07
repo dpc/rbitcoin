@@ -398,8 +398,9 @@ impl AddrMan {
     /// book does not burn outbound slots on known-v1. If every remaining addr
     /// is incompatible, those are returned as last-resort.
     ///
-    /// After ranking, [`select_diverse`] skips netgroups of `occupied` (live
-    /// peers) while unused-group candidates remain, then fills.
+    /// [`select_diverse`] runs **per tier**: unused netgroups of `occupied`
+    /// (live peers) first, then fill. An occupied-group tier-0 addr always
+    /// beats an unused-group last-resort addr.
     pub fn take_dial_candidates(
         &self,
         max: usize,
@@ -422,10 +423,30 @@ impl AddrMan {
         if ranked.iter().any(|(_, _, incompat, _)| !*incompat) {
             ranked.retain(|(_, _, incompat, _)| !*incompat);
         }
-        let ranked: Vec<SocketAddr> = ranked.into_iter().map(|(_, _, _, a)| a).collect();
         let asmap = self.asmap.as_deref();
-        let occupied_groups: HashSet<u64> = occupied.iter().map(|a| netgroup(*a, asmap)).collect();
-        select_diverse(&ranked, max, &occupied_groups, |a| netgroup(a, asmap))
+        let mut occupied_groups: HashSet<u64> =
+            occupied.iter().map(|a| netgroup(*a, asmap)).collect();
+        let mut out = Vec::new();
+        for tier in 0u8..=2 {
+            if out.len() >= max {
+                break;
+            }
+            let slice: Vec<SocketAddr> = ranked
+                .iter()
+                .filter(|(t, _, _, _)| *t == tier)
+                .map(|(_, _, _, a)| *a)
+                .collect();
+            if slice.is_empty() {
+                continue;
+            }
+            let need = max - out.len();
+            let picked = select_diverse(&slice, need, &occupied_groups, |a| netgroup(a, asmap));
+            for &a in &picked {
+                occupied_groups.insert(netgroup(a, asmap));
+            }
+            out.extend(picked);
+        }
+        out
     }
 
     /// Round-robin-ish: take up to `max` peers starting at `offset` (legacy helper).
@@ -734,6 +755,24 @@ mod tests {
         let occupied = [slash16(1, 2, 9)];
         let got = am.take_dial_candidates(1, &HashSet::new(), &occupied);
         assert_eq!(got, vec![slash16(1, 3, 1)]);
+    }
+
+    #[test]
+    fn take_dial_occupied_group_tier0_beats_unused_group_last_resort() {
+        let mut am = AddrMan::new();
+        let good_same = slash16(1, 2, 1);
+        let lemon = slash16(9, 9, 1);
+        am.add(good_same);
+        am.add(lemon);
+        am.note_connected(good_same);
+        am.note_connect_failed(lemon, false);
+        let occupied = [slash16(1, 2, 9)];
+        let got = am.take_dial_candidates(1, &HashSet::new(), &occupied);
+        assert_eq!(
+            got,
+            vec![good_same],
+            "diversity must not pick a last-resort unused group ahead of a preferred occupied-group addr"
+        );
     }
 
     #[test]
