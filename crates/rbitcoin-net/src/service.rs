@@ -132,6 +132,7 @@ impl P2PNode {
             inbound_sem.clone(),
             shutdown.clone(),
             session_tasks.clone(),
+            false,
         );
 
         let follow_live = Arc::new(AtomicUsize::new(0));
@@ -179,7 +180,8 @@ impl P2PNode {
         })
     }
 
-    /// Bind an additional listen socket (Core multi-`-bind`, including `=onion`).
+    /// Bind an additional listen socket. Inbound sessions are tagged onion
+    /// (Core `-bind=…=onion`; extra `--listen` from the functional shim).
     pub async fn add_listen(&mut self, listen: SocketAddr) -> Result<SocketAddr, NetError> {
         let listener = TcpListener::bind(listen).await?;
         let local_addr = listener.local_addr()?;
@@ -194,6 +196,7 @@ impl P2PNode {
             self.inbound_sem.clone(),
             self.shutdown.clone(),
             self.session_tasks.clone(),
+            true,
         );
         self.tasks.push(accept_task);
         Ok(local_addr)
@@ -361,6 +364,7 @@ fn spawn_inbound_accept(
     inbound_sem: Arc<tokio::sync::Semaphore>,
     shutdown: Arc<AtomicBool>,
     session_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    inbound_onion: bool,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -403,10 +407,6 @@ fn spawn_inbound_accept(
                     let tip_rx = hub.subscribe_tips();
                     let peers = peers.clone();
                     let ua = user_agent.clone();
-                    let bind = match stream.local_addr() {
-                        Ok(a) => a,
-                        Err(_) => our,
-                    };
                     let sessions = session_tasks.clone();
                     let (ah_tx, ah_rx) =
                         tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
@@ -414,7 +414,15 @@ fn spawn_inbound_accept(
                         let _session_slot = permit;
                         let (_ver, reader, writer, wire, tcp_shutdown, sess) =
                             match inbound_connect_and_handshake(
-                                stream, magic, our, peer_addr, height, &ua, &peers, bind,
+                                stream,
+                                magic,
+                                our,
+                                peer_addr,
+                                height,
+                                &ua,
+                                &peers,
+                                our,
+                                inbound_onion,
                             )
                             .await
                             {

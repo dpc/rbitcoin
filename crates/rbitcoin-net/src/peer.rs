@@ -488,6 +488,7 @@ pub(crate) async fn inbound_connect_and_handshake(
     user_agent: &str,
     peers: &std::sync::Arc<crate::peers::PeerHub>,
     bind: SocketAddr,
+    inbound_onion: bool,
 ) -> Result<
     (
         VersionMessage,
@@ -507,6 +508,9 @@ pub(crate) async fn inbound_connect_and_handshake(
     let wire = crate::v2::WireBytes::new();
     let sess =
         peers.register_connecting(their_addr, bind, true, crate::peers::PeerConnType::Inbound);
+    if inbound_onion {
+        sess.set_inbound_onion();
+    }
     sess.attach_wire(wire.clone());
     sess.attach_tcp_shutdown(tcp_pre);
     let (mut reader, mut writer, wire, tcp_shutdown) =
@@ -562,6 +566,7 @@ pub(crate) async fn inbound_connect_and_handshake(
     };
     let id = sess.id;
     let wants_addrv2 = sess.wants_addrv2();
+    let inbound_onion = sess.inbound_onion();
     peers.unregister(id);
     let sess = peers.register_with_id(
         id,
@@ -574,6 +579,9 @@ pub(crate) async fn inbound_connect_and_handshake(
     sess.mark_handshake_complete();
     if wants_addrv2 {
         sess.set_wants_addrv2();
+    }
+    if inbound_onion {
+        sess.set_inbound_onion();
     }
     sess.note_recv("version", 100);
     sess.note_recv("verack", 0);
@@ -3020,8 +3028,11 @@ fn on_getaddr(
     let bind = session
         .map(|s| s.addrbind)
         .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
-    let addrs = match session.and_then(|s| s.peer_hub()) {
-        Some(ph) => ph.addr_response_for_bind(bind),
+    let addrs = match session {
+        Some(s) => match s.peer_hub() {
+            Some(ph) => ph.addr_response_for_bind(bind, s.inbound_onion()),
+            None => Vec::new(),
+        },
         None => Vec::new(),
     };
     let v2 = session.is_some_and(|s| s.wants_addrv2());
