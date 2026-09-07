@@ -42,7 +42,7 @@ use cadence::IbdLoopCadence;
 use dial::{
     alive_dial_addrs, apply_dial_result, dial_batch, dial_blocked_addrs,
     disconnect_relative_slow_block_peers, disconnect_stalled_block_peers, expire_addr_cooldown,
-    request_headers,
+    redial_want, request_headers,
 };
 use events::{
     apply_confirm_events, apply_peer_event, disconnect_all_peers,
@@ -106,7 +106,12 @@ pub(crate) const TIP_HOLE_MAX: usize = 32;
 /// hole=1, conf_blks=0, bq growing).
 pub(crate) const TIP_HOLE_MAX_PEERS: usize = 4;
 /// Cap on IBD dial pool after getaddr learning (seeds + discovered).
-pub(crate) const MAX_PEER_POOL: usize = 256;
+///
+/// Mainnet DNS seeds already return ~300–400 addrs. 256 refused all getaddr
+/// once the seed book was larger than the cap. 4096 holds seeds plus learned
+/// addrs; [`AddrMan::add_learned`] evicts incompatible/failed entries when
+/// full so discovery continues.
+pub(crate) const MAX_PEER_POOL: usize = 4096;
 /// Pending (framed, not Class A) longer than this → re-getdata.
 pub(crate) const PENDING_STALE: Duration = Duration::from_secs(45);
 /// Cap height walk for densify candidates per assign tick (safety; filled
@@ -707,7 +712,7 @@ pub async fn ibd_cancellable(
             && !peer_sess.book().is_empty()
             && last_redial.elapsed() >= redial_interval
         {
-            let want = (target - alive_n).min(8).max(1);
+            let want = redial_want(alive_n, target);
             let already = dial_blocked_addrs(&st.slots, &st.addr_cooldown, Instant::now());
             let occupied = alive_dial_addrs(&st.slots);
             info!(

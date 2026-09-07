@@ -4,7 +4,9 @@ use super::assign::clear_hash_inflight;
 use super::assign_plan::{
     remove_from_ordered, should_enqueue_header, want_headers_beyond_soft_cap,
 };
-use super::dial::{release_peer_block_work, request_headers, request_headers_from};
+use super::dial::{
+    note_dead_without_block_bytes, release_peer_block_work, request_headers, request_headers_from,
+};
 use super::exit::{
     header_lag_behind_peers, should_advance_locator_after_known_batch,
     should_log_empty_headers_lag, should_rerequest_headers_on_empty_lag,
@@ -455,6 +457,13 @@ pub(crate) fn apply_peer_event(
         PeerEvent::Dead { peer, reason } => {
             warn!("ibd: peer[{peer}] dead: {reason}");
             if let Some(s) = st.slots.iter().find(|s| s.id == peer) {
+                note_dead_without_block_bytes(
+                    peer_book,
+                    &mut st.addr_cooldown,
+                    s.addr,
+                    s.first_data_ms,
+                    Instant::now(),
+                );
                 if let Some(bps) = s.rate.bps() {
                     let first = s.first_data_ms;
                     let lat = first.saturating_sub(s.connected_ms);
@@ -473,20 +482,15 @@ pub(crate) fn inject_learned_addrs(
     local_addr: SocketAddr,
     from_peer: usize,
 ) {
-    if addrs.is_empty() || book.len() >= MAX_PEER_POOL {
+    if addrs.is_empty() {
         return;
     }
     let mut added = 0usize;
     for &a in addrs {
-        if book.len() >= MAX_PEER_POOL {
-            break;
-        }
         if a == local_addr || a.ip().is_unspecified() || a.port() == 0 {
             continue;
         }
-        let before = book.len();
-        book.add(a);
-        if book.len() > before {
+        if book.add_learned(a, MAX_PEER_POOL) {
             added += 1;
         }
     }

@@ -14,9 +14,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::asmap::AsMap;
 use crate::netgroup::{netgroup, select_diverse};
+
+/// Skip a recently dialed addr while any other candidate remains (Core `nLastTry`).
+pub(crate) const DIAL_ATTEMPT_RECENT: Duration = Duration::from_secs(10 * 60);
 
 /// Service bits we advertise and ask DNS seeds for (`NETWORK|WITNESS|P2P_V2` = `0x809`).
 pub fn required_seed_services() -> ServiceFlags {
@@ -272,6 +276,7 @@ pub struct AddrMan {
     order: Vec<SocketAddr>,
     by_addr: HashMap<SocketAddr, PeerFlags>,
     asmap: Option<Arc<AsMap>>,
+    last_attempt: HashMap<SocketAddr, Instant>,
 }
 
 impl AddrMan {
@@ -318,6 +323,45 @@ impl AddrMan {
         }
         self.by_addr.insert(addr, flags);
         self.order.push(addr);
+    }
+
+    /// Insert a newly learned addr, evicting a last-resort entry if `cap` is full.
+    ///
+    /// Returns true when `addr` is now in the book. Duplicates, and a full book
+    /// of only preferred/slow (not failed/incompat) addrs, return false.
+    pub fn add_learned(&mut self, addr: SocketAddr, cap: usize) -> bool {
+        if self.by_addr.contains_key(&addr) {
+            return false;
+        }
+        if cap == 0 {
+            return false;
+        }
+        if self.order.len() >= cap && !self.evict_for_learn() {
+            return false;
+        }
+        self.add(addr);
+        true
+    }
+
+    fn evict_for_learn(&mut self) -> bool {
+        let victim = self
+            .order
+            .iter()
+            .copied()
+            .find(|a| self.flags(a).is_incompatible())
+            .or_else(|| {
+                self.order
+                    .iter()
+                    .copied()
+                    .find(|a| self.flags(a).failed_last_connect())
+            });
+        let Some(addr) = victim else {
+            return false;
+        };
+        self.by_addr.remove(&addr);
+        self.last_attempt.remove(&addr);
+        self.order.retain(|a| *a != addr);
+        true
     }
 
     /// Merge another book into this one (flag bits OR'd for shared addrs).
@@ -369,6 +413,21 @@ impl AddrMan {
         }
     }
 
+    /// Record a dial attempt. Not persisted.
+    pub fn note_attempt(&mut self, addr: SocketAddr) {
+        self.note_attempt_at(addr, Instant::now());
+    }
+
+    pub(crate) fn note_attempt_at(&mut self, addr: SocketAddr, when: Instant) {
+        self.last_attempt.insert(addr, when);
+    }
+
+    fn recently_attempted(&self, addr: SocketAddr, now: Instant) -> bool {
+        self.last_attempt
+            .get(&addr)
+            .is_some_and(|&t| now.saturating_duration_since(t) < DIAL_ATTEMPT_RECENT)
+    }
+
     /// Dial failed. `incompatible` = no v2 / protocol reject; else network/timeout.
     pub fn note_connect_failed(&mut self, addr: SocketAddr, incompatible: bool) {
         self.add(addr);
@@ -398,8 +457,12 @@ impl AddrMan {
     /// book does not burn outbound slots on known-v1. If every remaining addr
     /// is incompatible, those are returned as last-resort.
     ///
-    /// After ranking, [`select_diverse`] skips netgroups of `occupied` (live
-    /// peers) while unused-group candidates remain, then fills.
+    /// [`select_diverse`] runs **per tier**: unused netgroups of `occupied`
+    /// (live peers) first, then fill. An occupied-group tier-0 addr always
+    /// beats an unused-group last-resort addr.
+    ///
+    /// Addrs attempted within [`DIAL_ATTEMPT_RECENT`] are omitted while any
+    /// other candidate remains.
     pub fn take_dial_candidates(
         &self,
         max: usize,
@@ -422,10 +485,37 @@ impl AddrMan {
         if ranked.iter().any(|(_, _, incompat, _)| !*incompat) {
             ranked.retain(|(_, _, incompat, _)| !*incompat);
         }
-        let ranked: Vec<SocketAddr> = ranked.into_iter().map(|(_, _, _, a)| a).collect();
+        let now = Instant::now();
+        if ranked
+            .iter()
+            .any(|(_, _, _, a)| !self.recently_attempted(*a, now))
+        {
+            ranked.retain(|(_, _, _, a)| !self.recently_attempted(*a, now));
+        }
         let asmap = self.asmap.as_deref();
-        let occupied_groups: HashSet<u64> = occupied.iter().map(|a| netgroup(*a, asmap)).collect();
-        select_diverse(&ranked, max, &occupied_groups, |a| netgroup(a, asmap))
+        let mut occupied_groups: HashSet<u64> =
+            occupied.iter().map(|a| netgroup(*a, asmap)).collect();
+        let mut out = Vec::new();
+        for tier in 0u8..=2 {
+            if out.len() >= max {
+                break;
+            }
+            let slice: Vec<SocketAddr> = ranked
+                .iter()
+                .filter(|(t, _, _, _)| *t == tier)
+                .map(|(_, _, _, a)| *a)
+                .collect();
+            if slice.is_empty() {
+                continue;
+            }
+            let need = max - out.len();
+            let picked = select_diverse(&slice, need, &occupied_groups, |a| netgroup(a, asmap));
+            for &a in &picked {
+                occupied_groups.insert(netgroup(a, asmap));
+            }
+            out.extend(picked);
+        }
+        out
     }
 
     /// Round-robin-ish: take up to `max` peers starting at `offset` (legacy helper).
@@ -734,6 +824,84 @@ mod tests {
         let occupied = [slash16(1, 2, 9)];
         let got = am.take_dial_candidates(1, &HashSet::new(), &occupied);
         assert_eq!(got, vec![slash16(1, 3, 1)]);
+    }
+
+    #[test]
+    fn take_dial_occupied_group_tier0_beats_unused_group_last_resort() {
+        let mut am = AddrMan::new();
+        let good_same = slash16(1, 2, 1);
+        let lemon = slash16(9, 9, 1);
+        am.add(good_same);
+        am.add(lemon);
+        am.note_connected(good_same);
+        am.note_connect_failed(lemon, false);
+        let occupied = [slash16(1, 2, 9)];
+        let got = am.take_dial_candidates(1, &HashSet::new(), &occupied);
+        assert_eq!(
+            got,
+            vec![good_same],
+            "diversity must not pick a last-resort unused group ahead of a preferred occupied-group addr"
+        );
+    }
+
+    #[test]
+    fn take_dial_skips_recent_attempt_while_others_remain() {
+        let mut am = AddrMan::new();
+        am.add(addr(1));
+        am.add(addr(2));
+        am.note_attempt(addr(1));
+        let got = am.take_dial_candidates(2, &HashSet::new(), &[]);
+        assert_eq!(got, vec![addr(2)]);
+
+        let mut only = AddrMan::new();
+        only.add(addr(1));
+        only.note_attempt(addr(1));
+        assert_eq!(
+            only.take_dial_candidates(1, &HashSet::new(), &[]),
+            vec![addr(1)],
+            "sole remaining addr is still dialed even if recently attempted"
+        );
+
+        let mut aged = AddrMan::new();
+        aged.add(addr(1));
+        aged.add(addr(2));
+        let old = Instant::now()
+            .checked_sub(DIAL_ATTEMPT_RECENT + Duration::from_secs(1))
+            .expect("clock");
+        aged.note_attempt_at(addr(1), old);
+        let got = aged.take_dial_candidates(2, &HashSet::new(), &[]);
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&addr(1)));
+        assert!(got.contains(&addr(2)));
+    }
+
+    #[test]
+    fn add_learned_evicts_failed_when_at_cap() {
+        let mut am = AddrMan::new();
+        for i in 1..=3 {
+            am.add(addr(i));
+            am.note_connect_failed(addr(i), i == 1);
+        }
+        assert!(am.add_learned(addr(9), 3));
+        assert_eq!(am.len(), 3);
+        assert!(am.entry(&addr(9)).is_some());
+        assert!(
+            am.entry(&addr(1)).is_none(),
+            "incompatible is evicted before failed-last-connect"
+        );
+    }
+
+    #[test]
+    fn add_learned_keeps_good_when_full() {
+        let mut am = AddrMan::new();
+        for i in 1..=3 {
+            am.add(addr(i));
+            am.note_connected(addr(i));
+        }
+        assert!(!am.add_learned(addr(9), 3));
+        assert_eq!(am.len(), 3);
+        assert!(am.entry(&addr(9)).is_none());
+        assert!(!am.add_learned(addr(1), 3));
     }
 
     #[test]

@@ -220,6 +220,7 @@ fn classify_dial_err(e: &NetError) -> DialFailKind {
 pub(crate) struct DialBatchResult {
     pub slots: Vec<PeerSlot>,
     pub failed: Vec<(SocketAddr, DialFailKind)>,
+    pub attempted: Vec<SocketAddr>,
 }
 
 /// Dial up to `count` ranked candidates from `book`. `already` is exclude
@@ -241,6 +242,7 @@ pub(crate) async fn dial_batch(
     let mut out = DialBatchResult {
         slots: Vec::new(),
         failed: Vec::new(),
+        attempted: Vec::new(),
     };
     if count == 0 || book.is_empty() {
         return out;
@@ -253,6 +255,7 @@ pub(crate) async fn dial_batch(
     };
 
     let candidates = book.take_dial_candidates(count, &already, occupied);
+    out.attempted = candidates.clone();
     let mut handles = Vec::new();
     for addr in candidates {
         if cancelled() {
@@ -307,8 +310,24 @@ pub(crate) async fn dial_batch(
     out
 }
 
+/// How many new dials to start when below `target` live peers.
+///
+/// At least 2 so a single lemon cannot occupy the only spare slot forever;
+/// at most 8 to bound burst. 0 when already at/above target.
+pub(crate) fn redial_want(alive: usize, target: usize) -> usize {
+    let target = target.max(1);
+    if alive >= target {
+        0
+    } else {
+        (target - alive).clamp(2, 8)
+    }
+}
+
 /// Apply dial successes / failures to the peer book.
 pub(crate) fn apply_dial_result(book: &mut AddrMan, result: &DialBatchResult) {
+    for &addr in &result.attempted {
+        book.note_attempt(addr);
+    }
     for s in &result.slots {
         book.note_connected(s.addr);
     }
@@ -432,6 +451,21 @@ pub(crate) fn alive_dial_addrs(slots: &[PeerSlot]) -> Vec<SocketAddr> {
 
 pub(crate) fn expire_addr_cooldown(cooldown: &mut HashMap<SocketAddr, Instant>, now: Instant) {
     cooldown.retain(|_, until| *until > now);
+}
+
+/// Handshake with no block bytes: last-resort + stall cooldown (not a stall disconnect).
+pub(crate) fn note_dead_without_block_bytes(
+    book: &mut AddrMan,
+    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
+    addr: SocketAddr,
+    first_data_ms: u64,
+    now: Instant,
+) {
+    if first_data_ms != 0 {
+        return;
+    }
+    book.note_connect_failed(addr, false);
+    addr_cooldown.insert(addr, now + STALL_ADDR_COOLDOWN);
 }
 
 /// One stall rule: if a peer has outstanding block getdata and no **block**
@@ -631,6 +665,33 @@ mod tests {
         assert!(!cooldown.contains_key(&addr(3)));
     }
 
+    #[test]
+    fn handshake_then_die_is_failed_and_cooled() {
+        let mut book = AddrMan::new();
+        let lemon = addr(4);
+        book.note_connected(lemon);
+        let mut cooldown = HashMap::new();
+        let now = Instant::now();
+        note_dead_without_block_bytes(&mut book, &mut cooldown, lemon, 0, now);
+        assert!(
+            book.flags(&lemon).failed_last_connect(),
+            "no block bytes → last-resort"
+        );
+        assert_eq!(book.flags(&lemon).dial_tier(), 2);
+        assert!(cooldown.contains_key(&lemon));
+        let blocked = dial_blocked_addrs(&[], &cooldown, now);
+        assert!(blocked.contains(&lemon));
+
+        let good = addr(5);
+        book.note_connected(good);
+        note_dead_without_block_bytes(&mut book, &mut cooldown, good, 42, now);
+        assert!(
+            !book.flags(&good).failed_last_connect(),
+            "peer that sent block bytes keeps its connected rank"
+        );
+        assert!(!cooldown.contains_key(&good));
+    }
+
     fn samp(id: usize, bps: u64, inflight: bool) -> RelativeSlowSample {
         RelativeSlowSample {
             peer_id: id,
@@ -801,11 +862,30 @@ mod tests {
                 (bad, DialFailKind::Network),
                 (inc, DialFailKind::Incompatible),
             ],
+            attempted: vec![good, bad, inc],
         };
         apply_dial_result(&mut book, &result);
         assert!(book.flags(&good).has_connected());
         assert!(book.flags(&bad).failed_last_connect());
         assert!(book.flags(&inc).is_incompatible());
+        book.add(addr(8));
+        let got = book.take_dial_candidates(8, &HashSet::new(), &[]);
+        assert!(
+            !got.contains(&good) && !got.contains(&bad) && !got.contains(&inc),
+            "recently attempted addrs skipped while another remains: {got:?}"
+        );
+        assert_eq!(got, vec![addr(8)]);
+    }
+
+    #[test]
+    fn redial_want_at_least_two_when_short() {
+        assert_eq!(redial_want(16, 16), 0);
+        assert_eq!(redial_want(15, 16), 2);
+        assert_eq!(redial_want(14, 16), 2);
+        assert_eq!(redial_want(9, 16), 7);
+        assert_eq!(redial_want(8, 16), 8);
+        assert_eq!(redial_want(0, 16), 8);
+        assert_eq!(redial_want(0, 1), 2);
     }
 
     #[test]
