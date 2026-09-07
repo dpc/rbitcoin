@@ -30,6 +30,11 @@ pub enum NetError {
     SideBlock,
     /// Parent header is not on our chain.
     UnknownParent,
+    /// `accept_branch` connect failed at this hash (only this hash is invalid).
+    ConnectFailed {
+        hash: [u8; 32],
+        msg: String,
+    },
 }
 
 impl fmt::Display for NetError {
@@ -53,6 +58,7 @@ impl fmt::Display for NetError {
             NetError::BadPrev => f.write_str("consensus: unexpected previous header"),
             NetError::SideBlock => f.write_str("protocol: side block; use accept_branch for reorg"),
             NetError::UnknownParent => f.write_str("protocol: unknown parent"),
+            NetError::ConnectFailed { msg, .. } => write!(f, "consensus: {msg}"),
         }
     }
 }
@@ -78,6 +84,14 @@ impl NetError {
             rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
             rbitcoin_consensus::ConsensusError::BadPrev => NetError::BadPrev,
             other => NetError::Consensus(other.to_string()),
+        }
+    }
+
+    /// Hash of the block that failed connect, when known.
+    pub fn failing_block_hash(&self) -> Option<[u8; 32]> {
+        match self {
+            NetError::ConnectFailed { hash, .. } => Some(*hash),
+            _ => None,
         }
     }
 }
@@ -115,6 +129,13 @@ mod tests {
                 "protocol: side block; use accept_branch for reorg",
             ),
             (NetError::UnknownParent, "protocol: unknown parent"),
+            (
+                NetError::ConnectFailed {
+                    hash: [1u8; 32],
+                    msg: "bad spend".into(),
+                },
+                "consensus: bad spend",
+            ),
         ];
         for (err, needle) in cases {
             let s = err.to_string();

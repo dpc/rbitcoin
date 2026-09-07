@@ -999,6 +999,7 @@ pub fn verdict_from_accept(
         Err(
             NetError::Protocol(_)
             | NetError::Consensus(_)
+            | NetError::ConnectFailed { .. }
             | NetError::Mutated(_)
             | NetError::BadPrev
             | NetError::SideBlock
@@ -2126,6 +2127,14 @@ mod tests {
         );
         assert_eq!(
             verdict_from_accept(Err(NetError::Consensus("bad-txnmrklroot".into()))).unwrap(),
+            DiffVerdict::Reject
+        );
+        assert_eq!(
+            verdict_from_accept(Err(NetError::ConnectFailed {
+                hash: [0u8; 32],
+                msg: "bad-txns-inputs-missingorspent".into(),
+            }))
+            .unwrap(),
             DiffVerdict::Reject
         );
         let probe = rbitcoin_store::StoreError::Corrupt("address head probe exhausted on insert");

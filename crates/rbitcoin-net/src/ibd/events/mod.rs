@@ -177,7 +177,7 @@ fn try_enqueue_ordered_header(
         st.known_headers.insert(hash);
         return false;
     }
-    if st.body.is_rejected(&hash) {
+    if st.body.is_rejected(&hash) || st.reorg.invalid.contains(hash.to_byte_array()) {
         return false;
     }
     let prev_ok = st.known_headers.contains(&prev)
@@ -524,6 +524,7 @@ pub(crate) fn apply_confirm_events(
         match ev {
             super::confirm::ConfirmEvent::Accepted { hash } => {
                 *last_progress = Instant::now();
+                st.confirm_stuck_since = None;
                 remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
                 st.body.mark_archived(hash);
                 let tip = hub.tip_height().unwrap_or(0);
@@ -568,307 +569,218 @@ pub(crate) fn apply_confirm_reject(
         warn!("ibd: confirm reject ignored zero-hash @{height}: {err}");
         return;
     }
-    let soft_wire = class.is_soft();
-    let bad_prev = class == ConfirmRejectClass::BadPrev;
+    let class = if err.contains("parent create_fk unresolved")
+        || err.contains("spend annotate missing pin denserels")
+    {
+        ConfirmRejectClass::EngineFault
+    } else if class == ConfirmRejectClass::ConsensusInvalid {
+        if let Some(h) = hub {
+            class.trust_consensus(h, hash)
+        } else {
+            class
+        }
+    } else {
+        class
+    };
+    if class.is_soft() {
+        apply_soft_wire_reject(st, height, hash, err, query, hub);
+        return;
+    }
+    match class {
+        ConfirmRejectClass::Cancelled => {
+            warn!("ibd: confirm reject cancelled @{height} {hash}: {err}");
+        }
+        ConfirmRejectClass::SoftWire => {}
+        ConfirmRejectClass::Cascade => {
+            apply_cascade_reject(st, height, hash, err, query);
+        }
+        ConfirmRejectClass::EngineFault => {
+            apply_engine_fault_reject(st, height, hash, err, query);
+        }
+        ConfirmRejectClass::ConsensusInvalid => {
+            apply_consensus_invalid_reject(st, height, hash, err, query, hub);
+        }
+    }
+}
+
+fn apply_soft_wire_reject(
+    st: &mut IbdWorkState,
+    height: u32,
+    hash: BlockHash,
+    err: &str,
+    query: Option<&rbitcoin_query::Query>,
+    hub: Option<&crate::chain::ChainHub>,
+) {
+    let bad_prev = super::reorg::is_bad_prev_err(err);
     if bad_prev {
         if let Some(q) = query {
             q.set_lookup_taken_hi(hub.and_then(|h| h.tip_height()));
         }
         st.headers_done = false;
     }
-    if soft_wire {
-        if bad_prev {
-            if let Some(h) = hub {
-                st.reorg
-                    .register_explore(std::iter::empty::<bitcoin::BlockHash>(), Some(hash));
-                let rewound = super::reorg::maybe_rewind_to_best_work(st, h).unwrap_or(false);
-                if rewound {
-                    return;
-                }
-                if st.height_to_hash.get(&height) == Some(&hash) {
-                    st.height_to_hash.remove(&height);
-                    remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
-                }
-            } else if st.height_to_hash.get(&height) == Some(&hash) {
+    if bad_prev {
+        if let Some(h) = hub {
+            st.reorg
+                .register_explore(std::iter::empty::<bitcoin::BlockHash>(), Some(hash));
+            let rewound = super::reorg::maybe_rewind_to_best_work(st, h).unwrap_or(false);
+            if rewound {
+                return;
+            }
+            if st.height_to_hash.get(&height) == Some(&hash) {
                 st.height_to_hash.remove(&height);
                 remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
             }
+        } else if st.height_to_hash.get(&height) == Some(&hash) {
+            st.height_to_hash.remove(&height);
+            remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
         }
-        clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
-        if let Some(q) = query {
-            let _ = q.block_queue_dequeue_height(height);
-            if class == ConfirmRejectClass::SoftMerkle {
-                match q.clear_archived_body(hash.as_byte_array()) {
-                    Ok(true) => warn!(
-                        "ibd: cleared corrupt Class A body for {hash} @{height} (merkle mismatch)"
-                    ),
-                    Ok(false) => {}
-                    Err(e) => warn!("ibd: clear Class A body {hash} @{height}: {e}"),
-                }
+    }
+    clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
+    if let Some(q) = query {
+        let _ = q.block_queue_dequeue_height(height);
+        if err.contains("merkle root mismatch")
+            || err.contains("bad-txnmrklroot")
+            || err.contains("witness commitment")
+        {
+            match q.clear_archived_body(hash.as_byte_array()) {
+                Ok(true) => warn!(
+                    "ibd: cleared corrupt Class A body for {hash} @{height} (merkle mismatch)"
+                ),
+                Ok(false) => {}
+                Err(e) => warn!("ibd: clear Class A body {hash} @{height}: {e}"),
             }
         }
-        if !bad_prev {
-            st.body.mark_missing(hash);
-            st.body.demote_known(hash);
-            warn!("ibd: confirm reject soft @{height} {hash}: {err} (re-getdata, not blacklisted)");
-        } else {
-            warn!(
-                "ibd: confirm reject BadPrev @{height} {hash}: {err} (slot evicted, not re-get same hash)"
-            );
-        }
+    }
+    if !bad_prev {
+        st.body.mark_missing(hash);
+        st.body.demote_known(hash);
+        warn!("ibd: confirm reject soft @{height} {hash}: {err} (re-getdata, not blacklisted)");
+    } else {
+        warn!(
+            "ibd: confirm reject BadPrev @{height} {hash}: {err} (slot evicted, not re-get same hash)"
+        );
+    }
+}
+
+fn apply_cascade_reject(
+    st: &mut IbdWorkState,
+    height: u32,
+    hash: BlockHash,
+    err: &str,
+    query: Option<&rbitcoin_query::Query>,
+) {
+    if let Some(q) = query {
+        let _ = q.block_queue_dequeue_height(height);
+    }
+    clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
+    note_confirm_stuck(st);
+    warn!("ibd: confirm reject cascade @{height} {hash}: {err} (requeue, not blacklisted)");
+}
+
+fn apply_engine_fault_reject(
+    st: &mut IbdWorkState,
+    height: u32,
+    hash: BlockHash,
+    err: &str,
+    query: Option<&rbitcoin_query::Query>,
+) {
+    if let Some(q) = query {
+        let _ = q.block_queue_dequeue_height(height);
+    }
+    clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
+    if st.engine_fault_seen.contains(&hash) {
+        st.halt = Some(format!("engine fault repeated @{height} {hash}: {err}"));
+        warn!(
+            "ibd: engine fault halt @{height} {hash}: {err} (second occurrence, not blacklisted)"
+        );
         return;
     }
+    st.engine_fault_seen.insert(hash);
+    note_confirm_stuck(st);
+    warn!(
+        "ibd: confirm reject engine-fault @{height} {hash}: {err} (requeue once, not blacklisted)"
+    );
+}
+
+fn apply_consensus_invalid_reject(
+    st: &mut IbdWorkState,
+    height: u32,
+    hash: BlockHash,
+    err: &str,
+    query: Option<&rbitcoin_query::Query>,
+    hub: Option<&crate::chain::ChainHub>,
+) {
     if let Some(q) = query {
         let _ = q.block_queue_dequeue_height(height);
     }
     st.body.mark_rejected(hash);
+    st.reorg.invalid.mark(hash.to_byte_array());
+    if st.height_to_hash.get(&height) == Some(&hash) {
+        st.height_to_hash.remove(&height);
+    }
     remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
     clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed) + 1;
     if n <= 8 || n.is_multiple_of(50) {
-        warn!("ibd: confirm reject applied {hash} @{height}: {err} (blacklisted, count={n})");
+        warn!("ibd: confirm reject applied {hash} @{height}: {err} (consensus-invalid, count={n})");
     }
-}
-
-/// True if reorg gather can obtain `hash` without a Class A reconstruct probe.
-///
-/// Hot path gate for exploration: do **not** call `reconstruct_block_by_hash`
-/// here (store IO on hundreds of ordered hashes pegged one core on mainnet).
-/// BQ readiness is **by hash** only — height first-wins of a different body is
-/// not ready (same contract as `claim_ready` / densify `need_hash_at`).
-fn reorg_body_ready_cheap(
-    st: &IbdWorkState,
-    hub: &crate::chain::ChainHub,
-    hash: BlockHash,
-) -> bool {
-    use bitcoin::hashes::Hash as _;
-    if st.reorg.get_held(&hash).is_some() {
-        return true;
-    }
-    if hub.has_block(&hash) {
-        return true;
-    }
-    hub.query.block_queue_has_hash(&hash.to_byte_array()) || st.body.is_known_archived(&hash)
-}
-
-/// Load a full block for `hash` from reorg held map, BQ-by-hash, or Class A.
-///
-/// Order: held → BQ (cheap RAM) → Class A reconstruct (store IO last).
-fn load_reorg_body(
-    st: &IbdWorkState,
-    hub: &crate::chain::ChainHub,
-    hash: BlockHash,
-) -> Option<bitcoin::Block> {
-    use bitcoin::consensus::deserialize;
-    use bitcoin::hashes::Hash as _;
-    if let Some(b) = st.reorg.get_held(&hash) {
-        return Some(b);
-    }
-    if let Ok(Some(wire)) = hub.query.block_queue_payload_by_hash(&hash.to_byte_array()) {
-        if !wire.is_empty() {
-            if let Ok(b) = deserialize::<bitcoin::Block>(&wire) {
-                return Some(b);
-            }
+    if let Some(h) = hub {
+        for t in super::reorg::competing_valid_header_tips(st, h) {
+            st.reorg
+                .register_explore(std::iter::empty::<bitcoin::BlockHash>(), Some(t));
         }
-    }
-    if let Ok(Some(b)) = hub.query.reconstruct_block_by_hash(&hash.to_byte_array()) {
-        return Some(b);
-    }
-    None
-}
-
-/// Proactive most-work apply for exploration tips (seeded sibling fork) when
-/// bodies are available via held map, Class A, or BQ-by-hash — not held-only.
-/// Tip+1 extensions never enter held on BlockFramed (only height≤tip siblings),
-/// so apply must load BQ/Class A the same way BadPrev gather does.
-///
-/// **Hot path:** called from every mid `BlockFramed`. Must **not** probe Class A
-/// / `load_reorg_body` for the full ordered path (mainnet ~180 hashes → multi-
-/// second drain, 1-core peg, status delayed ~minute). Gate on explore_need
-/// cheap readiness, then load only need + tip→LCA walks.
-fn try_apply_exploration(st: &mut IbdWorkState, hub: &crate::chain::ChainHub) -> bool {
-    use super::reorg::try_apply_best_candidate;
-    use crate::chain::AcceptOutcome;
-    use rbitcoin_log::info;
-    use std::collections::HashMap;
-
-    let tips: Vec<BlockHash> = st.reorg.explore_tips().to_vec();
-    if tips.is_empty() {
-        return false;
-    }
-
-    let need: Vec<BlockHash> = st.reorg.explore_need_hashes().to_vec();
-    for &h in &need {
-        if !reorg_body_ready_cheap(st, hub, h) {
-            return false;
+        let rewound = super::reorg::maybe_rewind_to_best_work(st, h).unwrap_or(false);
+        if !rewound {
+            super::path::seed_work_path_from_store(st, h);
         }
-    }
-
-    let mut bodies: HashMap<BlockHash, bitcoin::Block> = HashMap::new();
-    for &h in &need {
-        let Some(b) = load_reorg_body(st, hub, h) else {
-            return false;
+        super::path::plant_valid_tip_child(st, h);
+        let expect = if h.tip_height().is_none() {
+            0u32
+        } else {
+            h.tip_height().unwrap_or(0).saturating_add(1)
         };
-        st.reorg.hold_body(b.clone());
-        bodies.insert(h, b);
-    }
-
-    for &tip in &tips {
-        let mut cur = tip;
-        for _ in 0..10_000 {
-            if hub.has_block(&cur) {
-                break;
-            }
-            if !bodies.contains_key(&cur) {
-                let Some(b) = load_reorg_body(st, hub, cur) else {
-                    break;
-                };
-                st.reorg.hold_body(b.clone());
-                let prev = b.header.prev_blockhash;
-                bodies.insert(cur, b);
-                if hub.has_block(&prev) || prev.to_byte_array() == [0u8; 32] {
-                    break;
-                }
-                cur = prev;
-                continue;
-            }
-            let prev = bodies[&cur].header.prev_blockhash;
-            if hub.has_block(&prev) || prev.to_byte_array() == [0u8; 32] {
-                break;
-            }
-            cur = prev;
+        let next_ok = st.height_to_hash.get(&expect).is_some_and(|nh| {
+            !st.reorg.invalid.contains(nh.to_byte_array()) && !st.body.is_rejected(nh)
+        });
+        if rewound || next_ok {
+            st.confirm_stuck_since = None;
+            return;
         }
     }
+    note_confirm_stuck(st);
+}
 
-    if bodies.is_empty() {
-        return false;
+fn note_confirm_stuck(st: &mut IbdWorkState) {
+    if st.confirm_stuck_since.is_none() {
+        st.confirm_stuck_since = Some(Instant::now());
     }
-    let losing = hub.tip_hash();
-    let apply_tip = tips.first().copied();
-    match try_apply_best_candidate(hub, &bodies, &tips, &mut st.reorg) {
-        Ok(Some(AcceptOutcome::Accepted { height: new_h })) => {
-            info!("ibd: most-work reorg after exploration gather → tip_h={new_h}");
-            let tip = hub.tip_hash().or(apply_tip);
-            if let Some(tip) = tip {
-                on_reorg_accepted(st, hub, tip, bodies.keys().copied(), losing);
-            } else {
-                for h in bodies.keys() {
-                    st.body.mark_archived(*h);
-                }
-                st.reorg.clear_awaiting();
-                st.reorg.clear_explore();
-            }
+}
+
+/// Proactive most-work apply: header-work rewind only (no gathered `accept_branch`).
+fn try_apply_exploration(st: &mut IbdWorkState, hub: &crate::chain::ChainHub) -> bool {
+    match super::reorg::maybe_rewind_to_best_work(st, hub) {
+        Ok(true) => {
+            rbitcoin_log::info!(
+                "ibd: most-work header rewind after exploration (no accept_branch)"
+            );
             true
         }
-        Ok(_) => false,
+        Ok(false) => false,
         Err(e) => {
-            warn!("ibd: exploration reorg failed: {e}");
+            warn!("ibd: exploration rewind failed: {e}");
             false
         }
     }
 }
 
-/// Scrub IBD state after a successful most-work reorg apply (awaiting or explore).
-fn on_reorg_accepted(
-    st: &mut IbdWorkState,
-    hub: &crate::chain::ChainHub,
-    applied_tip: BlockHash,
-    body_hashes: impl IntoIterator<Item = BlockHash>,
-    losing_tip: Option<BlockHash>,
-) {
-    if let Some(ht) = st.hash_height.get(&applied_tip).copied() {
-        let _ = hub.query.block_queue_dequeue_height(ht);
-    }
-    clear_hash_inflight(&mut st.slots, &mut st.inflight, applied_tip);
-    for h in body_hashes {
-        st.body.mark_archived(h);
-    }
-    if let Some(l) = losing_tip {
-        remove_from_ordered(&mut st.ordered, &mut st.ordered_set, l);
-    }
-    if let Some(h) = hub.tip_height() {
-        st.clear_path_above(h);
-    }
-    st.reorg.clear_awaiting();
-    st.reorg.clear_explore();
-}
-
-/// After a side-branch body is held (or BQ has mids), try to finish an awaiting reorg.
+/// After a side-branch body is held (or BQ has mids), try to finish an awaiting reorg
+/// by header-work rewind (never `accept_branch` of gathered bodies).
 pub(crate) fn try_complete_awaiting_reorg(
     st: &mut IbdWorkState,
     hub: &crate::chain::ChainHub,
 ) -> bool {
-    use super::reorg::{header_hashes_to_best_ancestor, try_apply_best_candidate};
-    use crate::chain::AcceptOutcome;
-    use rbitcoin_log::info;
-    use std::collections::HashMap;
-
-    if try_apply_exploration(st, hub) {
-        return true;
-    }
-
-    let Some(awaiting) = st.reorg.awaiting().cloned() else {
-        return false;
-    };
-    let tip_hash = awaiting.held_tip.block_hash();
-    let held_tip = awaiting.held_tip.clone();
-    let mut bodies: HashMap<BlockHash, bitcoin::Block> = HashMap::new();
-    st.reorg.hold_body(held_tip.clone());
-    bodies.insert(tip_hash, held_tip.clone());
-
-    let mut missing = Vec::new();
-    let mut load = |h: BlockHash| {
-        if bodies.contains_key(&h) {
-            return;
-        }
-        if let Some(b) = load_reorg_body(st, hub, h) {
-            st.reorg.hold_body(b.clone());
-            bodies.insert(h, b);
-        } else {
-            if !missing.contains(&h) {
-                missing.push(h);
-            }
-            st.body.mark_missing(h);
-        }
-    };
-    if let Ok(path) = header_hashes_to_best_ancestor(hub, tip_hash) {
-        for h in path {
-            if h != tip_hash {
-                load(h);
-            }
-        }
-    }
-    for h in &awaiting.need {
-        load(*h);
-    }
-    if !missing.is_empty() {
-        st.reorg.set_awaiting(held_tip, missing);
-        return false;
-    }
-    let losing = hub.tip_hash();
-    match try_apply_best_candidate(hub, &bodies, &[tip_hash], &mut st.reorg) {
-        Ok(Some(AcceptOutcome::Accepted { height: new_h })) => {
-            info!("ibd: most-work reorg completed after body gather → tip_h={new_h}");
-            on_reorg_accepted(st, hub, tip_hash, bodies.keys().copied(), losing);
-            true
-        }
-        Ok(None) => {
-            warn!(
-                "ibd: awaiting reorg not applied (no candidate; bodies={})",
-                bodies.len()
-            );
-            false
-        }
-        Ok(other) => {
-            warn!("ibd: awaiting reorg not applied: {other:?}");
-            false
-        }
-        Err(e) => {
-            warn!("ibd: awaiting reorg failed: {e}");
-            false
-        }
-    }
+    try_apply_exploration(st, hub)
 }
 
 pub(crate) fn parent_height(

@@ -33,6 +33,77 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+/// After this long with no confirm progress and nothing useful to fetch, stop getdata.
+pub(crate) const STUCK_GATE_AFTER: Duration = Duration::from_secs(30);
+
+/// True when confirm cannot advance and there is no valid body still worth fetching.
+pub(crate) fn download_gate_closed(st: &IbdWorkState, hub: &ChainHub) -> bool {
+    let Some(since) = st.confirm_stuck_since else {
+        return false;
+    };
+    if since.elapsed() < STUCK_GATE_AFTER {
+        return false;
+    }
+    !need_any_valid_body_download(st, hub)
+}
+
+fn need_any_valid_body_download(st: &IbdWorkState, hub: &ChainHub) -> bool {
+    use bitcoin::hashes::Hash as _;
+    let tip = hub.tip_height().unwrap_or(0);
+    let path_lo = if hub.tip_height().is_none() {
+        0u32
+    } else {
+        tip.saturating_add(1)
+    };
+    let occupant_dead = st
+        .height_to_hash
+        .get(&path_lo)
+        .is_some_and(|h| st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(h));
+    for (&h, &ht) in &st.hash_height {
+        if ht != path_lo {
+            continue;
+        }
+        if st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(&h) {
+            continue;
+        }
+        if hub.has_block(&h)
+            || st.body.is_known_archived(&h)
+            || hub.query.block_queue_has_hash(&h.to_byte_array())
+        {
+            continue;
+        }
+        return true;
+    }
+    if occupant_dead {
+        return false;
+    }
+    for ht in path_lo..=path_lo.saturating_add(CONTIG_DENSIFY_AHEAD) {
+        let Some(&h) = st.height_to_hash.get(&ht) else {
+            break;
+        };
+        if st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(&h) {
+            continue;
+        }
+        if hub.has_block(&h) {
+            continue;
+        }
+        if st.body.is_known_archived(&h) || hub.query.block_queue_has_hash(&h.to_byte_array()) {
+            continue;
+        }
+        return true;
+    }
+    for h in st.reorg.need_getdata() {
+        if st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(&h) {
+            continue;
+        }
+        if hub.has_block(&h) || hub.query.block_queue_has_hash(&h.to_byte_array()) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 /// How much assign work to do this call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AssignDepth {
@@ -135,6 +206,21 @@ pub(crate) fn assign_work_ordered(
     let mut issued = 0u64;
     let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
     if alive.is_empty() {
+        return;
+    }
+
+    if download_gate_closed(st, hub) {
+        static GATE_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = GATE_LOG.fetch_add(1, Ordering::Relaxed) + 1;
+        if n <= 3 || n.is_multiple_of(50) {
+            rbitcoin_log::warn!(
+                "ibd: download gate closed (confirm stuck {:?}, no valid body to fetch, n={n})",
+                st.confirm_stuck_since
+                    .map(|t| t.elapsed())
+                    .unwrap_or_default()
+            );
+        }
+        finish_assign(loop_stats, t0, 0);
         return;
     }
 
@@ -438,11 +524,15 @@ fn bq_wire_for_hash(hub: &ChainHub, ht: u32, want: BlockHash) -> BqWireAt {
 /// all pending first left densify-ahead heights frozen (tip advances past tip-batch
 /// cover, soft filled, conf stuck on a later hole).
 fn need_hash_at(st: &mut IbdWorkState, hub: &ChainHub, ht: u32) -> Option<BlockHash> {
+    use bitcoin::hashes::Hash as _;
     let &h = st.height_to_hash.get(&ht)?;
     if super::progress::claim_ready(hub, &mut st.body, ht, &h) {
         return None;
     }
-    if st.inflight.contains_key(&h) || st.body.is_rejected(&h) {
+    if st.inflight.contains_key(&h)
+        || st.body.is_rejected(&h)
+        || st.reorg.invalid.contains(h.to_byte_array())
+    {
         return None;
     }
     // Class A seed: densify skips re-walk; tip-hole cover re-gets tip batch.
@@ -1034,6 +1124,25 @@ mod tests {
             dir,
             ChainHub::new(q, ChainParams::regtest(), Milestone::NONE),
         )
+    }
+
+    #[test]
+    fn download_gate_stops_getdata_when_tip_plus_one_unconfirmable() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(vec![dummy_slot(0)], hub.tip_hash(), hub.tip_height());
+        plant_work_path(&mut st, 1, 20);
+        st.body.mark_rejected(h(1));
+        st.confirm_stuck_since = Instant::now().checked_sub(Duration::from_secs(60));
+        let stats = LoopStats::default();
+        let cfg = IbdConfig::for_test();
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assert!(
+            st.inflight.is_empty(),
+            "gate must issue no getdata while tip+1 is unconfirmable; inflight={:?}",
+            st.inflight.keys().collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

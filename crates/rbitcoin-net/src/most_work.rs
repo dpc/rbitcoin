@@ -148,7 +148,8 @@ pub struct WorkCandidate {
 pub enum SelectOutcome {
     /// No non-invalid candidate has strictly more work than the best tip path.
     IgnoreWeaker,
-    /// Prefer this candidate's header path (still must pass `accept_branch`).
+    /// Prefer this candidate's header path (still must pass linear confirm
+    /// after a header-work rewind; `accept_branch` is tip-follow only).
     Switch {
         lca_hash: [u8; 32],
         lca_height: u32,

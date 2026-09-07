@@ -1167,6 +1167,12 @@ fn thr_stats_all_stages_and_note_wire_prefer() {
         let g = feed.inner.lock().unwrap();
         assert!(g.ready.get(&12).unwrap().1.is_some());
     }
+    feed.clear();
+    {
+        let g = feed.inner.lock().unwrap();
+        assert!(g.ready.is_empty());
+        assert!(g.inflight.is_empty());
+    }
 
     // pack_stop_after edges.
     assert!(!super::pack_stop_after(0, 0, 8000, 144));
@@ -1181,4 +1187,56 @@ fn thr_stats_all_stages_and_note_wire_prefer() {
     assert_eq!(super::write_drain_max_parts(4), 4);
     assert_eq!(super::write_drain_max_parts(3), 3);
     assert_eq!(super::write_drain_max_parts(0), 1);
+}
+
+#[test]
+fn write_batch_is_stale_after_tip_moves() {
+    use super::write_batch_is_stale;
+    use crate::chain::ChainHub;
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::Query;
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "rbitcoin-write-stale-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    assert!(!write_batch_is_stale(&hub, 1), "tip+1 is live");
+    assert!(
+        write_batch_is_stale(&hub, 0),
+        "already-confirmed height is stale"
+    );
+    assert!(
+        write_batch_is_stale(&hub, 2),
+        "ahead of tip+1 is not the live batch"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A plan queued before rewind must be dropped so it cannot commit as fk mismatch.
+#[test]
+fn confirm_feed_clear_drops_queued_plans() {
+    let feed = ConfirmFeed::new();
+    feed.note(10, bh(1));
+    feed.note(11, bh(2));
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.inflight.insert(12);
+        assert_eq!(g.ready.len(), 2);
+        assert_eq!(g.inflight.len(), 1);
+    }
+    feed.clear();
+    let (ready, inflight) = feed.size_snap();
+    assert_eq!(ready, 0, "rewind must drop ready confirm plans");
+    assert_eq!(inflight, 0, "rewind must drop inflight confirm plans");
 }

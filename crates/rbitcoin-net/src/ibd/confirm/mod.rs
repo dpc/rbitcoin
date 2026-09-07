@@ -279,6 +279,15 @@ impl ConfirmFeed {
         self.cv.notify_one();
     }
 
+    /// Drop ready + inflight so a rewind cannot commit a stale plan.
+    pub(crate) fn clear(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.ready.clear();
+        g.inflight.clear();
+        drop(g);
+        self.cv.notify_all();
+    }
+
     pub(crate) fn request_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         self.cv.notify_all();
@@ -296,49 +305,119 @@ impl ConfirmFeed {
 }
 
 /// How IBD treats a confirm-engine reject (computed at the sender).
+///
+/// Only [`Self::ConsensusInvalid`] blacklists a hash. Weaker header chains
+/// are never a reject class — they are `IgnoreWeaker` at selection time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfirmRejectClass {
-    SoftMerkle,
-    SoftRetarget,
-    BadPrev,
-    Permanent,
+    /// Block failed a consensus rule against its intended parent.
+    ConsensusInvalid,
+    /// Wire / reconstruct mismatch: merkle, witness, BadPrev, retarget context.
+    SoftWire,
+    /// Stale plan after tip moved (`fk mismatch`, height not tip+1).
+    Cascade,
+    /// Store/pipeline invariant (not a block rule). Requeue once, then halt.
+    EngineFault,
+    /// Cooperative abort — not a block reject.
+    Cancelled,
 }
 
 impl ConfirmRejectClass {
-    /// Today's substring map (pin for `confirm_reject_tests` strings).
+    /// Substring map for legacy reject strings. Unknown → [`Self::Cascade`]
+    /// (requeue, never blacklist).
     pub(crate) fn from_err_str(err: &str) -> Self {
+        let s = err.to_ascii_lowercase();
+        if s.contains("confirm cancelled") || s.contains("cancelled:") {
+            return Self::Cancelled;
+        }
         if super::reorg::is_bad_prev_err(err) {
-            return Self::BadPrev;
+            return Self::SoftWire;
         }
-        if err.contains("merkle root mismatch") {
-            return Self::SoftMerkle;
+        if s.contains("merkle root mismatch")
+            || s.contains("bad-txnmrklroot")
+            || s.contains("witness commitment")
+        {
+            return Self::SoftWire;
         }
-        if err.contains("missing retarget first header") {
-            return Self::SoftRetarget;
+        if s.contains("missing retarget first header") {
+            return Self::SoftWire;
         }
-        Self::Permanent
+        if s.contains("fk mismatch")
+            || s.contains("plan not committed in order")
+            || s.contains("connect height not tip+1")
+        {
+            return Self::Cascade;
+        }
+        if s.contains("parent create_fk unresolved")
+            || s.contains("spend annotate missing pin denserels")
+            || s.contains("corrupt record")
+            || s.contains("io error")
+        {
+            return Self::EngineFault;
+        }
+        if s.contains("script verification")
+            || s.contains("prevout already spent")
+            || s.contains("pow invalid")
+            || s.contains("bad-version")
+            || s.contains("bad transaction")
+            || s.contains("bad block")
+            || s.contains("bad header")
+            || s.contains("missing prevout")
+        {
+            return Self::ConsensusInvalid;
+        }
+        Self::Cascade
     }
 
     pub(crate) fn from_consensus(err: &rbitcoin_consensus::ConsensusError) -> Self {
         use rbitcoin_consensus::ConsensusError;
+        use rbitcoin_store::StoreError;
         match err {
-            ConsensusError::BadPrev => Self::BadPrev,
-            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftMerkle,
-            ConsensusError::BadHeader("missing retarget first header") => Self::SoftRetarget,
-            other => Self::from_err_str(&other.to_string()),
+            ConsensusError::Cancelled => Self::Cancelled,
+            ConsensusError::BadPrev => Self::SoftWire,
+            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftWire,
+            ConsensusError::BadHeader("missing retarget first header") => Self::SoftWire,
+            ConsensusError::BadBlock(_)
+            | ConsensusError::BadTx(_)
+            | ConsensusError::Script(_)
+            | ConsensusError::PrevoutSpent
+            | ConsensusError::InvalidPow
+            | ConsensusError::BadVersion(_)
+            | ConsensusError::BadHeader(_)
+            | ConsensusError::MissingPrevout => Self::ConsensusInvalid,
+            ConsensusError::Store(StoreError::Cancelled(_)) => Self::Cancelled,
+            ConsensusError::Store(StoreError::Io { .. }) => Self::EngineFault,
+            ConsensusError::Store(StoreError::Corrupt(m)) => Self::from_err_str(m),
+            ConsensusError::Store(_) => Self::EngineFault,
         }
     }
 
     pub(crate) fn from_net(err: &crate::error::NetError) -> Self {
         match err {
-            crate::error::NetError::Mutated(_) => Self::SoftMerkle,
-            crate::error::NetError::BadPrev => Self::BadPrev,
+            crate::error::NetError::Cancelled => Self::Cancelled,
+            crate::error::NetError::Mutated(_) => Self::SoftWire,
+            crate::error::NetError::BadPrev => Self::SoftWire,
+            crate::error::NetError::ConnectFailed { msg, .. } => Self::from_err_str(msg),
+            crate::error::NetError::Consensus(s) => Self::from_err_str(s),
             other => Self::from_err_str(&other.to_string()),
         }
     }
 
     pub(crate) fn is_soft(self) -> bool {
-        matches!(self, Self::SoftMerkle | Self::SoftRetarget | Self::BadPrev)
+        matches!(self, Self::SoftWire)
+    }
+
+    /// Consensus verdict is only trusted when the connect ran against the
+    /// intended parent (`tip == header.prev`). Otherwise this is a cascade.
+    pub(crate) fn trust_consensus(self, hub: &ChainHub, hash: BlockHash) -> Self {
+        if self != Self::ConsensusInvalid {
+            return self;
+        }
+        match super::reorg::parent_hash_of(hub, hash) {
+            Ok(Some(prev)) if hub.tip_hash() == Some(prev) => Self::ConsensusInvalid,
+            Ok(Some(_)) => Self::Cascade,
+            Ok(None) | Err(_) => Self::ConsensusInvalid,
+        }
     }
 }
 
@@ -1164,6 +1243,15 @@ pub(crate) mod confirm_thr_stats {
     }
 }
 
+/// True when a write batch's first height is no longer tip+1 (rewind raced).
+pub(crate) fn write_batch_is_stale(hub: &ChainHub, first_h: u32) -> bool {
+    let expect = match hub.tip_height() {
+        None => 0u32,
+        Some(t) => t.saturating_add(1),
+    };
+    first_h != expect
+}
+
 /// Spawn confirm **lookup** + **load** + **scripts** + **write** OS threads.
 ///
 /// Lookup (BQ-ahead TipOnly `head_fk`) ∥ load (claim resolve-complete + stamp
@@ -1236,6 +1324,13 @@ pub(crate) fn spawn_confirm_engine(
                 let first_h = batch.heights_hashes().first().map(|(h, _)| *h).unwrap_or(0);
                 let t0 = Instant::now();
                 let heights_hashes = batch.heights_hashes();
+                if write_batch_is_stale(&hub_wb, first_h) {
+                    debug!(
+                        "ibd: confirm write drop stale batch first={first_h} (tip moved)"
+                    );
+                    feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
+                    continue;
+                }
                 match hub_wb.confirm_write(batch) {
                     Ok(_outcomes) => {
                         let t_deq = Instant::now();
@@ -1298,6 +1393,13 @@ pub(crate) fn spawn_confirm_engine(
                             .first()
                             .map(|(h, raw)| (*h, BlockHash::from_byte_array(*raw)))
                             .unwrap_or((first_h, BlockHash::from_byte_array([0u8; 32])));
+                        if write_batch_is_stale(&hub_wb, height) {
+                            debug!(
+                                "ibd: confirm write drop stale batch first={height} (tip moved)"
+                            );
+                            feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
+                            continue;
+                        }
                         if hub_wb.has_block(&hash)
                             || (msg.contains("prevout already spent")
                                 && heights_hashes.iter().all(|(_, raw)| {
@@ -1928,16 +2030,15 @@ pub(crate) fn offer_confirm_ready(
             }
         }
         if body.is_rejected(&hash) {
-            // Tip is frozen on a permanently rejected tip+1 (consensus blacklisted).
-            // Without this log, status shows confirm_blks=0 + hole=0 and looks like
-            // a silent hot-path stall while archive runs ahead forever.
+            // Tip is frozen on a consensus-invalid tip+1. Densify must not
+            // keep fetching above this height (download gate).
             if ht == expect {
                 static REJECT_STUCK: AtomicU32 = AtomicU32::new(0);
                 let n = REJECT_STUCK.fetch_add(1, Ordering::Relaxed) + 1;
                 if n <= 3 || n.is_multiple_of(100) {
                     warn!(
-                        "ibd: confirm stuck: tip+1={ht} {hash} is blacklisted (rejected earlier); \
-                         restart with a fixed binary to clear the in-memory reject set (n={n})"
+                        "ibd: confirm stuck: tip+1={ht} {hash} is consensus-invalid; \
+                         download gate closed until a valid heavier fork is planted (n={n})"
                     );
                 }
             }

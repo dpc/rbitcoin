@@ -32,7 +32,7 @@ fn apply_confirm_reject(
     );
 }
 
-/// SoftMerkle/SoftRetarget/BadPrev/Permanent class matches today's substring map.
+/// SoftWire/Cascade/EngineFault/ConsensusInvalid/Cancelled class map.
 #[test]
 fn confirm_reject_class_matches_substring_table() {
     use rbitcoin_consensus::ConsensusError;
@@ -41,68 +41,118 @@ fn confirm_reject_class_matches_substring_table() {
     let cases: &[(&str, ConfirmRejectClass)] = &[
         (
             "consensus: unexpected previous header",
-            ConfirmRejectClass::BadPrev,
+            ConfirmRejectClass::SoftWire,
         ),
-        ("unexpected previous header", ConfirmRejectClass::BadPrev),
-        ("consensus: unexpected previous", ConfirmRejectClass::BadPrev),
+        ("unexpected previous header", ConfirmRejectClass::SoftWire),
+        ("consensus: unexpected previous", ConfirmRejectClass::SoftWire),
         (
             "consensus: bad block: merkle root mismatch",
-            ConfirmRejectClass::SoftMerkle,
+            ConfirmRejectClass::SoftWire,
         ),
         (
             "consensus: bad header: missing retarget first header",
-            ConfirmRejectClass::SoftRetarget,
+            ConfirmRejectClass::SoftWire,
         ),
         (
             "consensus: script verification failed: script false",
-            ConfirmRejectClass::Permanent,
+            ConfirmRejectClass::ConsensusInvalid,
         ),
         (
             "consensus: store: corrupt record: invariant: spend annotate missing pin denserels/abs",
-            ConfirmRejectClass::Permanent,
+            ConfirmRejectClass::EngineFault,
         ),
         (
             "consensus: store: corrupt record: archive: parent create_fk unresolved (contiguous batch required)",
-            ConfirmRejectClass::Permanent,
+            ConfirmRejectClass::EngineFault,
         ),
         (
             "consensus: store: corrupt record: tx put_full_batch fk mismatch (plan not committed in order)",
-            ConfirmRejectClass::Permanent,
+            ConfirmRejectClass::Cascade,
         ),
         (
             "consensus: prevout already spent on best chain",
-            ConfirmRejectClass::Permanent,
+            ConfirmRejectClass::ConsensusInvalid,
         ),
+        (
+            "connect height not tip+1",
+            ConfirmRejectClass::Cascade,
+        ),
+        ("confirm cancelled", ConfirmRejectClass::Cancelled),
     ];
     for (s, want) in cases {
         assert_eq!(ConfirmRejectClass::from_err_str(s), *want, "{s}");
     }
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::BadPrev),
-        ConfirmRejectClass::BadPrev
+        ConfirmRejectClass::SoftWire
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::BadBlock("merkle root mismatch")),
-        ConfirmRejectClass::SoftMerkle
+        ConfirmRejectClass::SoftWire
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::BadHeader(
             "missing retarget first header"
         )),
-        ConfirmRejectClass::SoftRetarget
+        ConfirmRejectClass::SoftWire
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::Cancelled),
-        ConfirmRejectClass::Permanent
+        ConfirmRejectClass::Cancelled
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::from(StoreError::Cancelled("stop"))),
-        ConfirmRejectClass::Permanent
+        ConfirmRejectClass::Cancelled
     );
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::PrevoutSpent),
-        ConfirmRejectClass::Permanent
+        ConfirmRejectClass::ConsensusInvalid
     );
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::Store(StoreError::Corrupt(
+            "tx put_full_batch fk mismatch (plan not committed in order)"
+        ))),
+        ConfirmRejectClass::Cascade
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::Store(StoreError::Corrupt(
+            "invariant: spend annotate missing pin denserels/abs"
+        ))),
+        ConfirmRejectClass::EngineFault
+    );
+}
+
+/// `body.rejected ⊆ consensus-invalid set` — Cascade / SoftWire / EngineFault
+/// / Cancelled never blacklist.
+#[test]
+fn body_rejected_subset_of_consensus_invalid() {
+    let mut st = IbdWorkState::new(Vec::new(), None, Some(10));
+    let cases: &[(&str, bool)] = &[
+        ("consensus: script verification failed: script false", true),
+        ("consensus: prevout already spent on best chain", true),
+        ("consensus: pow invalid", true),
+        (
+            "tx put_full_batch fk mismatch (plan not committed in order)",
+            false,
+        ),
+        ("connect height not tip+1", false),
+        ("consensus: bad block: merkle root mismatch", false),
+        (
+            "consensus: store: corrupt record: invariant: spend annotate missing pin denserels/abs",
+            false,
+        ),
+        ("confirm cancelled", false),
+        ("consensus: unexpected previous header", false),
+    ];
+    for (i, (err, must_reject)) in cases.iter().enumerate() {
+        let hash = h(i as u8 + 1);
+        apply_confirm_reject(&mut st, 11, hash, err, None, None);
+        assert_eq!(
+            st.body.is_rejected(&hash),
+            *must_reject,
+            "rejected({err}) want {must_reject}"
+        );
+    }
 }
 
 /// Soft re-get is wire-only (`unexpected previous header`). Internal
@@ -139,7 +189,7 @@ fn confirm_reject_blacklist_surface() {
     assert!(st.body.is_rejected(&hash));
     assert!(!st.ordered_set.contains(&hash));
 
-    // Internal denserels invariant → permanent (fix pin layout, not soft).
+    // Internal denserels invariant → engine fault (requeue, not blacklist).
     let mut st = IbdWorkState::new(Vec::new(), None, Some(219_561));
     let hash = h(0x5b);
     st.body.mark_archived(hash);
@@ -154,11 +204,23 @@ fn confirm_reject_blacklist_surface() {
         None,
     );
     assert!(
-        st.body.is_rejected(&hash),
-        "denserels layout miss is permanent (fix pipeline, not soft-reget)"
+        !st.body.is_rejected(&hash),
+        "denserels layout miss is engine-fault, not blacklist"
     );
+    assert!(st.engine_fault_seen.contains(&hash));
+    assert!(st.halt.is_none());
+    apply_confirm_reject(
+        &mut st,
+        219_562,
+        hash,
+        "consensus: store: corrupt record: invariant: spend annotate missing pin denserels/abs",
+        None,
+        None,
+    );
+    assert!(st.halt.is_some(), "second engine-fault must halt IBD");
+    assert!(!st.body.is_rejected(&hash));
 
-    // parent create_fk unresolved / fk mismatch: permanent (store or pipeline bug).
+    // parent create_fk unresolved: engine fault, not blacklist.
     let mut st = IbdWorkState::new(Vec::new(), None, Some(269_049));
     let hash = h(0x53);
     st.body.mark_archived(hash);
@@ -173,8 +235,8 @@ fn confirm_reject_blacklist_surface() {
         None,
     );
     assert!(
-        st.body.is_rejected(&hash),
-        "parent create_fk unresolved is permanent (fix pipeline, not soft-requeue)"
+        !st.body.is_rejected(&hash),
+        "parent create_fk unresolved is engine-fault, not blacklist"
     );
     let mut st = IbdWorkState::new(Vec::new(), None, Some(961_467));
     let hash = h(0x68);
@@ -188,8 +250,8 @@ fn confirm_reject_blacklist_surface() {
         None,
     );
     assert!(
-        st.body.is_rejected(&hash),
-        "fk mismatch is permanent (not tip-ahead soft requeue)"
+        !st.body.is_rejected(&hash),
+        "fk mismatch is cascade requeue, not blacklist"
     );
 
     // Merkle mismatch (corrupt Class A reconstruct) → soft re-get, not blacklist.
@@ -557,8 +619,14 @@ fn exploration_apply_win_held_ext_only_in_bq() {
         try_complete_awaiting_reorg(&mut st, &hub),
         "exploration apply must succeed with win held + ext in BQ"
     );
-    assert_eq!(hub.tip_hash().unwrap(), ext.block_hash());
-    assert_eq!(hub.tip_height(), Some(2));
+    assert_eq!(
+        hub.tip_hash().unwrap(),
+        gen,
+        "exploration apply rewinds to LCA, does not accept_branch"
+    );
+    assert_eq!(hub.tip_height(), Some(0));
+    assert_eq!(st.height_to_hash.get(&1), Some(&win.block_hash()));
+    assert_eq!(st.height_to_hash.get(&2), Some(&ext.block_hash()));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -2074,7 +2142,7 @@ fn apply_confirm_events_accepted_and_reject() {
     tx.send(ConfirmEvent::Reject {
         height: 1,
         hash: h(12),
-        class: ConfirmRejectClass::Permanent,
+        class: ConfirmRejectClass::ConsensusInvalid,
         err: "consensus: script verification failed: script false".into(),
     })
     .unwrap();
@@ -2819,5 +2887,346 @@ fn path_slot_first_wins_chained_via_headers() {
         st.max_peer_height, horizon,
         "off-path high-height fork must not become the tip horizon"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Consensus-invalid mid-path on a heavier fork: only that hash is blacklisted,
+/// the losing fork stays selectable, ordered is reseeded.
+#[test]
+fn heavier_fork_invalid_mid_does_not_blacklist_weaker() {
+    use crate::chain::ChainHub;
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{
+        Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
+    };
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::Query;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "rbitcoin-heavier-invalid-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let coinbase = |height: u32| {
+        let mut ss = rbitcoin_consensus::bip34_height_script(height);
+        while ss.len() < 2 {
+            ss.push(0x00);
+        }
+        Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(ss),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_0000_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    };
+    let mine = |prev: BlockHash, time: u32, height: u32| {
+        let bits = CompactTarget::from_consensus(0x207f_ffff);
+        let mut block = bitcoin::Block {
+            header: Header {
+                version: Version::from_consensus(4),
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+                time,
+                bits,
+                nonce: 0,
+            },
+            txdata: vec![coinbase(height)],
+        };
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+        let target = Target::from_compact(bits);
+        for nonce in 0..u32::MAX {
+            block.header.nonce = nonce;
+            if block.header.validate_pow(target).is_ok() {
+                break;
+            }
+        }
+        block
+    };
+    let distinct = |mut b: bitcoin::Block, avoid: BlockHash| {
+        if b.block_hash() == avoid {
+            let target = Target::from_compact(b.header.bits);
+            for nonce in 0..u32::MAX {
+                b.header.nonce = nonce;
+                if b.header.validate_pow(target).is_ok() && b.block_hash() != avoid {
+                    break;
+                }
+            }
+        }
+        b
+    };
+
+    let mut a = Vec::new();
+    let mut p = gen;
+    for i in 1..=8u32 {
+        let b = mine(p, 1_600_000_000 + i * 600, i);
+        hub.accept_block(b.clone()).unwrap();
+        p = b.block_hash();
+        a.push(b);
+    }
+    assert_eq!(hub.tip_height(), Some(8));
+
+    let mut b_fork = Vec::new();
+    p = gen;
+    for i in 1..=10u32 {
+        let b = if i == 3 {
+            let bad_tx = Transaction {
+                version: TxVersion::ONE,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: bitcoin::Txid::from_byte_array([0xee; 32]),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(1),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                }],
+            };
+            let mut block = mine(p, 1_600_100_000 + i * 600, i);
+            block.txdata.push(bad_tx);
+            block.header.merkle_root = block.compute_merkle_root().unwrap();
+            let target = Target::from_compact(block.header.bits);
+            for nonce in 0..u32::MAX {
+                block.header.nonce = nonce;
+                if block.header.validate_pow(target).is_ok() {
+                    break;
+                }
+            }
+            block
+        } else if i == 1 {
+            distinct(mine(p, 1_600_100_000 + i * 600, i), a[0].block_hash())
+        } else {
+            mine(p, 1_600_100_000 + i * 600, i)
+        };
+        hub.ensure_header(&b.header).unwrap();
+        p = b.block_hash();
+        b_fork.push(b);
+    }
+
+    let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+    for (i, blk) in b_fork.iter().enumerate() {
+        st.record_height(blk.block_hash(), (i as u32) + 1);
+        st.known_headers.insert(blk.block_hash());
+    }
+    for blk in &a {
+        st.known_headers.insert(blk.block_hash());
+    }
+    for (i, blk) in a.iter().enumerate() {
+        st.hash_height.insert(blk.block_hash(), (i as u32) + 1);
+    }
+    st.reorg.register_explore(
+        std::iter::empty::<BlockHash>(),
+        Some(b_fork[9].block_hash()),
+    );
+    assert!(super::super::reorg::maybe_rewind_to_best_work(&mut st, &hub).unwrap());
+    assert_eq!(hub.tip_height(), Some(0), "rewound to LCA");
+    assert!(
+        !st.ordered.is_empty(),
+        "ordered must be planted after rewind"
+    );
+
+    hub.accept_block(b_fork[0].clone()).unwrap();
+    hub.accept_block(b_fork[1].clone()).unwrap();
+    assert_eq!(hub.tip_height(), Some(2));
+
+    apply_confirm_reject(
+        &mut st,
+        3,
+        b_fork[2].block_hash(),
+        "consensus: script verification failed: script false",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+    );
+    assert!(
+        st.body.is_rejected(&b_fork[2].block_hash()),
+        "only the consensus-invalid block is blacklisted"
+    );
+    assert!(!st.body.is_rejected(&b_fork[0].block_hash()));
+    assert!(!st.body.is_rejected(&b_fork[1].block_hash()));
+    for blk in &a {
+        assert!(
+            !st.body.is_rejected(&blk.block_hash()),
+            "weaker fork A must not be blacklisted"
+        );
+    }
+    assert!(st
+        .reorg
+        .invalid
+        .contains(b_fork[2].block_hash().to_byte_array()));
+    assert!(!st
+        .reorg
+        .invalid
+        .contains(b_fork[0].block_hash().to_byte_array()));
+    assert_eq!(
+        hub.tip_height(),
+        Some(0),
+        "invalid mid-path rewinds to LCA so fork A can be planted"
+    );
+    assert_eq!(
+        st.height_to_hash.get(&1).copied(),
+        Some(a[0].block_hash()),
+        "next-best valid fork A is the planted work path"
+    );
+    assert_eq!(
+        st.ordered.front().copied(),
+        Some(a[0].block_hash()),
+        "ordered reseeds with fork A after rewind"
+    );
+    assert!(
+        st.confirm_stuck_since.is_none(),
+        "finding a valid alternate fork is not confirm-stuck"
+    );
+    for blk in &a {
+        assert!(
+            hub.query
+                .is_block_archived(&blk.block_hash().to_byte_array())
+                .unwrap(),
+            "fork A Class A bodies stay eligible for linear confirm"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Fully valid heavier fork: end on B, A bodies stay un-blacklisted.
+#[test]
+fn heavier_fork_valid_does_not_blacklist_loser() {
+    use crate::chain::ChainHub;
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{
+        Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
+    };
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::Query;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "rbitcoin-heavier-valid-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let coinbase = |height: u32| {
+        let mut ss = rbitcoin_consensus::bip34_height_script(height);
+        while ss.len() < 2 {
+            ss.push(0x00);
+        }
+        Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(ss),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_0000_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    };
+    let mine = |prev: BlockHash, time: u32, height: u32| {
+        let bits = CompactTarget::from_consensus(0x207f_ffff);
+        let mut block = bitcoin::Block {
+            header: Header {
+                version: Version::from_consensus(4),
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+                time,
+                bits,
+                nonce: 0,
+            },
+            txdata: vec![coinbase(height)],
+        };
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+        let target = Target::from_compact(bits);
+        for nonce in 0..u32::MAX {
+            block.header.nonce = nonce;
+            if block.header.validate_pow(target).is_ok() {
+                break;
+            }
+        }
+        block
+    };
+    let distinct = |mut b: bitcoin::Block, avoid: BlockHash| {
+        if b.block_hash() == avoid {
+            let target = Target::from_compact(b.header.bits);
+            for nonce in 0..u32::MAX {
+                b.header.nonce = nonce;
+                if b.header.validate_pow(target).is_ok() && b.block_hash() != avoid {
+                    break;
+                }
+            }
+        }
+        b
+    };
+
+    let a1 = mine(gen, 1_610_000_100, 1);
+    hub.accept_block(a1.clone()).unwrap();
+    let a2 = mine(a1.block_hash(), 1_610_000_200, 2);
+    hub.accept_block(a2.clone()).unwrap();
+    let b1 = distinct(mine(gen, 1_610_000_101, 1), a1.block_hash());
+    hub.ensure_header(&b1.header).unwrap();
+    let b2 = mine(b1.block_hash(), 1_610_000_201, 2);
+    hub.ensure_header(&b2.header).unwrap();
+    let b3 = mine(b2.block_hash(), 1_610_000_301, 3);
+    hub.ensure_header(&b3.header).unwrap();
+
+    let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+    st.record_height(a1.block_hash(), 1);
+    st.record_height(a2.block_hash(), 2);
+    st.record_height(b1.block_hash(), 1);
+    st.record_height(b2.block_hash(), 2);
+    st.record_height(b3.block_hash(), 3);
+    st.reorg
+        .register_explore(std::iter::empty::<BlockHash>(), Some(b3.block_hash()));
+    assert!(super::super::reorg::maybe_rewind_to_best_work(&mut st, &hub).unwrap());
+    hub.accept_block(b1.clone()).unwrap();
+    hub.accept_block(b2.clone()).unwrap();
+    hub.accept_block(b3.clone()).unwrap();
+    assert_eq!(hub.tip_hash().unwrap(), b3.block_hash());
+    assert!(!st.body.is_rejected(&a1.block_hash()));
+    assert!(!st.body.is_rejected(&a2.block_hash()));
+    assert!(st.reorg.invalid.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
