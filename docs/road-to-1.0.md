@@ -148,18 +148,21 @@ misses ~1 s.
 
 Landed since 0.5.0: 125 inbound + rate windows + compact misbehavior score;
 v2-only discovery (**Q-49**); Core-style inbound eviction (protect
-netgroup / recent block / recent tx / min-ping, then longest-connected —
+prefix netgroup / recent block / recent tx / min-ping, then longest-connected —
 not newest-wins); `{datadir}/peers` persist with connected/fast/slow flags
 so restart does not redraw solely from DNS; compact prefill monotonic +
 in-bounds; `held_seq` FIFO; `requested_blocks` 10 s expire; Electrum/Esplora
-caps always-on.
+caps always-on. Outbound IBD and tip-follow prefer unused **netgroups**
+(Core asmap ASN when `ip_asn.dat` is loaded, else IPv4 `/16` / IPv6 `/32`);
+when the outbound set is full, a stale extra evicts a duplicate-group peer
+before a unique one; `--connect` skips the filter. Map path and load
+warnings: [`OPERATOR.md`](../OPERATOR.md) § P2P. Inbound protect stays
+prefix groups (asmap is outbound-only).
 
 Still 1.0: AddrMan tried/new **caps** so the book cannot grow without bound;
 `announced_wtx` must roll instead of `clear()` at 50k (INV burst). Those
-leftovers are **Q-60**. Outbound **asmap / prefix diversity** is landed
-(`--asmap` / `{datadir}/ip_asn.dat`; `--connect` bypass). Dedicated Core
-`anchors.dat` can wait if `{datadir}/peers` already ranks last-good
-outbounds. Tor can wait.
+leftovers are **Q-60**. Dedicated Core `anchors.dat` can wait if
+`{datadir}/peers` already ranks last-good outbounds. Tor can wait.
 
 | Done | Step |
 |:----:|------|
@@ -167,7 +170,7 @@ outbounds. Tor can wait.
 | [x] | Inbound eviction is not newest-wins (Core protect-then-oldest) |
 | [x] | `{datadir}/peers` persist + rank last-good / fast |
 | [x] | Compact prefill monotonic; held FIFO; getdata retry on unanswered |
-| [x] | Outbound diversity with asmap / prefix netgroups (**Q-60**) |
+| [x] | IBD / tip-follow outbound diversity (asmap ASN or prefix); stale evict prefers duplicate groups (**Q-60**) |
 | [ ] | AddrMan caps + `announced_wtx` roll (**Q-60**) |
 
 ### Fee estimates that match inclusion
