@@ -124,6 +124,16 @@ pub(crate) struct IbdWorkState {
     pub densify_scan_lo: u32,
     /// Last Full-assign `path_lo`; drop watermark when the tip shrinks.
     pub assign_path_lo: u32,
+    /// Hashes that already produced one [`super::confirm::ConfirmRejectClass::EngineFault`].
+    pub engine_fault_seen: HashSet<BlockHash>,
+    /// Set when a second engine-fault hits the same hash — IBD must halt.
+    pub halt: Option<String>,
+    /// First time confirm rejected without tip progress (download gate timer).
+    pub confirm_stuck_since: Option<Instant>,
+    /// Set by header-work rewind/plant so the main loop can drop in-channel plans.
+    pub confirm_quiesce: bool,
+    /// Repeated Cascade at the same tip for the same hash → escalate to halt.
+    pub cascade_at: Option<(BlockHash, [u8; 32], u8)>,
 }
 
 impl IbdWorkState {
@@ -174,6 +184,11 @@ impl IbdWorkState {
             reorg: IbdReorgState::new(),
             densify_scan_lo: 0,
             assign_path_lo: 0,
+            engine_fault_seen: HashSet::new(),
+            halt: None,
+            confirm_stuck_since: None,
+            confirm_quiesce: false,
+            cascade_at: None,
         }
     }
 

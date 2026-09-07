@@ -2204,6 +2204,18 @@ impl Query {
         tip_height: u32,
         max: usize,
     ) -> Result<Vec<ResumeWorkEntry>, QueryError> {
+        self.resume_work_path_after_tip_excluding(tip_hash, tip_height, max, &[])
+    }
+
+    /// Like [`Self::resume_work_path_after_tip`] but omit `exclude` hashes from
+    /// the child graph (invalid subtrees do not win most-work ranking).
+    pub fn resume_work_path_after_tip_excluding(
+        &self,
+        tip_hash: [u8; 32],
+        tip_height: u32,
+        max: usize,
+        exclude: &[[u8; 32]],
+    ) -> Result<Vec<ResumeWorkEntry>, QueryError> {
         if max == 0 {
             return Ok(Vec::new());
         }
@@ -2215,10 +2227,15 @@ impl Query {
             return Ok(Vec::new());
         }
 
+        let skip = |h: [u8; 32]| exclude.iter().any(|x| *x == h);
+
         let mut children: U64Map<Vec<(Fk, [u8; 32])>> = U64Map::default();
         for id in 1..=n {
             let fk = Fk(id);
             let rec = self.store.get_header(fk)?;
+            if skip(rec.hash) {
+                continue;
+            }
             let prev = rec.prev_fk.get().unwrap_or(0);
             children.entry(prev).or_default().push((fk, rec.hash));
         }

@@ -1149,7 +1149,10 @@ impl ChainHub {
             .collect())
     }
 
-    fn note_confirmed_tip(&self, need_meta: &[(u32, BlockHash)]) -> Result<(), NetError> {
+    pub(crate) fn note_confirmed_tip(
+        &self,
+        need_meta: &[(u32, BlockHash)],
+    ) -> Result<(), NetError> {
         if let Some(mp) = self.mempool() {
             if mp.relay_enabled() {
                 for &(_height, hash) in need_meta {
@@ -1704,7 +1707,10 @@ impl ChainHub {
                         }
                     }
                 }
-                return Err(e);
+                return Err(NetError::ConnectFailed {
+                    hash: b.block_hash().to_byte_array(),
+                    msg: e.to_string(),
+                });
             }
         }
         self.announce_reorg_len.store(0, Ordering::Relaxed);
@@ -1790,7 +1796,9 @@ impl ChainHub {
                 // Mutated bodies (merkle / witness commitment) keep the hash
                 // acceptable so a later honest reconstruct can connect
                 // (`p2p_compactblocks` stalling-peer invalid compact).
-                if let NetError::Consensus(s) = &e {
+                if let Some(h) = e.failing_block_hash() {
+                    self.note_invalid_block(BlockHash::from_byte_array(h));
+                } else if let NetError::Consensus(s) = &e {
                     if !s.to_ascii_lowercase().contains("not found") {
                         self.note_invalid_block(hash);
                     }
@@ -2001,7 +2009,9 @@ impl ChainHub {
             Ok(other) => Ok(Some(other)),
             Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => Ok(None),
             Err(e) => {
-                if let (NetError::Consensus(s), Some(tip)) =
+                if let Some(h) = e.failing_block_hash() {
+                    self.note_invalid_block(BlockHash::from_byte_array(h));
+                } else if let (NetError::Consensus(s), Some(tip)) =
                     (&e, branch.last().map(Block::block_hash))
                 {
                     if !s.to_ascii_lowercase().contains("not found") {
@@ -4081,7 +4091,7 @@ mod tests {
             .accept_branch(&bad_branch)
             .expect_err("invalid mid-branch must fail connect");
         assert!(
-            matches!(err, NetError::Consensus(_)),
+            matches!(err, NetError::Consensus(_) | NetError::ConnectFailed { .. }),
             "expected consensus fail, got {err}"
         );
         // Tip restored to pre-attempt.
@@ -4285,6 +4295,10 @@ mod tests {
         match err {
             NetError::Consensus(s) => {
                 assert!(s.contains("bad-txns-inputs-missingorspent"), "got {s}");
+            }
+            NetError::ConnectFailed { msg, hash } => {
+                assert!(msg.contains("bad-txns-inputs-missingorspent"), "got {msg}");
+                assert_eq!(hash, bad.block_hash().to_byte_array());
             }
             other => panic!("expected consensus reject, got {other:?}"),
         }

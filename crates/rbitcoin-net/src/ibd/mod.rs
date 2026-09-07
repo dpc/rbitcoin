@@ -419,6 +419,7 @@ pub async fn ibd_cancellable(
 
     let mut loop_n = 0u32;
     let mut cadence = IbdLoopCadence::new();
+    let mut halt_err: Option<String> = None;
     loop {
         if cancelled() {
             warn!("ibd: cancel requested — stopping IBD");
@@ -429,6 +430,7 @@ pub async fn ibd_cancellable(
             tokio::task::yield_now().await;
         }
 
+        let tip_before_confirm = hub.tip_height();
         apply_confirm_events(
             &mut st,
             hub.as_ref(),
@@ -436,7 +438,16 @@ pub async fn ibd_cancellable(
             &archive_write_next,
             &max_ready_shared,
             &mut last_progress,
+            Some(confirm_feed.as_ref()),
         );
+        if hub.tip_height() < tip_before_confirm {
+            confirm_feed.clear();
+        }
+        if let Some(msg) = st.halt.take() {
+            warn!("ibd: engine fault halt: {msg}");
+            halt_err = Some(msg);
+            break;
+        }
 
         if !drain_ready_peer_and_archive_events(
             &mut st,
@@ -488,6 +499,7 @@ pub async fn ibd_cancellable(
             } else {
                 AssignDepth::Full
             };
+            let tip_before_assign = hub.tip_height();
             assign_work_ordered(
                 &mut st,
                 hub.as_ref(),
@@ -497,12 +509,16 @@ pub async fn ibd_cancellable(
                 depth,
                 tip_rate_opt,
             );
+            if hub.tip_height() < tip_before_assign {
+                confirm_feed.clear();
+            }
             sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
             cadence.mark_assign(now_cadence);
         }
 
         if st.reorg.awaiting().is_some() && try_complete_awaiting_reorg(&mut st, hub.as_ref()) {
             last_progress = Instant::now();
+            confirm_feed.clear();
         }
 
         offer_confirm_ready(
@@ -521,6 +537,7 @@ pub async fn ibd_cancellable(
             &archive_write_next,
             &max_ready_shared,
             &mut last_progress,
+            Some(confirm_feed.as_ref()),
         );
         if !drain_ready_peer_and_archive_events(
             &mut st,
@@ -986,7 +1003,13 @@ pub async fn ibd_cancellable(
                     &archive_write_next,
                     &max_ready_shared,
                     &mut last_progress,
+                    Some(confirm_feed.as_ref()),
                 );
+                if let Some(msg) = st.halt.take() {
+                    warn!("ibd: engine fault halt: {msg}");
+                    halt_err = Some(msg);
+                    break;
+                }
                 // Stall with an empty work path: only Ok-exit when truly caught up.
                 // Previously this bare `break` treated "no progress for 30s at tip=0
                 // while peers die" as success → node entered tip mode at height 0.
@@ -1063,6 +1086,9 @@ pub async fn ibd_cancellable(
         hub.tip_height(),
         t_teardown.elapsed()
     );
+    if let Some(msg) = halt_err {
+        return Err(NetError::Consensus(msg));
+    }
     Ok(n)
 }
 

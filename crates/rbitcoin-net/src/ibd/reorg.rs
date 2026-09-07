@@ -1,17 +1,20 @@
-//! IBD most-work reorg: classify BadPrev, rank candidates, apply via `accept_branch`.
+//! IBD most-work reorg: classify BadPrev, rank candidates, rewind + linear confirm.
 //!
 //! See `docs/architecture.md` (most-work chain selection). Orchestration-thread only.
 
-use crate::chain::{AcceptOutcome, ChainHub};
+use crate::chain::ChainHub;
 use crate::error::NetError;
-use crate::most_work::{
-    select_most_work, sum_work, work_better, InvalidHashSet, SelectOutcome, WorkCandidate,
-};
+use crate::most_work::{sum_work, work_better, InvalidHashSet};
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, CompactTarget, Target};
 use rbitcoin_log::{info, warn};
 use rbitcoin_primitives::Height;
 use std::collections::HashMap;
+
+#[cfg(test)]
+use crate::chain::AcceptOutcome;
+#[cfg(test)]
+use crate::most_work::{select_most_work, SelectOutcome, WorkCandidate};
 
 /// Classification of tip+1 `unexpected previous header` (BadPrev).
 #[cfg(test)]
@@ -114,10 +117,12 @@ impl IbdReorgState {
         self.explore_need.retain(|x| *x != h);
     }
 
+    #[cfg(test)]
     pub fn get_held(&self, hash: &BlockHash) -> Option<Block> {
         self.held_bodies.get(hash).cloned()
     }
 
+    #[cfg(test)]
     pub fn set_awaiting(&mut self, held_tip: Block, need: Vec<BlockHash>) {
         self.awaiting = Some(AwaitingBodies { held_tip, need });
     }
@@ -161,6 +166,7 @@ impl IbdReorgState {
     }
 
     /// Registered exploration densify hashes (same-height winner + extensions).
+    #[cfg(test)]
     pub fn explore_need_hashes(&self) -> &[BlockHash] {
         &self.explore_need
     }
@@ -210,6 +216,7 @@ impl IbdReorgState {
 
 /// Build a `WorkCandidate` for a contiguous body path whose first block's prev
 /// is on the best chain. Returns `None` if parent not on chain or path empty.
+#[cfg(test)]
 pub fn candidate_from_blocks(
     hub: &ChainHub,
     blocks: &[Block],
@@ -246,6 +253,7 @@ pub fn candidate_from_blocks(
 }
 
 /// Rank candidates vs current tip path work from a shared LCA; skip invalid.
+#[cfg(test)]
 pub fn rank_candidates(
     hub: &ChainHub,
     candidates: &[WorkCandidate],
@@ -275,6 +283,7 @@ pub fn rank_candidates(
 /// Apply a fully gathered branch via `accept_branch`. On success returns new tip
 /// height. On connect failure marks the failing path invalid and restores tip
 /// (via `accept_branch` contract).
+#[cfg(test)]
 pub fn apply_reorg_branch(
     hub: &ChainHub,
     blocks: &[Block],
@@ -293,10 +302,10 @@ pub fn apply_reorg_branch(
         }
         Ok(o) => Ok(o),
         Err(e) => {
-            for b in blocks {
-                reorg.invalid.mark(b.block_hash().to_byte_array());
+            if let Some(h) = e.failing_block_hash() {
+                reorg.invalid.mark(h);
             }
-            warn!("ibd: most-work reorg connect failed (path marked invalid): {e}");
+            warn!("ibd: most-work reorg connect failed (failing hash marked invalid): {e}");
             Err(e)
         }
     }
@@ -304,6 +313,7 @@ pub fn apply_reorg_branch(
 
 /// Try candidates in most-work order: first successful apply wins; failed paths
 /// are invalid-marked and **re-ranked** so a remaining valid heavier N can win.
+#[cfg(test)]
 pub fn try_apply_best_candidate(
     hub: &ChainHub,
     bodies: &HashMap<BlockHash, Block>,
@@ -343,13 +353,12 @@ pub fn try_apply_best_candidate(
             SelectOutcome::IgnoreWeaker => return Ok(None),
             SelectOutcome::Switch { candidate_tip, .. } => {
                 let Some((_, blocks)) = built.iter().find(|(c, _)| c.tip == candidate_tip) else {
-                    reorg.invalid.mark(candidate_tip);
                     continue;
                 };
                 match apply_reorg_branch(hub, blocks, reorg) {
                     Ok(o @ AcceptOutcome::Accepted { .. }) => return Ok(Some(o)),
                     Ok(_) => {
-                        reorg.invalid.mark(candidate_tip);
+                        // IgnoredWeaker / AlreadyHave: keep the hash selectable.
                     }
                     Err(_) => {}
                 }
@@ -371,8 +380,9 @@ const REWIND_MAX_DEPTH: u32 = 1_024;
 /// ancestor, **oldest-first**. Used so BadPrev densify requests every mid-path
 /// body to the LCA (mainnet: d1e0 + 02022e + tip+1, not wire_prev alone).
 ///
-/// Stops on [`ChainHub::has_block`] only — do not call `height_of_hash` for side
-/// headers (orphan full confirmed-table scan; mainnet CPU spin on BadPrev).
+/// Stops on [`ChainHub::is_connected`] — [`ChainHub::has_block`] stays true for
+/// disconnected once-confirmed losers (`confirmed` is insert-only).
+#[cfg(test)]
 pub fn header_hashes_to_best_ancestor(
     hub: &ChainHub,
     tip: BlockHash,
@@ -389,7 +399,7 @@ fn header_hashes_to_best_ancestor_n(
     let mut rev = Vec::new();
     let mut cur = tip;
     for _ in 0..walk_max {
-        if hub.has_block(&cur) {
+        if hub.is_connected(&cur) {
             break;
         }
         rev.push(cur);
@@ -418,6 +428,7 @@ fn header_hashes_to_best_ancestor_n(
 /// Parent-on-chain uses **`has_block` only** — never `height_of_hash` on side
 /// headers (that full-scans confirmed[] for orphans and pegged one core on
 /// mainnet BadPrev/explore gather).
+#[cfg(test)]
 fn gather_path_to_best_parent(
     hub: &ChainHub,
     bodies: &HashMap<BlockHash, Block>,
@@ -549,7 +560,7 @@ fn connecting_hashes_heavier_disconnected_n(
     let Some(tip) = hub.tip_hash() else {
         return Ok(None);
     };
-    if candidate == tip || hub.has_block(&candidate) {
+    if candidate == tip || hub.is_connected(&candidate) {
         return Ok(None);
     }
     let path = header_hashes_to_best_ancestor_n(hub, candidate, walk_max)?;
@@ -647,11 +658,114 @@ pub fn consider_disconnected_heavier(
     hub: &ChainHub,
 ) -> Result<bool, NetError> {
     for h in connecting_search_candidates(st, hub)? {
+        if st.reorg.invalid.contains(h.to_byte_array()) {
+            continue;
+        }
         if let Some(path) = connecting_hashes_heavier_disconnected(hub, h)? {
+            if path
+                .iter()
+                .any(|p| st.reorg.invalid.contains(p.to_byte_array()))
+            {
+                continue;
+            }
             return apply_header_rewind(st, hub, &path);
         }
     }
     Ok(false)
+}
+
+/// Header tips on known competing forks that do not contain an invalid hash.
+///
+/// After a consensus-invalid reject the planted path may be a dead-end while a
+/// previously-weaker fork is now the best *valid* chain. Scan is only useful
+/// when `reorg.invalid` is non-empty (callers register the result as explore).
+pub(crate) fn competing_valid_header_tips(
+    st: &super::state::IbdWorkState,
+    hub: &ChainHub,
+) -> Vec<BlockHash> {
+    if st.reorg.invalid.is_empty() {
+        return Vec::new();
+    }
+    let mut by_h: HashMap<u32, Vec<BlockHash>> = HashMap::new();
+    for (&h, &ht) in &st.hash_height {
+        if st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(&h) {
+            continue;
+        }
+        by_h.entry(ht).or_default().push(h);
+    }
+    let tip = hub.tip_hash();
+    let tip_h = hub.tip_height().unwrap_or(0);
+    let mut starts: Vec<(BlockHash, u32)> = Vec::new();
+    let push_start = |h: BlockHash, ht: u32, starts: &mut Vec<(BlockHash, u32)>| {
+        if Some(h) == tip {
+            return;
+        }
+        if !starts.iter().any(|(x, _)| *x == h) {
+            starts.push((h, ht));
+        }
+    };
+    if let Some(hashes) = by_h.get(&tip_h) {
+        for &h in hashes {
+            push_start(h, tip_h, &mut starts);
+        }
+    }
+    for (&ht, hashes) in &by_h {
+        if hashes.len() > 1 {
+            for &h in hashes {
+                push_start(h, ht, &mut starts);
+            }
+        }
+    }
+    const MAX_TIPS: usize = 8;
+    let mut tips = Vec::new();
+    for (h, ht) in starts {
+        let tip_hsh = extend_valid_header_tip(st, hub, &by_h, h, ht);
+        if !tips.contains(&tip_hsh) {
+            tips.push(tip_hsh);
+        }
+        if tips.len() >= MAX_TIPS {
+            break;
+        }
+    }
+    tips
+}
+
+fn extend_valid_header_tip(
+    st: &super::state::IbdWorkState,
+    hub: &ChainHub,
+    by_h: &HashMap<u32, Vec<BlockHash>>,
+    start: BlockHash,
+    start_h: u32,
+) -> BlockHash {
+    let mut cur = start;
+    let mut ht = start_h;
+    for _ in 0..64 {
+        let next_ht = ht.saturating_add(1);
+        let Some(cands) = by_h.get(&next_ht) else {
+            break;
+        };
+        let mut child = None;
+        for &c in cands {
+            if st.reorg.invalid.contains(c.to_byte_array()) || st.body.is_rejected(&c) {
+                continue;
+            }
+            match parent_hash_of(hub, c) {
+                Ok(Some(p)) if p == cur => {
+                    child = Some(c);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        match child {
+            Some(c) => {
+                cur = c;
+                ht = next_ht;
+            }
+            None => break,
+        }
+    }
+    cur
 }
 
 /// If a strictly heavier header branch is known, disconnect to its LCA and
@@ -679,7 +793,16 @@ pub(crate) fn maybe_rewind_to_best_work(
         }
     }
     for cand in cands {
+        if st.reorg.invalid.contains(cand.to_byte_array()) {
+            continue;
+        }
         if let Some(path) = connecting_hashes_heavier_disconnected(hub, cand)? {
+            if path
+                .iter()
+                .any(|h| st.reorg.invalid.contains(h.to_byte_array()))
+            {
+                continue;
+            }
             return apply_header_rewind(st, hub, &path);
         }
     }
@@ -715,14 +838,18 @@ pub(crate) fn apply_header_rewind(
         );
         return Ok(false);
     }
-    if tip_h <= lca_h {
-        return Ok(false);
+    if tip_h > lca_h {
+        hub.rewind_to_height(lca_h)?;
+        info!(
+            "ibd: most-work header rewind tip {tip_h} → {lca_h} (winning path {} header(s))",
+            path.len()
+        );
+    } else {
+        info!(
+            "ibd: most-work header plant at lca={lca_h} (winning path {} header(s))",
+            path.len()
+        );
     }
-    hub.rewind_to_height(lca_h)?;
-    info!(
-        "ibd: most-work header rewind tip {tip_h} → {lca_h} (winning path {} header(s))",
-        path.len()
-    );
     st.clear_path_above(lca_h);
     hub.query.set_lookup_taken_hi(Some(lca_h));
     st.headers_done = false;
@@ -733,8 +860,8 @@ pub(crate) fn apply_header_rewind(
         let _ = st.try_set_path_slot(*hash, ht, prev, tip);
         st.known_headers.insert(*hash);
         st.max_ordered_height = st.max_ordered_height.max(ht);
-        if !hub.has_block(hash) && st.ordered_set.insert(*hash) {
-            st.ordered.push_front(*hash);
+        if !hub.is_connected(hash) && st.ordered_set.insert(*hash) {
+            st.ordered.push_back(*hash);
         }
         if hub
             .query
@@ -752,11 +879,13 @@ pub(crate) fn apply_header_rewind(
     }
     st.reorg.clear_awaiting();
     st.reorg.clear_explore();
+    st.confirm_quiesce = true;
     Ok(true)
 }
 
 /// True if candidate tip work (header) is strictly better than our tip path
 /// from the same LCA (proactive headers-driven trigger).
+#[cfg(test)]
 pub fn candidate_header_work_better(hub: &ChainHub, blocks: &[Block]) -> Result<bool, NetError> {
     let Some(c) = candidate_from_blocks(hub, blocks)? else {
         return Ok(false);
@@ -1114,15 +1243,27 @@ mod tests {
         }
         let mut reorg = IbdReorgState::new();
         let err = apply_reorg_branch(&hub, &m_blocks, &mut reorg).unwrap_err();
-        assert!(matches!(err, NetError::Consensus(_)));
+        assert!(matches!(
+            err,
+            NetError::Consensus(_) | NetError::ConnectFailed { .. }
+        ));
         assert_eq!(
             hub.tip_hash().unwrap(),
             l_tip,
             "tip stays L after invalid M"
         );
-        assert!(reorg
-            .invalid
-            .contains(m_blocks[0].block_hash().to_byte_array()));
+        assert!(
+            reorg
+                .invalid
+                .contains(m_blocks[2].block_hash().to_byte_array()),
+            "only the failing mid-branch block is invalid-marked"
+        );
+        assert!(
+            !reorg
+                .invalid
+                .contains(m_blocks[0].block_hash().to_byte_array()),
+            "valid ancestors of the failing block must stay selectable"
+        );
 
         // N: valid path length 4 from gen (work > L's 3).
         let mut n_blocks = Vec::new();
@@ -1264,9 +1405,18 @@ mod tests {
         assert!(matches!(out, AcceptOutcome::Accepted { height: 3 }));
         assert_eq!(hub.tip_hash().unwrap(), n_blocks[2].block_hash());
         assert_ne!(hub.tip_hash().unwrap(), l_tip);
-        assert!(reorg
-            .invalid
-            .contains(m_blocks[0].block_hash().to_byte_array()));
+        assert!(
+            reorg
+                .invalid
+                .contains(m_blocks[1].block_hash().to_byte_array()),
+            "only the failing mid-branch block is invalid-marked"
+        );
+        assert!(
+            !reorg
+                .invalid
+                .contains(m_blocks[0].block_hash().to_byte_array()),
+            "valid ancestors of the failing block must stay selectable"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1387,6 +1537,10 @@ mod tests {
         let side = mine(gen, 1_500_042_000, 1);
         let weak = apply_reorg_branch(&hub, &[side], &mut reorg2).unwrap();
         assert!(matches!(weak, AcceptOutcome::IgnoredWeaker));
+        assert!(
+            reorg2.invalid.is_empty(),
+            "IgnoredWeaker must not blacklist the weaker fork"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

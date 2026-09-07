@@ -8,7 +8,7 @@ use bitcoin::BlockHash;
 use rbitcoin_consensus::WireLoadPipeline;
 use rbitcoin_log::{debug, info, warn};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -195,6 +195,10 @@ pub(crate) struct ConfirmFeed {
     pub(crate) inner: std::sync::Mutex<ConfirmFeedInner>,
     pub(crate) cv: std::sync::Condvar,
     stop: AtomicBool,
+    /// Bumped by [`Self::clear`] so in-channel batches claimed earlier are dropped.
+    epoch: AtomicU64,
+    /// Next lookup wave claims one height (isolate a multi-block consensus fail).
+    force_single: AtomicBool,
 }
 
 pub(crate) struct ConfirmFeedInner {
@@ -202,6 +206,8 @@ pub(crate) struct ConfirmFeedInner {
     pub(crate) ready: std::collections::BTreeMap<u32, (BlockHash, Option<bitcoin::Block>)>,
     /// Claimed by load; not yet written or released. Offer must not re-note.
     pub(crate) inflight: std::collections::HashSet<u32>,
+    /// Height → lookup epoch when load claimed it (survives [`Self::clear`]).
+    claimed_epoch: HashMap<u32, u64>,
 }
 
 impl ConfirmFeed {
@@ -210,10 +216,32 @@ impl ConfirmFeed {
             inner: std::sync::Mutex::new(ConfirmFeedInner {
                 ready: std::collections::BTreeMap::new(),
                 inflight: std::collections::HashSet::new(),
+                claimed_epoch: HashMap::new(),
             }),
             cv: std::sync::Condvar::new(),
             stop: AtomicBool::new(false),
+            epoch: AtomicU64::new(0),
+            force_single: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    /// True when a claimed plan's lookup epoch is behind a later [`Self::clear`].
+    pub(crate) fn plan_epoch_stale(&self, first_h: u32) -> bool {
+        let live = self.epoch();
+        let g = self.inner.lock().unwrap();
+        g.claimed_epoch.get(&first_h).is_some_and(|&e| e != live)
+    }
+
+    pub(crate) fn request_single_block(&self) {
+        self.force_single.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn single_block(&self) -> bool {
+        self.force_single.load(Ordering::Acquire)
     }
 
     /// Note readiness (wire lives in the body queue — denserels reloads it).
@@ -274,9 +302,25 @@ impl ConfirmFeed {
         let mut g = self.inner.lock().unwrap();
         for h in heights {
             g.inflight.remove(&h);
+            g.claimed_epoch.remove(&h);
         }
         drop(g);
         self.cv.notify_one();
+    }
+
+    /// Drop ready + inflight so a rewind cannot commit a stale plan.
+    ///
+    /// Bumps [`Self::epoch`] so load/scripts/write still holding a pre-rewind
+    /// batch (not in `ready`/`inflight`) will drop it. `claimed_epoch` is kept
+    /// so those in-channel batches can see they are stale.
+    pub(crate) fn clear(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.ready.clear();
+        g.inflight.clear();
+        drop(g);
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.force_single.store(false, Ordering::Release);
+        self.cv.notify_all();
     }
 
     pub(crate) fn request_stop(&self) {
@@ -296,49 +340,133 @@ impl ConfirmFeed {
 }
 
 /// How IBD treats a confirm-engine reject (computed at the sender).
+///
+/// Only [`Self::ConsensusInvalid`] blacklists a hash. Weaker header chains
+/// are never a reject class — they are `IgnoreWeaker` at selection time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfirmRejectClass {
-    SoftMerkle,
-    SoftRetarget,
-    BadPrev,
-    Permanent,
+    /// Block failed a consensus rule against its intended parent.
+    ConsensusInvalid,
+    /// Wire / reconstruct mismatch: merkle, witness, BadPrev, retarget context.
+    SoftWire,
+    /// Stale plan after tip moved (`fk mismatch`, height not tip+1).
+    Cascade,
+    /// Store/pipeline invariant (not a block rule). Requeue once, then halt.
+    EngineFault,
+    /// Cooperative abort — not a block reject.
+    Cancelled,
 }
 
 impl ConfirmRejectClass {
-    /// Today's substring map (pin for `confirm_reject_tests` strings).
+    /// Substring map for legacy reject strings. Unknown → [`Self::Cascade`]
+    /// (requeue, never blacklist).
     pub(crate) fn from_err_str(err: &str) -> Self {
+        let s = err.to_ascii_lowercase();
+        if s.contains("confirm cancelled") || s.contains("cancelled:") {
+            return Self::Cancelled;
+        }
         if super::reorg::is_bad_prev_err(err) {
-            return Self::BadPrev;
+            return Self::SoftWire;
         }
-        if err.contains("merkle root mismatch") {
-            return Self::SoftMerkle;
+        if s.contains("merkle root mismatch")
+            || s.contains("bad-txnmrklroot")
+            || s.contains("witness commitment")
+        {
+            return Self::SoftWire;
         }
-        if err.contains("missing retarget first header") {
-            return Self::SoftRetarget;
+        if s.contains("missing retarget first header") {
+            return Self::SoftWire;
         }
-        Self::Permanent
+        if s.contains("fk mismatch")
+            || s.contains("plan not committed in order")
+            || s.contains("connect height not tip+1")
+        {
+            return Self::Cascade;
+        }
+        if s.contains("parent create_fk unresolved")
+            || s.contains("spend annotate missing pin denserels")
+            || s.contains("corrupt record")
+            || s.contains("io error")
+        {
+            return Self::EngineFault;
+        }
+        if s.contains("script verification")
+            || s.contains("prevout already spent")
+            || s.contains("pow invalid")
+            || s.contains("bad-version")
+            || s.contains("bad transaction")
+            || s.contains("bad block")
+            || s.contains("bad header")
+            || s.contains("missing prevout")
+        {
+            return Self::ConsensusInvalid;
+        }
+        Self::Cascade
     }
 
     pub(crate) fn from_consensus(err: &rbitcoin_consensus::ConsensusError) -> Self {
         use rbitcoin_consensus::ConsensusError;
+        use rbitcoin_store::StoreError;
         match err {
-            ConsensusError::BadPrev => Self::BadPrev,
-            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftMerkle,
-            ConsensusError::BadHeader("missing retarget first header") => Self::SoftRetarget,
-            other => Self::from_err_str(&other.to_string()),
+            ConsensusError::Cancelled => Self::Cancelled,
+            ConsensusError::BadPrev => Self::SoftWire,
+            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftWire,
+            ConsensusError::BadHeader("missing retarget first header") => Self::SoftWire,
+            ConsensusError::BadBlock(_)
+            | ConsensusError::BadTx(_)
+            | ConsensusError::Script(_)
+            | ConsensusError::PrevoutSpent
+            | ConsensusError::InvalidPow
+            | ConsensusError::BadVersion(_)
+            | ConsensusError::BadHeader(_)
+            | ConsensusError::MissingPrevout => Self::ConsensusInvalid,
+            ConsensusError::Store(StoreError::Cancelled(_)) => Self::Cancelled,
+            ConsensusError::Store(StoreError::Io { .. }) => Self::EngineFault,
+            ConsensusError::Store(StoreError::Corrupt(m)) => Self::from_err_str(m),
+            ConsensusError::Store(_) => Self::EngineFault,
         }
     }
 
     pub(crate) fn from_net(err: &crate::error::NetError) -> Self {
         match err {
-            crate::error::NetError::Mutated(_) => Self::SoftMerkle,
-            crate::error::NetError::BadPrev => Self::BadPrev,
+            crate::error::NetError::Cancelled => Self::Cancelled,
+            crate::error::NetError::Mutated(_) => Self::SoftWire,
+            crate::error::NetError::BadPrev => Self::SoftWire,
+            crate::error::NetError::ConnectFailed { msg, .. } => Self::from_err_str(msg),
+            crate::error::NetError::Consensus(s) => Self::from_err_str(s),
             other => Self::from_err_str(&other.to_string()),
         }
     }
 
     pub(crate) fn is_soft(self) -> bool {
-        matches!(self, Self::SoftMerkle | Self::SoftRetarget | Self::BadPrev)
+        matches!(self, Self::SoftWire)
+    }
+
+    /// Consensus verdict is only trusted when the connect ran against the
+    /// intended parent (`tip == header.prev`). Otherwise this is a cascade.
+    pub(crate) fn trust_consensus(self, hub: &ChainHub, hash: BlockHash) -> Self {
+        if self != Self::ConsensusInvalid {
+            return self;
+        }
+        match super::reorg::parent_hash_of(hub, hash) {
+            Ok(Some(prev)) if hub.tip_hash() == Some(prev) => Self::ConsensusInvalid,
+            Ok(Some(_)) => Self::Cascade,
+            // Unknown header: tests use dummy hashes; production bodies have a
+            // header row. Keep the typed consensus class.
+            Ok(None) => Self::ConsensusInvalid,
+            // Store / IO looking up the parent is not a block rule.
+            Err(_) => Self::Cascade,
+        }
+    }
+
+    /// Multi-block waves attribute rejects to the first hash. Do not blacklist
+    /// that hash — isolate by retrying one block at a time.
+    pub(crate) fn isolate_if_batched(self, batch_len: usize) -> Self {
+        if self == Self::ConsensusInvalid && batch_len > 1 {
+            Self::Cascade
+        } else {
+            self
+        }
     }
 }
 
@@ -351,7 +479,32 @@ pub(crate) enum ConfirmEvent {
         hash: BlockHash,
         class: ConfirmRejectClass,
         err: String,
+        /// Heights in the failing wave. `> 1` means the hash is the batch
+        /// first, not necessarily the failing block.
+        batch_len: usize,
     },
+}
+
+fn emit_confirm_reject(
+    tx: &std::sync::mpsc::Sender<ConfirmEvent>,
+    feed: &ConfirmFeed,
+    height: u32,
+    hash: BlockHash,
+    class: ConfirmRejectClass,
+    err: String,
+    batch_len: usize,
+) -> Result<(), std::sync::mpsc::SendError<ConfirmEvent>> {
+    let class = class.isolate_if_batched(batch_len);
+    if class == ConfirmRejectClass::Cascade && batch_len > 1 {
+        feed.request_single_block();
+    }
+    tx.send(ConfirmEvent::Reject {
+        height,
+        hash,
+        class,
+        err,
+        batch_len,
+    })
 }
 
 /// Hard cap on consecutive ready heights in one confirm wave.
@@ -410,6 +563,8 @@ pub(crate) struct LoadBatch {
     /// `Some` only on the last sent batch of the wave; load drops in-flight
     /// layers with `max_height` below this after the in-flight read.
     pub drop_inflight_below: Option<u32>,
+    /// [`ConfirmFeed::epoch`] when lookup built this batch.
+    pub epoch: u64,
 }
 
 /// Stamp inputs for one loadq run. Lookup `pres` must ride through (`Some`);
@@ -532,6 +687,7 @@ pub(crate) fn load_batches_from_wave(
             items: chunk.to_vec(),
             parent_ids: Some(chunk_parent_ids(wave_ids, chunk)),
             drop_inflight_below: None,
+            epoch: 0,
         });
         i = end;
     }
@@ -1164,6 +1320,21 @@ pub(crate) mod confirm_thr_stats {
     }
 }
 
+/// True when a write batch's first height is no longer tip+1 (rewind raced).
+pub(crate) fn write_batch_is_stale(hub: &ChainHub, first_h: u32) -> bool {
+    let expect = match hub.tip_height() {
+        None => 0u32,
+        Some(t) => t.saturating_add(1),
+    };
+    first_h != expect
+}
+
+/// Height-stale **or** claimed before a later [`ConfirmFeed::clear`] (sibling
+/// at the new tip+1 would still pass the height check).
+pub(crate) fn write_batch_is_stale_plan(hub: &ChainHub, feed: &ConfirmFeed, first_h: u32) -> bool {
+    write_batch_is_stale(hub, first_h) || feed.plan_epoch_stale(first_h)
+}
+
 /// Spawn confirm **lookup** + **load** + **scripts** + **write** OS threads.
 ///
 /// Lookup (BQ-ahead TipOnly `head_fk`) ∥ load (claim resolve-complete + stamp
@@ -1236,8 +1407,27 @@ pub(crate) fn spawn_confirm_engine(
                 let first_h = batch.heights_hashes().first().map(|(h, _)| *h).unwrap_or(0);
                 let t0 = Instant::now();
                 let heights_hashes = batch.heights_hashes();
-                match hub_wb.confirm_write(batch) {
-                    Ok(_outcomes) => {
+                if write_batch_is_stale_plan(&hub_wb, &feed_wb, first_h) {
+                    debug!(
+                        "ibd: confirm write drop stale batch first={first_h} (tip moved)"
+                    );
+                    feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
+                    continue;
+                }
+                let meta: Vec<(u32, BlockHash)> = heights_hashes
+                    .iter()
+                    .map(|&(h, raw)| (h, BlockHash::from_byte_array(raw)))
+                    .collect();
+                match rbitcoin_consensus::confirm_write_phase(
+                    &hub_wb.query,
+                    &hub_wb.params,
+                    hub_wb.milestone,
+                    batch,
+                ) {
+                    Ok(_fks) => {
+                        if let Err(e) = hub_wb.note_confirmed_tip(&meta) {
+                            warn!("ibd: confirm write note tip: {e}");
+                        }
                         let t_deq = Instant::now();
                         for (height, raw) in &heights_hashes {
                             let hash = BlockHash::from_byte_array(*raw);
@@ -1290,7 +1480,9 @@ pub(crate) fn spawn_confirm_engine(
                     Err(e) => {
                         confirm_thr_stats::add_write_work(t0.elapsed());
                         let msg = e.to_string();
-                        if matches!(e, crate::error::NetError::Cancelled) || feed_wb.stopped() {
+                        if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
+                            || feed_wb.stopped()
+                        {
                             info!("ibd: confirm write aborted: {msg}");
                             break;
                         }
@@ -1298,6 +1490,13 @@ pub(crate) fn spawn_confirm_engine(
                             .first()
                             .map(|(h, raw)| (*h, BlockHash::from_byte_array(*raw)))
                             .unwrap_or((first_h, BlockHash::from_byte_array([0u8; 32])));
+                        if write_batch_is_stale_plan(&hub_wb, &feed_wb, height) {
+                            debug!(
+                                "ibd: confirm write drop stale batch first={height} (tip moved)"
+                            );
+                            feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
+                            continue;
+                        }
                         if hub_wb.has_block(&hash)
                             || (msg.contains("prevout already spent")
                                 && heights_hashes.iter().all(|(_, raw)| {
@@ -1329,12 +1528,15 @@ pub(crate) fn spawn_confirm_engine(
                         warn!(
                             "ibd: confirm write reject @ {height} batch_parts={parts}: {e}"
                         );
-                        let _ = event_tx_wb.send(ConfirmEvent::Reject {
+                        let _ = emit_confirm_reject(
+                            &event_tx_wb,
+                            &feed_wb,
                             height,
                             hash,
-                            class: ConfirmRejectClass::from_net(&e),
-                            err: msg,
-                        });
+                            ConfirmRejectClass::from_consensus(&e),
+                            msg,
+                            heights_hashes.len(),
+                        );
                     }
                 }
             }
@@ -1412,12 +1614,15 @@ pub(crate) fn spawn_confirm_engine(
                         .confirm_reject_stops
                         .fetch_add(1, Ordering::Relaxed);
                     warn!("ibd: confirm scripts reject @ {height} (batch first {hash}): {e}");
-                    let _ = event_tx_sc.send(ConfirmEvent::Reject {
+                    let _ = emit_confirm_reject(
+                        &event_tx_sc,
+                        &feed_sc,
                         height,
                         hash,
-                        class: ConfirmRejectClass::from_consensus(&e),
-                        err: msg,
-                    });
+                        ConfirmRejectClass::from_consensus(&e),
+                        msg,
+                        meta.heights_hashes.len(),
+                    );
                     true
                 },
                 || feed_sc.stopped() || hub_sc.query.confirm_cancelled(),
@@ -1472,6 +1677,15 @@ pub(crate) fn spawn_confirm_engine(
                 let wire: usize = lb.items.iter().map(|(_, _, w)| w.block.total_size()).sum();
                 queues_load.note_load_recv(n, wire);
                 let parent_ids = lb.parent_ids;
+                let claim_epoch = lb.epoch;
+                if claim_epoch != feed_load.epoch() {
+                    debug!(
+                        "ibd: confirm load drop stale plan epoch={claim_epoch} live={}",
+                        feed_load.epoch()
+                    );
+                    feed_load.finish(lb.items.iter().map(|(h, _, _)| *h));
+                    continue;
+                }
                 let batch: Vec<(u32, BlockHash, rbitcoin_query::ResolvedWire)> = {
                     let mut g = feed_load.inner.lock().unwrap();
                     let mut run = Vec::with_capacity(lb.items.len());
@@ -1486,6 +1700,7 @@ pub(crate) fn spawn_confirm_engine(
                         }
                         g.ready.remove(&h);
                         g.inflight.insert(h);
+                        g.claimed_epoch.insert(h, claim_epoch);
                         run.push((h, hash, wire));
                     }
                     run
@@ -1578,12 +1793,15 @@ pub(crate) fn spawn_confirm_engine(
                             "ibd: confirm load stamp reject {first_hash} @ {expect_h}: {log_msg} \
                              iflight={if_l}L/{if_n} drain_fk={drain_fk} fence_h={fence_h:?}"
                         );
-                        let _ = event_tx_load.send(ConfirmEvent::Reject {
-                            height: expect_h,
-                            hash: first_hash,
-                            class: ConfirmRejectClass::from_consensus(&e),
-                            err: log_msg,
-                        });
+                        let _ = emit_confirm_reject(
+                            &event_tx_load,
+                            &feed_load,
+                            expect_h,
+                            first_hash,
+                            ConfirmRejectClass::from_consensus(&e),
+                            log_msg,
+                            wire_batch.len(),
+                        );
                         std::thread::sleep(Duration::from_millis(50));
                         continue;
                     }
@@ -1716,14 +1934,16 @@ pub(crate) fn spawn_confirm_engine(
                             .confirm_reject_stops
                             .fetch_add(1, Ordering::Relaxed);
                         warn!("ibd: confirm load reject {first_hash} @ {expect_h}: {e}");
-                        if event_tx_load
-                            .send(ConfirmEvent::Reject {
-                                height: expect_h,
-                                hash: first_hash,
-                                class: ConfirmRejectClass::from_net(&e),
-                                err: msg,
-                            })
-                            .is_err()
+                        if emit_confirm_reject(
+                            &event_tx_load,
+                            &feed_load,
+                            expect_h,
+                            first_hash,
+                            ConfirmRejectClass::from_net(&e),
+                            msg,
+                            heights_hashes.len(),
+                        )
+                        .is_err()
                         {
                             break;
                         }
@@ -1777,8 +1997,13 @@ pub(crate) fn spawn_confirm_engine(
                     confirm_thr_stats::add_lookup_claim(t_wait.elapsed());
                     continue;
                 }
+                let run_max = if feed.single_block() {
+                    1usize
+                } else {
+                    CONFIRM_RUN_MAX_BLOCKS
+                };
                 let max_blocks = remaining
-                    .saturating_mul(CONFIRM_RUN_MAX_BLOCKS)
+                    .saturating_mul(run_max)
                     .min(rbitcoin_consensus::BQ_RESOLVE_WAVE_MAX_BLOCKS);
                 let max_inputs = (remaining as u32)
                     .saturating_mul(confirm_batch_max_inputs())
@@ -1824,15 +2049,19 @@ pub(crate) fn spawn_confirm_engine(
                                 &counts,
                                 &kinds,
                                 confirm_batch_max_inputs(),
-                                CONFIRM_RUN_MAX_BLOCKS,
+                                run_max,
                             );
-                            let batches = load_batches_from_wave(
+                            let mut batches = load_batches_from_wave(
                                 &wave.items,
                                 &parts,
                                 remaining,
                                 &wave.parent_ids,
                                 wave.drain_fence_hi,
                             );
+                            let epoch = feed.epoch();
+                            for batch in &mut batches {
+                                batch.epoch = epoch;
+                            }
                             for batch in batches {
                                 let t_send = Instant::now();
                                 let n = batch.items.len();
@@ -1928,16 +2157,15 @@ pub(crate) fn offer_confirm_ready(
             }
         }
         if body.is_rejected(&hash) {
-            // Tip is frozen on a permanently rejected tip+1 (consensus blacklisted).
-            // Without this log, status shows confirm_blks=0 + hole=0 and looks like
-            // a silent hot-path stall while archive runs ahead forever.
+            // Tip is frozen on a consensus-invalid tip+1. Densify must not
+            // keep fetching above this height (download gate).
             if ht == expect {
                 static REJECT_STUCK: AtomicU32 = AtomicU32::new(0);
                 let n = REJECT_STUCK.fetch_add(1, Ordering::Relaxed) + 1;
                 if n <= 3 || n.is_multiple_of(100) {
                     warn!(
-                        "ibd: confirm stuck: tip+1={ht} {hash} is blacklisted (rejected earlier); \
-                         restart with a fixed binary to clear the in-memory reject set (n={n})"
+                        "ibd: confirm stuck: tip+1={ht} {hash} is consensus-invalid; \
+                         download gate closed until a valid heavier fork is planted (n={n})"
                     );
                 }
             }

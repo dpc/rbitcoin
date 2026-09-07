@@ -47,7 +47,13 @@ pub(crate) fn getblockchaininfo(ctx: &RpcContext) -> Result<Value, Value> {
     } else {
         String::new()
     };
-    let ibd = ctx.initial_block_download.load(Ordering::Relaxed);
+    // Live hub latch, not the tip-follow copy: `feature_maxtipage` asserts
+    // immediately after `sync_all`, before the 50ms RPC tick may store.
+    let ibd = ctx
+        .chain
+        .as_ref()
+        .map(|c| c.in_ibd())
+        .unwrap_or_else(|| ctx.initial_block_download.load(Ordering::Relaxed));
     let headers = ctx
         .chain
         .as_ref()

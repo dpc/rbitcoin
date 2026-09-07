@@ -17,10 +17,12 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
     // Operator breadcrumb: crash between "peers ready" and this line is in
     // resume_work_path (header graph walk), not getdata assign.
     info!("ibd: resume seed walk start tip={tip_h} max_ordered={MAX_ORDERED_HEADERS}");
-    let path = match hub.query.resume_work_path_after_tip(
+    let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();
+    let path = match hub.query.resume_work_path_after_tip_excluding(
         tip_hash.to_byte_array(),
         tip_h,
         MAX_ORDERED_HEADERS,
+        &exclude,
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -35,6 +37,9 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
     let mut explore_need = Vec::new();
     for e in &path {
         let hash = BlockHash::from_byte_array(e.hash);
+        if st.reorg.invalid.contains(e.hash) {
+            break;
+        }
         st.known_headers.insert(hash);
         st.hash_height.insert(hash, e.height);
         st.header_fks.insert(hash, e.header_fk);
@@ -48,7 +53,11 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
         }
     }
     if explore_is_sibling_fork {
-        let explore_tip = path.last().map(|e| BlockHash::from_byte_array(e.hash));
+        let explore_tip = path
+            .iter()
+            .rev()
+            .find(|e| !st.reorg.invalid.contains(e.hash))
+            .map(|e| BlockHash::from_byte_array(e.hash));
         st.reorg.register_explore(explore_need, explore_tip);
         match super::reorg::maybe_rewind_to_best_work(st, hub) {
             Ok(true) => {
@@ -75,6 +84,9 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
     let mut ready_prefix = true;
     let tip = hub.tip_height().zip(hub.tip_hash());
     for e in &path {
+        if st.reorg.invalid.contains(e.hash) {
+            break;
+        }
         let hash = BlockHash::from_byte_array(e.hash);
         let prev = if e.height == 0 {
             BlockHash::from_byte_array([0u8; 32])
@@ -112,6 +124,78 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
         ready_prefix_to,
         t0.elapsed()
     );
+    plant_valid_tip_child(st, hub);
+}
+
+/// If tip+1 is missing or invalid, plant a known valid sibling/child of tip.
+pub(crate) fn plant_valid_tip_child(st: &mut IbdWorkState, hub: &ChainHub) {
+    let Some(tip_hash) = hub.tip_hash() else {
+        return;
+    };
+    let tip_h = hub.tip_height().unwrap_or(0);
+    let expect = if hub.tip_height().is_none() {
+        0u32
+    } else {
+        tip_h.saturating_add(1)
+    };
+    if let Some(&cur) = st.height_to_hash.get(&expect) {
+        if !st.reorg.invalid.contains(cur.to_byte_array()) && !st.body.is_rejected(&cur) {
+            return;
+        }
+    }
+    let mut child: Option<BlockHash> = None;
+    for (&h, &ht) in &st.hash_height {
+        if ht != expect {
+            continue;
+        }
+        if st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(&h) {
+            continue;
+        }
+        let Ok(Some(prev)) = super::reorg::parent_hash_of(hub, h) else {
+            continue;
+        };
+        if prev != tip_hash {
+            continue;
+        }
+        child = Some(h);
+        break;
+    }
+    let Some(child) = child else {
+        return;
+    };
+    let tip = hub.tip_height().zip(hub.tip_hash());
+    let mut prev = tip_hash;
+    let mut cur = child;
+    let mut ht = expect;
+    for _ in 0..MAX_ORDERED_HEADERS {
+        if st.reorg.invalid.contains(cur.to_byte_array()) || st.body.is_rejected(&cur) {
+            break;
+        }
+        let on_path = st.try_set_path_slot(cur, ht, prev, tip);
+        st.max_ordered_height = st.max_ordered_height.max(ht);
+        if on_path && st.ordered_set.insert(cur) {
+            st.ordered.push_back(cur);
+        }
+        st.known_headers.insert(cur);
+        prev = cur;
+        ht = ht.saturating_add(1);
+        let next = st.height_to_hash.get(&ht).copied().or_else(|| {
+            st.hash_height
+                .iter()
+                .find(|(_, &hht)| hht == ht)
+                .map(|(h, _)| *h)
+        });
+        let Some(n) = next else {
+            break;
+        };
+        let Ok(Some(p)) = super::reorg::parent_hash_of(hub, n) else {
+            break;
+        };
+        if p != cur {
+            break;
+        }
+        cur = n;
+    }
 }
 
 /// Highest hashes on the download path (newest first) for getheaders locators.
@@ -121,12 +205,17 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
 pub(crate) fn work_path_tips(st: &IbdWorkState) -> Vec<BlockHash> {
     let mut tips = Vec::with_capacity(8);
     // ordered is tip→far; the back is the highest known header on the path.
+    let live =
+        |h: &BlockHash| !st.reorg.invalid.contains(h.to_byte_array()) && !st.body.is_rejected(h);
     for h in st.ordered.iter().rev().take(4) {
-        if st.ordered_set.contains(h) {
+        if st.ordered_set.contains(h) && live(h) {
             tips.push(*h);
         }
     }
     for h in st.reorg.explore_tips() {
+        if !live(h) {
+            continue;
+        }
         if !tips.contains(h) {
             tips.push(*h);
         }
@@ -135,7 +224,12 @@ pub(crate) fn work_path_tips(st: &IbdWorkState) -> Vec<BlockHash> {
         }
     }
     if tips.is_empty() {
-        if let Some((&h, _)) = st.hash_height.iter().max_by_key(|(_, &ht)| ht) {
+        if let Some((&h, _)) = st
+            .hash_height
+            .iter()
+            .filter(|(h, _)| live(h))
+            .max_by_key(|(_, &ht)| ht)
+        {
             tips.push(h);
         }
     }
@@ -227,6 +321,23 @@ mod tests {
         st.hash_height.insert(h(9), 12);
         assert_eq!(path_hashes_above_tip(&st, 10), vec![(11, occupant)]);
         assert!(path_hashes_above_tip(&st, 11).is_empty());
+    }
+
+    #[test]
+    fn work_path_tips_skips_invalid_and_rejected() {
+        let mut st = IbdWorkState::new(Vec::new(), None, Some(10));
+        for n in 1u8..=4 {
+            let hash = h(n);
+            st.ordered.push_back(hash);
+            st.ordered_set.insert(hash);
+            st.record_height(hash, 10 + u32::from(n));
+        }
+        st.reorg.invalid.mark(h(4).to_byte_array());
+        st.body.mark_rejected(h(3));
+        let tips = work_path_tips(&st);
+        assert!(!tips.contains(&h(4)), "invalid tip must not be a locator");
+        assert!(!tips.contains(&h(3)), "rejected tip must not be a locator");
+        assert!(tips.contains(&h(2)));
     }
 
     /// Exploration tips merge into locator tips (cap 8, dedupe ordered members).

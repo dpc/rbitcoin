@@ -148,7 +148,8 @@ pub struct WorkCandidate {
 pub enum SelectOutcome {
     /// No non-invalid candidate has strictly more work than the best tip path.
     IgnoreWeaker,
-    /// Prefer this candidate's header path (still must pass `accept_branch`).
+    /// Prefer this candidate's header path (still must pass linear confirm
+    /// after a header-work rewind; `accept_branch` is tip-follow only).
     Switch {
         lca_hash: [u8; 32],
         lca_height: u32,
@@ -216,6 +217,10 @@ impl InvalidHashSet {
 
     pub fn mark(&mut self, hash: [u8; 32]) {
         self.hashes.insert(hash);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        self.hashes.iter().copied()
     }
 
     pub fn contains(&self, hash: [u8; 32]) -> bool {

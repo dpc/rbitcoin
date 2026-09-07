@@ -289,6 +289,7 @@ fn split_wave_into_load_batches_is_eight_by_8000() {
         items: vec![],
         parent_ids: None,
         drop_inflight_below: None,
+        epoch: 0,
     }
     .items
     .is_empty());
@@ -555,12 +556,14 @@ fn load_recv_is_lookup_order() {
         items: vec![mk(1), mk(2)],
         parent_ids: None,
         drop_inflight_below: None,
+        epoch: 0,
     })
     .unwrap();
     tx.send(LoadBatch {
         items: vec![mk(3)],
         parent_ids: None,
         drop_inflight_below: Some(7),
+        epoch: 0,
     })
     .unwrap();
     let a = rx.recv().unwrap();
@@ -594,6 +597,7 @@ fn load_stamp_items_keep_pres() {
         )],
         parent_ids: None,
         drop_inflight_below: None,
+        epoch: 0,
     };
     let items = load_stamp_items(lb.items.into_iter().map(|(h, _, w)| (h, w.block, w.pres)));
     assert_eq!(items.len(), 1);
@@ -614,6 +618,7 @@ fn lookup_blocks_when_loadq_full() {
             items: vec![],
             parent_ids: None,
             drop_inflight_below: None,
+            epoch: 0,
         })
         .unwrap();
     }
@@ -622,6 +627,7 @@ fn lookup_blocks_when_loadq_full() {
             items: vec![],
             parent_ids: None,
             drop_inflight_below: None,
+            epoch: 0,
         })
         .is_err(),
         "9th send must wait / fail while loadq is full"
@@ -631,6 +637,7 @@ fn lookup_blocks_when_loadq_full() {
         items: vec![],
         parent_ids: None,
         drop_inflight_below: None,
+        epoch: 0,
     })
     .unwrap();
 }
@@ -1167,6 +1174,12 @@ fn thr_stats_all_stages_and_note_wire_prefer() {
         let g = feed.inner.lock().unwrap();
         assert!(g.ready.get(&12).unwrap().1.is_some());
     }
+    feed.clear();
+    {
+        let g = feed.inner.lock().unwrap();
+        assert!(g.ready.is_empty());
+        assert!(g.inflight.is_empty());
+    }
 
     // pack_stop_after edges.
     assert!(!super::pack_stop_after(0, 0, 8000, 144));
@@ -1181,4 +1194,90 @@ fn thr_stats_all_stages_and_note_wire_prefer() {
     assert_eq!(super::write_drain_max_parts(4), 4);
     assert_eq!(super::write_drain_max_parts(3), 3);
     assert_eq!(super::write_drain_max_parts(0), 1);
+}
+
+#[test]
+fn write_batch_is_stale_after_tip_moves() {
+    use super::write_batch_is_stale;
+    use crate::chain::ChainHub;
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::Query;
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "rbitcoin-write-stale-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    assert!(!write_batch_is_stale(&hub, 1), "tip+1 is live");
+    assert!(
+        write_batch_is_stale(&hub, 0),
+        "already-confirmed height is stale"
+    );
+    assert!(
+        write_batch_is_stale(&hub, 2),
+        "ahead of tip+1 is not the live batch"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A plan queued before rewind must be dropped so it cannot commit as fk mismatch.
+#[test]
+fn confirm_feed_clear_drops_queued_plans() {
+    let feed = ConfirmFeed::new();
+    feed.note(10, bh(1));
+    feed.note(11, bh(2));
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.inflight.insert(12);
+        assert_eq!(g.ready.len(), 2);
+        assert_eq!(g.inflight.len(), 1);
+    }
+    feed.clear();
+    let (ready, inflight) = feed.size_snap();
+    assert_eq!(ready, 0, "rewind must drop ready confirm plans");
+    assert_eq!(inflight, 0, "rewind must drop inflight confirm plans");
+    assert_eq!(feed.epoch(), 1, "clear bumps the rewind epoch");
+}
+
+#[test]
+fn isolate_if_batched_downgrades_multi_block_consensus() {
+    use super::ConfirmRejectClass;
+    assert_eq!(
+        ConfirmRejectClass::ConsensusInvalid.isolate_if_batched(1),
+        ConfirmRejectClass::ConsensusInvalid
+    );
+    assert_eq!(
+        ConfirmRejectClass::ConsensusInvalid.isolate_if_batched(8),
+        ConfirmRejectClass::Cascade
+    );
+    assert_eq!(
+        ConfirmRejectClass::EngineFault.isolate_if_batched(8),
+        ConfirmRejectClass::EngineFault
+    );
+}
+
+#[test]
+fn plan_epoch_stale_after_clear() {
+    let feed = ConfirmFeed::new();
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.claimed_epoch.insert(1, feed.epoch());
+    }
+    assert!(!feed.plan_epoch_stale(1), "claimed at live epoch");
+    feed.clear();
+    assert!(
+        feed.plan_epoch_stale(1),
+        "in-channel plan claimed before rewind is stale"
+    );
+    assert!(!feed.plan_epoch_stale(99), "unknown height is not stale");
 }
