@@ -4,7 +4,9 @@ How production Rust in this tree should read. Principles 7–9
 ([`CONTRIBUTING.md`](../CONTRIBUTING.md)) still own comments, tests, and
 RAM/CPU. This file owns **control flow, types, naming, and composition**.
 
-Ranked extracts that apply these rules: [`quality.md`](./quality.md) **Q-61**.
+Named extracts that applied these rules: [`quality.md`](./quality.md) **Q-61**
+(Completed). Residual god-file peels: **R-10**.
+
 Confirm stage IO, leftover union, and store roles stay in
 [`invariants.md`](./invariants.md) / [`concurrency.md`](./concurrency.md) —
 do not restate them here.
@@ -44,7 +46,7 @@ do not restate them here.
 8. **Do not split to beat `wc -l`.** Bitcoin script's opcode `match`,
    io_uring machines, and MPHF construction stay dense on purpose. A peel
    needs a **named seam** (two stages, two protocols, two roles) — see
-   **Q-61** and **R-10**.
+   **R-10**.
 
 ---
 
@@ -75,7 +77,7 @@ into a second clippy ([`quality.md`](./quality.md) Won't-fix).
 
 ## What this file is not
 
-- Not a second quality backlog (that is **Q-61**).
+- Not a second quality backlog (that is [`quality.md`](./quality.md); **Q-61** is Completed).
 - Not confirm stage IO (that is [`invariants.md`](./invariants.md)).
 - Not a license to flatten uring, `idx_body_pipeline`, or the IBD confirm
   OS pipeline.
