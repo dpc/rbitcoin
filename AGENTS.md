@@ -61,6 +61,13 @@ joins) gets a **named** `ibd: perf` timer **in the same commit**. Inventory:
 Process RAM vs page cache, body-queue soft assign, production evict APIs:
 [`docs/ibd-memory.md`](docs/ibd-memory.md).
 
+## Releases
+
+**do a minor release** / **do a patch release** / **do a major release**
+(or cut / tag a GitHub Release): follow [`docs/releases.md`](docs/releases.md).
+That file is the only playbook (changelog cut, Highlights, tag, `vX.Y.x`,
+`.99` bump). Do not copy it here.
+
 ## Ship via worktree + pull request
 
 ```text

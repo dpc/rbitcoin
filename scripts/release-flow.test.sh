@@ -8,6 +8,7 @@ CUT="$ROOT/scripts/release-cut.sh"
 GATE="$ROOT/scripts/release-gate.sh"
 POST="$ROOT/scripts/release-post.sh"
 REL="$ROOT/scripts/release.sh"
+NOTES="$ROOT/scripts/release-notes.sh"
 PASS=0
 FAIL=0
 export GIT_AUTHOR_NAME=rbitcoin-release-test
@@ -53,6 +54,18 @@ git_c() {
   git -c user.name=rbitcoin-release-test -c user.email=test@example.invalid "$@"
 }
 
+add_highlight() {
+  local dest="$1"
+  local bullet="$2"
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/rbitcoin-hl.XXXXXX")"
+  awk -v b="$bullet" '
+    /^### Highlights$/ { print; print ""; print b; next }
+    { print }
+  ' "$dest/CHANGELOG.md" >"$tmp"
+  mv "$tmp" "$dest/CHANGELOG.md"
+}
+
 write_version_files() {
   local dest="$1"
   local ver="$2"
@@ -95,7 +108,9 @@ seed_ship_tree() {
 
 ## [0.6.0] — 2026-09-06
 
-Release notes for 0.6.0.
+### Highlights
+
+- **Operator binary:** musl snapshot for this tag.
 
 ## [0.5.1] — 2026-08-23
 
@@ -124,10 +139,23 @@ assert_ok "cut --minor adds dated 0.6.0 heading" \
   grep -qE '^## \[0\.6\.0\] — 2026-09-06' "$MINOR/CHANGELOG.md"
 assert_ok "cut --minor moves Unreleased body under 0.6.0" \
   grep -q 'ship this' "$MINOR/CHANGELOG.md"
+assert_ok "cut --minor inserts Highlights heading" \
+  grep -qE '^### Highlights' "$MINOR/CHANGELOG.md"
 assert_ok "gate kind is ship after minor cut" \
   bash -c "[[ \$(bash '$GATE' --root '$MINOR' --kind) == ship ]]"
-assert_ok "gate passes ship tree after minor cut" \
+assert_fail_msg "gate fails ship until Highlights has a bullet" \
+  "Highlights" \
   bash "$GATE" --root "$MINOR"
+add_highlight "$MINOR" "- **Thing:** operator-facing ship note."
+assert_ok "gate passes ship tree after Highlights" \
+  bash "$GATE" --root "$MINOR"
+out="$(bash "$NOTES" --root "$MINOR")"
+assert_ok "release-notes include Highlights bullet" \
+  grep -q 'operator-facing ship note' <<<"$out"
+assert_ok "release-notes omit detailed Unreleased body" \
+  bash -c "! grep -q 'ship this' <<<'$out'"
+assert_ok "release-notes name CHANGELOG section" \
+  grep -q '## \[0.6.0\]' <<<"$out"
 
 # --- cut: major 0.5.99 → 1.0.0 ---
 MAJOR="$WORKDIR/major"
@@ -297,7 +325,10 @@ cat >"$PPOST/CHANGELOG.md" <<'EOF'
 
 ## [0.5.3] — 2026-09-06
 
-Patch notes.
+### Highlights
+
+- **Fix:** cherry-picked operator note.
+
 EOF
 git_c -C "$PPOST" init -q -b v0.5.x
 git_c -C "$PPOST" add Cargo.toml nix/rbitcoin.nix CHANGELOG.md

@@ -68,6 +68,7 @@ if release_is_ship; then
   notes="$(release_changelog_notes "$ver")"
   [[ -n "$(printf '%s\n' "$notes" | grep -v '^[[:space:]]*$')" ]] || \
     release_die "CHANGELOG.md ## [$ver] section is empty"
+  release_require_highlights "$ver"
 fi
 
 echo "release-gate: ok version=$ver kind=$(release_is_ship && echo ship || echo dev)"

@@ -75,6 +75,8 @@ release_changelog_has_heading "$ver" || release_die "CHANGELOG.md has no ## [$ve
 
 notes="$(release_changelog_notes "$ver")"
 [[ -n "$(printf '%s\n' "$notes" | grep -v '^[[:space:]]*$')" ]] || release_die "CHANGELOG.md ## [$ver] section is empty"
+release_require_highlights "$ver"
+notes="$(bash "$HERE/release-notes.sh" --root "$ROOT")"
 
 if [[ -n "$(git status --porcelain)" ]]; then
   release_die "working tree is not clean"

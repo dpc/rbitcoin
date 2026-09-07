@@ -4,9 +4,9 @@ How we cut, tag, and publish `vX.Y.Z`. Operator snapshots (musl / Windows /
 Darwin) are [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 on the tag. Byte-identity of those binaries:
 [`reproducible-builds.md`](./reproducible-builds.md). This file owns the
-**git / PR / branch** process.
-
-Agent playbook (Cursor): `.cursor/skills/release/SKILL.md`.
+**git / PR / branch** process and is the agent playbook (linked from
+[`AGENTS.md`](../AGENTS.md)). Do not keep a second copy under a harness
+skill directory.
 
 ---
 
@@ -23,9 +23,17 @@ refuses to tag it. `--patch` refuses to create it (`Z` stays `< 99`).
 
 Homes that must match on a ship commit: `Cargo.toml`
 `[workspace.package].version`, `nix/rbitcoin.nix` `version`, `CHANGELOG.md`
-`## [X.Y.Z]`. `./scripts/release-gate.sh` checks that. Narrative banners
+`## [X.Y.Z]` with a **`### Highlights`** subsection (1–10 bullets,
+operator-facing). `./scripts/release-gate.sh` checks that. Narrative banners
 (README, SECURITY, `docs/road-to-1.0.md`, `docs/experimental-mainnet.md`)
 are edited on the same bump PR; the scripts do not rewrite them.
+
+`./scripts/release-cut.sh` moves `## [Unreleased]` into `## [X.Y.Z] — date`
+and inserts an empty `### Highlights`. The ship PR **writes those bullets**
+(brief: what an operator should know, not the full Keep a Changelog body).
+`./scripts/release-notes.sh` is the GitHub Release / annotated-tag text:
+platform blurb + Highlights + a pointer at CHANGELOG. `release.yml` calls
+that script. Do not dump Unreleased into the GitHub Release.
 
 Existing line: **`v0.5.x`** (tags `v0.5.0`–`v0.5.2`). Next minor from
 today’s `0.5.99` is **0.6.0**, then **`v0.6.x`**, then master **0.6.99**.
@@ -68,7 +76,8 @@ All hermetic pins: `./scripts/release.test.sh` (includes
 | `./scripts/release-cut.sh --dev-next` | just-shipped `X.Y.0` → `X.Y.99` |
 | `./scripts/release-cut.sh --print-plan …` | prints `ship=` / `maint=` / `dev_next=` |
 | `./scripts/release-cut.sh --latest-maint` | highest `vX.Y.x` ref |
-| `./scripts/release-gate.sh` | cargo/nix/changelog; `--kind` → `ship`\|`dev` |
+| `./scripts/release-gate.sh` | cargo/nix/changelog; ship needs Highlights; `--kind` → `ship`\|`dev` |
+| `./scripts/release-notes.sh` | GitHub Release / tag text (blurb + Highlights) |
 | `./scripts/release.sh` | annotated tag on a **ship** version |
 | `./scripts/release.sh --tag-only` | push the tag, not the branch |
 | `./scripts/release-post.sh` | tag + for `X.Y.0` create `vX.Y.x` |
@@ -120,16 +129,19 @@ the bump on `master`. Do not merge a red PR.
 From current `origin/master` at `X.Y.99`:
 
 1. Worktree `release/X.(Y+1).0`. `./scripts/release-cut.sh --minor`.
-2. Edit narrative banners to the new **X.(Y+1).0** (and that `vX.(Y+1).x`
-   will be the patch line). Fill CHANGELOG if Unreleased was thin.
-3. PR → `master`. Labels `release` + `core-functional`. Poll **required +
+2. Write **`### Highlights`** (brief, operator-facing). Edit narrative
+   banners to the new **X.(Y+1).0** (and that `vX.(Y+1).x` will be the
+   patch line). Keep the detailed Unreleased body under the new heading.
+3. `./scripts/release-gate.sh` and `./scripts/release-notes.sh` must
+   succeed (preview the GitHub Release text).
+4. PR → `master`. Labels `release` + `core-functional`. Poll **required +
    `core-functional` + `release-extra`**.
-4. `gh pr merge --merge`. Fetch. Create a throwaway branch at
+5. `gh pr merge --merge`. Fetch. Create a throwaway branch at
    `origin/master` (or `origin/vX.Y.x`) — do not steal `master` from
    another worktree (`git switch -C tag/vX.Y.Z origin/master`).
-5. `./scripts/release-post.sh --no-push --allow-branch tag/vX.Y.Z` then
+6. `./scripts/release-post.sh --no-push --allow-branch tag/vX.Y.Z` then
    HTTPS-push the tag and `vX.(Y+1).x`. Confirm `release.yml` started.
-6. New worktree from that master: `./scripts/release-cut.sh --dev-next`.
+7. New worktree from that master: `./scripts/release-cut.sh --dev-next`.
    Narrative banners → **X.(Y+1).99**. PR → `master` (no ship labels).
    Merge when required checks are green.
 
@@ -140,7 +152,8 @@ From current `origin/master` at `X.Y.99`:
 2. Worktree from `origin/vX.Y.x`. Cherry-pick the change (must apply). If
    master also needs it and does not have it, say so — do not silently
    skip master.
-3. `./scripts/release-cut.sh --patch`. Narrative as needed.
+3. `./scripts/release-cut.sh --patch`. Write **`### Highlights`**. Narrative
+   as needed.
 4. PR → **`vX.Y.x`** (not `master`). Same ship labels and gates.
 5. Merge, fetch, checkout `origin/vX.Y.x`, `./scripts/release-post.sh`
    (tags; does **not** create a new maint branch or a `.99` bump).

@@ -39,6 +39,33 @@ release_changelog_notes() {
   ' "$ROOT/CHANGELOG.md" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
 }
 
+# Body under ### Highlights for ## [ver], not including the heading.
+release_changelog_highlights() {
+  local ver="$1"
+  awk -v ver="$ver" '
+    $0 ~ ("^## \\[" ver "\\]") { p = 1; next }
+    p && /^## \[/ { exit }
+    p && /^### Highlights/ { h = 1; next }
+    h && /^### / { exit }
+    h && /^## / { exit }
+    h { print }
+  ' "$ROOT/CHANGELOG.md"
+}
+
+release_require_highlights() {
+  local ver="$1"
+  local body bullets n
+  body="$(release_changelog_highlights "$ver")"
+  [[ -n "$(printf '%s\n' "$body" | grep -v '^[[:space:]]*$')" ]] || \
+    release_die "CHANGELOG.md ## [$ver] has no ### Highlights section"
+  bullets="$(printf '%s\n' "$body" | grep -E '^- ' || true)"
+  [[ -n "$bullets" ]] || \
+    release_die "CHANGELOG.md ## [$ver] ### Highlights has no bullets"
+  n="$(printf '%s\n' "$bullets" | grep -c .)"
+  (( n <= 10 )) || \
+    release_die "CHANGELOG.md ## [$ver] ### Highlights has $n bullets (max 10)"
+}
+
 release_parse_semver() {
   local ver="$1"
   [[ "$ver" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
@@ -105,6 +132,9 @@ release_cut_changelog_ship() {
       print
       print ""
       print "## [" ver "] — " date
+      print ""
+      print "### Highlights"
+      print ""
       next
     }
     { print }
