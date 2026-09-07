@@ -31,11 +31,13 @@ pub(crate) fn parse_hash32_display(hex: &str) -> Result<[u8; 32], Value> {
 }
 
 mod chain;
+mod decode;
 mod mempool;
 mod mine;
 mod net;
 
 use chain::*;
+use decode::*;
 use mempool::*;
 use mine::*;
 use net::*;
@@ -428,6 +430,9 @@ pub(crate) fn dispatch_inner(
         "getrawmempool" => getrawmempool(ctx, &params),
         "getmempoolentry" => getmempoolentry(ctx, &params),
         "getrawtransaction" => getrawtransaction(ctx, &params),
+        "decoderawtransaction" => decoderawtransaction(ctx, &params),
+        "decodescript" => decodescript(ctx, &params),
+        "validateaddress" => validateaddress(ctx, &params),
         "sendrawtransaction" => sendrawtransaction(ctx, &params),
         "testmempoolaccept" => testmempoolaccept(ctx, &params),
         "estimatesmartfee" => estimatesmartfee(ctx, &params),
@@ -466,9 +471,6 @@ pub(crate) fn dispatch_inner(
         | "signrawtransactionwithkey"
         | "createmultisig"
         | "combinerawtransaction"
-        | "decoderawtransaction"
-        | "decodescript"
-        | "validateaddress"
         | "deriveaddresses"
         | "gettxoutsetinfo" => Err(rpc_error(
             ERR_METHOD_NOT_FOUND,
@@ -571,6 +573,9 @@ const METHOD_LIST: &[&str] = &[
     "getrawmempool",
     "getmempoolentry",
     "getrawtransaction",
+    "decoderawtransaction",
+    "decodescript",
+    "validateaddress",
     "sendrawtransaction",
     "testmempoolaccept",
     "estimatesmartfee",
@@ -646,6 +651,18 @@ pub(crate) fn method_help(m: &str) -> String {
             .into(),
         "scantxoutset" => "scantxoutset action (scanobjects)\n\
              raw() scripts over Class A. MiniWallet support, not Core coins-DB."
+            .into(),
+        "decoderawtransaction" => "decoderawtransaction hexstring (iswitness)\n\
+             Decode a serialized transaction. iswitness=false refuses the BIP141 marker. \
+             scriptSig asm is rust-bitcoin, not Core ScriptToAsmStr sighash suffixes."
+            .into(),
+        "decodescript" => "decodescript hexstring\n\
+             asm, type, hex, and address when standard. No p2sh wrap, segwit wrap, \
+             or descriptor inference."
+            .into(),
+        "validateaddress" => "validateaddress address\n\
+             Happy path: isvalid, scriptPubKey, isscript, iswitness. Invalid is \
+             {isvalid:false} only (no error_locations)."
             .into(),
         "gettxout" => "gettxout txid n (include_mempool) — Class A + mempool.".into(),
         "getchaintips" => "getchaintips — active + held/archive side tips + headers-only.".into(),

@@ -763,8 +763,8 @@ fn all_methods_callable_empty_or_error() {
     ] {
         let _ = dispatch(&ctx, m, &params);
     }
-    let e = dispatch(&ctx, "decodescript", vec![json!("51")]).unwrap_err();
-    assert_eq!(e["code"], ERR_METHOD_NOT_FOUND);
+    let decoded = dispatch(&ctx, "decodescript", vec![json!("51")]).unwrap();
+    assert_eq!(decoded["type"], json!("nonstandard"));
     // estimatesmartfee requires conf_target (rpc_estimatefee.py)
     let _ = dispatch(&ctx, "estimatesmartfee", vec![]).unwrap_err();
     let _ = dispatch(&ctx, "estimatesmartfee", vec![json!(6)]).unwrap();
@@ -3003,5 +3003,152 @@ fn testmempoolaccept_rbf_does_not_evict_conflict() {
         !mp.contains(&high.compute_txid()),
         "trial replacement must not remain in the mempool"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn decode_rpc_subset() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize_hex;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    let (ctx, dir) = ctx_empty();
+    let help = dispatch(&ctx, "help", vec![]).unwrap();
+    let help_text = help.as_str().unwrap();
+    for name in ["decoderawtransaction", "decodescript", "validateaddress"] {
+        assert!(help_text.lines().any(|l| l == name), "help missing {name}");
+    }
+
+    let script_sig = ScriptBuf::from_bytes(vec![0x51]);
+    let legacy = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([1; 32]),
+                vout: 0,
+            },
+            script_sig: script_sig.clone(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let legacy_hex = serialize_hex(&legacy);
+    let dec = dispatch(&ctx, "decoderawtransaction", vec![json!(legacy_hex)]).unwrap();
+    assert_eq!(dec["version"], json!(2));
+    assert_eq!(dec["vin"][0]["vout"], json!(0));
+    assert_eq!(
+        dec["vin"][0]["scriptSig"]["hex"],
+        json!(rbitcoin_primitives::hex_encode(script_sig.as_bytes()))
+    );
+    assert!(dec["vin"][0]["scriptSig"]["asm"]
+        .as_str()
+        .unwrap()
+        .contains("1"));
+    assert_eq!(dec["vout"][0]["scriptPubKey"]["type"], json!("nonstandard"));
+    assert!(dec["size"].as_u64().unwrap() > 0);
+    assert!(dec["weight"].as_u64().unwrap() > 0);
+    assert!(dec.get("vin").unwrap()[0].get("txinwitness").is_none());
+
+    let extra = dispatch(
+        &ctx,
+        "decoderawtransaction",
+        vec![json!(format!("{legacy_hex}00"))],
+    )
+    .unwrap_err();
+    assert_eq!(extra["code"], ERR_DESERIALIZATION);
+    assert_eq!(extra["message"], json!("TX decode failed"));
+
+    let mut wit = Witness::new();
+    wit.push([0xAAu8]);
+    let witness_tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([2; 32]),
+                vout: 1,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: wit,
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let wit_hex = serialize_hex(&witness_tx);
+    let wit_ok = dispatch(
+        &ctx,
+        "decoderawtransaction",
+        vec![json!(wit_hex.clone()), json!(true)],
+    )
+    .unwrap();
+    assert_eq!(wit_ok["vin"][0]["txinwitness"], json!(["aa"]));
+    let wit_forced = dispatch(
+        &ctx,
+        "decoderawtransaction",
+        vec![json!(wit_hex), json!(false)],
+    )
+    .unwrap_err();
+    assert_eq!(wit_forced["code"], ERR_DESERIALIZATION);
+    assert_eq!(wit_forced["message"], json!("TX decode failed"));
+
+    let p2wpkh = Address::from_str("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080")
+        .unwrap()
+        .require_network(BtcNetwork::Regtest)
+        .unwrap();
+    let spk_hex = rbitcoin_primitives::hex_encode(p2wpkh.script_pubkey().as_bytes());
+    let script = dispatch(&ctx, "decodescript", vec![json!(spk_hex.clone())]).unwrap();
+    assert_eq!(script["type"], json!("witness_v0_keyhash"));
+    assert_eq!(script["address"], json!(p2wpkh.to_string()));
+    assert_eq!(script["hex"], json!(spk_hex));
+    assert!(script.get("p2sh").is_none());
+    assert!(script.get("segwit").is_none());
+    assert!(script.get("desc").is_none());
+
+    let op_true = dispatch(&ctx, "decodescript", vec![json!("51")]).unwrap();
+    assert_eq!(op_true["type"], json!("nonstandard"));
+    assert!(op_true.get("address").is_none());
+
+    let valid = dispatch(&ctx, "validateaddress", vec![json!(p2wpkh.to_string())]).unwrap();
+    assert_eq!(valid["isvalid"], json!(true));
+    assert_eq!(valid["address"], json!(p2wpkh.to_string()));
+    assert_eq!(valid["scriptPubKey"], json!(spk_hex));
+    assert_eq!(valid["isscript"], json!(false));
+    assert_eq!(valid["iswitness"], json!(true));
+    assert_eq!(valid["witness_version"], json!(0));
+    assert!(valid["witness_program"].as_str().unwrap().len() == 40);
+    assert!(valid.get("error_locations").is_none());
+
+    let p2sh = dispatch(
+        &ctx,
+        "validateaddress",
+        vec![json!("2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc")],
+    )
+    .unwrap();
+    assert_eq!(p2sh["isvalid"], json!(true));
+    assert_eq!(p2sh["isscript"], json!(true));
+    assert_eq!(p2sh["iswitness"], json!(false));
+
+    let junk = dispatch(&ctx, "validateaddress", vec![json!("not-an-address")]).unwrap();
+    assert_eq!(junk, json!({"isvalid": false}));
+
+    let mainnet = dispatch(
+        &ctx,
+        "validateaddress",
+        vec![json!("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")],
+    )
+    .unwrap();
+    assert_eq!(mainnet, json!({"isvalid": false}));
+
+    let still_never = dispatch(&ctx, "createrawtransaction", vec![]).unwrap_err();
+    assert_eq!(still_never["code"], ERR_METHOD_NOT_FOUND);
     let _ = std::fs::remove_dir_all(&dir);
 }

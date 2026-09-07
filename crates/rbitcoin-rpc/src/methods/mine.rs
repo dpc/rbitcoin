@@ -42,6 +42,7 @@ pub(crate) fn script_pubkey_json(script: &ScriptBuf, network: BtcNetwork) -> Val
     let mut obj = json!({
         "hex": hex_encode(script.as_bytes()),
         "asm": script.to_asm_string(),
+        "type": script_core_type(script),
     });
     if let Ok(addr) = Address::from_script(script, network) {
         if let Some(m) = obj.as_object_mut() {
@@ -49,6 +50,38 @@ pub(crate) fn script_pubkey_json(script: &ScriptBuf, network: BtcNetwork) -> Val
         }
     }
     obj
+}
+
+/// Core `decoderawtransaction` / `decodescript` `type` strings.
+pub(crate) fn script_core_type(script: &bitcoin::Script) -> &'static str {
+    if script.is_p2pkh() {
+        "pubkeyhash"
+    } else if script.is_p2sh() {
+        "scripthash"
+    } else if script.is_p2wpkh() {
+        "witness_v0_keyhash"
+    } else if script.is_p2wsh() {
+        "witness_v0_scripthash"
+    } else if script.is_p2tr() {
+        "witness_v1_taproot"
+    } else if is_p2anchor(script) {
+        "anchor"
+    } else if script.is_witness_program() {
+        "witness_unknown"
+    } else if script.is_op_return() {
+        "nulldata"
+    } else if script.is_p2pk() {
+        "pubkey"
+    } else if script.is_multisig() {
+        "multisig"
+    } else {
+        "nonstandard"
+    }
+}
+
+fn is_p2anchor(script: &bitcoin::Script) -> bool {
+    let b = script.as_bytes();
+    b.len() == 4 && b[0] == 0x51 && b[1] == 0x02 && b[2] == 0x4e && b[3] == 0x73
 }
 
 pub(crate) fn decode_output_script(ctx: &RpcContext, s: &str) -> Result<ScriptBuf, Value> {
@@ -986,12 +1019,23 @@ pub(crate) fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNet
     let txid = hash_hex_display(&tx.compute_txid().to_byte_array());
     let mut vin = Vec::new();
     for (i, inp) in tx.input.iter().enumerate() {
-        vin.push(json!({
+        let mut row = json!({
             "txid": hash_hex_display(&inp.previous_output.txid.to_byte_array()),
             "vout": inp.previous_output.vout,
+            "scriptSig": {
+                "asm": inp.script_sig.to_asm_string(),
+                "hex": hex_encode(inp.script_sig.as_bytes()),
+            },
             "sequence": inp.sequence.to_consensus_u32(),
             "n": i,
-        }));
+        });
+        if !inp.witness.is_empty() {
+            let stack: Vec<String> = inp.witness.iter().map(hex_encode).collect();
+            if let Some(m) = row.as_object_mut() {
+                m.insert("txinwitness".into(), json!(stack));
+            }
+        }
+        vin.push(row);
     }
     let mut vout = Vec::new();
     for (i, out) in tx.output.iter().enumerate() {
