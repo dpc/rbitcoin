@@ -133,7 +133,7 @@ lists as done, but whose official script still fails on dialect, stay
 | `rpc_help.py` | `rpc-dialect` | `help` shipped; Core categories / converthelp |
 | `rpc_packages.py` | `rpc-dialect` | `submitpackage` shipped; script field zoo |
 | `rpc_rawtransaction.py` | `rpc-dialect` | Class A always indexes; remaining type-check needles |
-| `rpc_validateaddress.py` | `rpc-dialect` | method shipped; Core error text |
+| `rpc_validateaddress.py` | `rpc-dialect` | node happy-path subset; proxy owns Core error text / `error_locations` |
 | `mempool_persist.py` | `rpc-dialect` | our `{datadir}/mempool/` analog; not Core `mempool.dat` |
 
 `rpc_getblockfrompeer.py` stays `rpc-missing` (method not found).

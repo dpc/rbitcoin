@@ -9,8 +9,21 @@ before 1.0).
 
 ## [Unreleased]
 
+### Added
+
+- **RPC decode subset:** `decoderawtransaction`, `decodescript`, and
+  `validateaddress` on the node (see [`docs/rpc.md`](docs/rpc.md)). Verbose
+  `getrawtransaction` / `getblock` v2 vin now include `scriptSig`;
+  `scriptPubKey` includes Core-style `type`. Core dialect wrap / miniscript /
+  `error_locations` stay on the functional-test proxy.
+
 ### Fixed
 
+- **Host A/B docs:** [`docs/io-modality.md`](docs/io-modality.md) no longer
+  tells operators to build `rbitcoin-store-bench` (removed from the default
+  graph). Head-insert A/B is musl `rbitcoin-node` plus `ibd: perf`. Mimalloc
+  in [`docs/reproducible-builds.md`](docs/reproducible-builds.md) is node/cli
+  only.
 - **`store_reorg` extend after a heavier held fork:** `try_apply_held` may
   return `Accepted` above the next height; that is not store corruption.
 

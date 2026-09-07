@@ -7,8 +7,12 @@ required keys are `-32602`; unknown named keys are `-8`.
 rbitcoin serves a **documented subset** of Bitcoin Core JSON-RPC over plain HTTP.
 This is **not** full Core parity: no wallet, no `createrawtransaction` /
 `signrawtransactionwithkey` / `createmultisig` / `sendtoaddress` (those
-live only on the Core-functional test proxy, backed by Esplora). `getblocktemplate` / `getmininginfo` are a
-miner-backend (no stratum, no BIP9 testdummy). `scantxoutset` supports `raw(script)` via the scripthash
+live only on the Core-functional test proxy, backed by Esplora).
+`decoderawtransaction` / `decodescript` / `validateaddress` are a **node
+subset** (table below); the functional harness proxy still intercepts those
+names for Core dialect scripts (`rpc_decodescript.py`, `rpc_validateaddress.py`).
+`getblocktemplate` / `getmininginfo` are a miner-backend (no stratum, no BIP9
+testdummy). `scantxoutset` supports `raw(script)` via the scripthash
 index (when `--shindex`) or Class A txout + spent. Prefer **Electrum /
 Esplora** (with `--shindex`) for address/script history.
 
@@ -79,7 +83,10 @@ still wait for durable SH when shindex is on.
 | `getnetworkinfo` / `getconnectioncount` / `getpeerinfo` | BIP324 v2-only; `getpeerinfo` is the live session table. `mapped_as` is present when `--asmap` / `{datadir}/ip_asn.dat` mapped the peer (Core field; omitted without a map or ASN 0). `version` is rbitcoin semver as a Core integer (`major*10000+minor*100+patch`: `0.1.0` → `100`, `0.5.0` → `500`, `0.5.1` → `501`, `0.5.99` → `599`), not a Core release. `localservices` matches advertised `NETWORK\|WITNESS\|P2P_V2`. `localaddresses` lists `-externalip` (`score` = Core `LOCAL_MANUAL`) |
 | `addnode` / `disconnectnode` / `addconnection` | All networks. `addnode onetry` / `add` dial; `disconnectnode` by `nodeid` or address |
 | `getmempoolinfo` / `getrawmempool` / `getmempoolentry` | MempoolHub. `maxmempool` is the operator weight budget (`--mempool-size-mb`). `ancestorcount` / `descendantcount` (and size/fee sums) walk the cluster graph. Verbose `fees.{base,modified,ancestor,descendant,chunk}` and `chunkweight` include `prioritisetransaction` deltas; top-level `ancestorfees` / `descendantfees` stay base satoshis. `unbroadcastcount` / `unbroadcast` track `sendrawtransaction` txs until a peer getdata's them. |
-| `getrawtransaction` | Class A + mempool. Optional Core `blockhash` arg is accepted and ignored. |
+| `getrawtransaction` | Class A + mempool. Optional Core `blockhash` arg is accepted and ignored. Verbose objects share `tx_to_json` with `decoderawtransaction` / `getblock` verbosity 2 (`scriptSig`, `scriptPubKey.type`). |
+| `decoderawtransaction` | All networks. Decode hex. Optional `iswitness`: `false` refuses a BIP141 marker (`-22 TX decode failed`). Extra trailing bytes also `-22`. `scriptSig.asm` is rust-bitcoin, not Core `ScriptToAsmStr` sighash suffixes. Coinbase vin is `txid`/`vout`/`scriptSig` (not Core's `coinbase` key). |
+| `decodescript` | All networks. `asm`, Core-style `type`, `hex`, and `address` when `Address::from_script` succeeds. No `p2sh` wrap, `segwit` wrap, or `desc` / miniscript. |
+| `validateaddress` | All networks. Valid: `isvalid`, `address`, `scriptPubKey`, `isscript`, `iswitness`, plus `witness_version` / `witness_program` when segwit. Invalid (parse fail or wrong chain): `{isvalid: false}` only — no `error` / `error_locations`. |
 | `sendrawtransaction` / `testmempoolaccept` | Relay must be enabled. `sendrawtransaction` is live accept. `testmempoolaccept` is dry-run (`MempoolHub::test_accept`: prepare + scripts + RBF/cluster checks, no commit / announce / RBF eviction / orphan park). |
 | `estimatesmartfee` | **10-minute inclusion frontier** — not Core historical multi-horizon. See [`mempool-fee-estimation.md`](./mempool-fee-estimation.md). |
 | `generatetoaddress` / `generatetodescriptor` / `generateblock` / `generate` | **Regtest only.** Mine through `ChainHub::accept_block` (same confirm as P2P). First generated block includes `select_block_txs`, then `remove_for_block`. `generatetodescriptor` accepts `raw(HEX)`, `addr(ADDRESS)`, or a bare address. |
@@ -108,7 +115,8 @@ still wait for durable SH when shindex is on.
 | Wallet RPC | No keystore |
 | Stratum / pool / BIP9 testdummy | `getblocktemplate` / `getmininginfo` / `prioritisetransaction` are a cluster-chunk **selector** ([`COMPAT.md`](../COMPAT.md)). No stratum, no testdummy, no wallet keys |
 | Core `generate*` as a mining product | **Regtest harness only.** `submitblock` is the same receive path as P2P |
-| `combinerawtransaction` | Not implemented |
+| `combinerawtransaction` / `createrawtransaction` / `signrawtransactionwithkey` / `createmultisig` / `deriveaddresses` | Not implemented (harness proxy only) |
+| Decode Core dialect | Node `decodescript` omits wrap/`desc`; `validateaddress` omits `error_locations`; `decoderawtransaction` asm is rust-bitcoin. Official scripts stay on the proxy. |
 | Full `scantxoutset` / `gettxoutsetinfo` | No UTXO-set coins DB; denserels ≠ chainstate. `raw()` Class A walk is the MiniWallet subset only. |
 | Address history via Core method names | Use Electrum/Esplora with `--shindex` |
 | Exact Core JSON field-for-field | Best-effort |
