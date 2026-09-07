@@ -32,12 +32,12 @@ Nix, macOS/Windows): [`CONTRIBUTING.md`](./CONTRIBUTING.md). See
 [`docs/reproducible-builds.md`](./docs/reproducible-builds.md).
 
 **GitHub Release** (`v*.*.*` tags) is the operator snapshot: Linux musl +
-Windows CRT-static PE + Darwin aarch64 binaries + SHA256SUMS. Merge the version-bump PR into
-`master` locally (merge commit), then:
+Windows CRT-static PE + Darwin aarch64 binaries + SHA256SUMS. Cut, merge,
+tag, and `vX.Y.x` / `.99` follow-up: [`docs/releases.md`](./docs/releases.md).
 
 ```bash
-./scripts/release.sh          # checks, tag vX.Y.Z, push master + tag
-# ./scripts/release.sh --dry-run
+./scripts/release-post.sh --dry-run   # after the ship version is on the branch
+./scripts/release.sh --dry-run
 ```
 
 Retry from Actions → **release** → Run workflow (artifacts only, no tag).

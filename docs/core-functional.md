@@ -142,9 +142,11 @@ lists as done, but whose official script still fails on dialect, stay
 
 [`.github/workflows/core-functional.yml`](../.github/workflows/core-functional.yml)
 runs `scripts/core-functional/nightly.sh` on a nightly cron, on
-`workflow_dispatch`, and on PRs labeled **`core-functional`**. Unlabeled
-PRs keep the cargo gates only. Label the PR when touching the harness
-(see `AGENTS.md`).
+`workflow_dispatch`, and on PRs that are **ship versions**, or labeled
+**`core-functional`** / **`release`**. Unlabeled non-ship PRs keep the cargo
+gates only. Label harness PRs and every version-bump ship PR (see
+[`releases.md`](./releases.md)). The `release-extra` job on that workflow
+fails when a ship PR did not get a green `core-functional`.
 
 The job sparse-inits the pin, checks the inventory, **warns** (does not
 fail) if a newer Bitcoin Core *release* exists than `inventory.toml`

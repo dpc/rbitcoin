@@ -18,6 +18,7 @@ update that file — do not paste a parallel spec.
 | Peer full nodes | [`peer-clients.md`](./peer-clients.md) | Hornet / satd comparison; later-consideration tests and ideas |
 
 Planning a multi-step change: [`how-we-plan.md`](./how-we-plan.md).
+Releases (tag / `vX.Y.x` / `.99`): [`releases.md`](./releases.md).
 1.0 product gates: [`road-to-1.0.md`](./road-to-1.0.md) (not the living
 quality backlog).
 
@@ -40,6 +41,7 @@ quality backlog).
 | [`consensus-tests.md`](./consensus-tests.md) | Rules we own vs Core corpora. |
 | [`core-functional.md`](./core-functional.md) | Core v31.1 functional harness. |
 | [`how-we-plan.md`](./how-we-plan.md) | Red → Green → Refactor planning contract. |
+| [`releases.md`](./releases.md) | Tag `vX.Y.Z`, `vX.Y.x` patch line, `.99` bump; agent playbook. |
 | [`code-shape.md`](./code-shape.md) | Control flow, types, naming, composition (CONTRIBUTING principle 10). Ranked extracts: quality.md **Q-61**. |
 | [`quality.md`](./quality.md) | Living quality roadmap (Open + Won't fix + short Completed). |
 | [`road-to-1.0.md`](./road-to-1.0.md) | 1.0 product gates and milestone sequence. |

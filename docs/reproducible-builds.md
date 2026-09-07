@@ -95,10 +95,11 @@ with the musl package. Windows IoRing is not supported.
 
 ### GitHub Release (`v*.*.*` tags)
 
-Merge the version-bump PR into `master` locally, then:
+Cut, merge, tag, `vX.Y.x`, and the `.99` bump:
+[`releases.md`](./releases.md). After the ship SHA is on the branch:
 
 ```bash
-./scripts/release.sh           # checks, tag vX.Y.Z, push master + tag
+./scripts/release-post.sh      # tag + vX.Y.x when this is X.Y.0
 ./scripts/release.sh --dry-run
 ```
 

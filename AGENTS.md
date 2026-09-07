@@ -119,8 +119,9 @@ Required jobs: **`fmt`**, **`deny`**, **`clippy`**, **`ast-grep`**, **`test`**,
 `./scripts/ast-grep.sh` (rules live in `lint/ast-grep/`; do not copy them here).
 `windows` / `macos` are native
 store + `--smoke` (not operator zips). Operator binaries are GitHub Releases
-(`release.yml`). Label **`core-functional`** when the PR touches the Core
-functional harness.
+(`release.yml`). Releases (minor / patch / major): [`docs/releases.md`](docs/releases.md).
+Label **`core-functional`** when the PR touches the Core functional harness
+(and on every **ship** version-bump PR).
 
 `origin` fetch/pull is HTTPS; `pushurl` is SSH (operator). This VM has **no**
 GitHub App SSH key. The App token from `~/.config/rbitcoin-grok/gh-login.sh`
