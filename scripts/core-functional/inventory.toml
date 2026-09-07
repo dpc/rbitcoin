@@ -992,7 +992,7 @@ reason = "core-log"
 name = "rpc_validateaddress.py"
 status = "skip"
 reason = "rpc-dialect"
-analog = "follow-up: validateaddress exists; Core error-text"
+analog = "node happy-path subset; proxy owns Core error-text / error_locations"
 
 [[test]]
 name = "rpc_whitelist.py"

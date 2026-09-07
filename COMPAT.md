@@ -60,7 +60,7 @@ wallets and APIs can verify and sync—not so we become mempool.space.
 | Coin / MiniWallet (`gettxout`, `scantxoutset` `raw(HEX)`) | done | Class A unspent walk — **not** a coins-DB / HD-range scan |
 | Index / tips (`getindexinfo`, `getchaintips`, `waitforblock*`) | done | `txindex` means Class A reconstruct; `getchaintips` is the active tip |
 | Fee (`estimatesmartfee`) | done | **10-minute inclusion** product — not Core historical |
-| Decode (`decoderawtransaction`, `decodescript`, `validateaddress`) | done | |
+| Decode (`decoderawtransaction`, `decodescript`, `validateaddress`) | done | Node **subset** ([`docs/rpc.md`](./docs/rpc.md)): decode hex, script type/address, validate happy path. No miniscript wrap, no `error_locations`. Core-functional scripts still hit the harness proxy. |
 | Regtest `generatetoaddress` / `generatetodescriptor` / `generateblock` / `generate` / `submitblock` / `setmocktime` | harness | **Regtest only** (except `submitblock`). Same confirm/accept path as P2P. `setmocktime` is not a wall-clock hook. |
 | `invalidateblock` / `reconsiderblock` / `preciousblock` | done | Disconnect/re-accept; precious = equal-work preference |
 | Mining template (`getblocktemplate`, `getmininginfo`, `prioritisetransaction`, `getmempoolcluster` / feerate diagram) | done | Cluster-chunk selector. `rules` must include `segwit`. No stratum, no BIP9 testdummy, no wallet keys |
