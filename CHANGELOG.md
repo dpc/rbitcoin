@@ -11,6 +11,11 @@ before 1.0).
 
 ### Fixed
 
+- **Host A/B docs:** [`docs/io-modality.md`](docs/io-modality.md) no longer
+  tells operators to build `rbitcoin-store-bench` (removed from the default
+  graph). Head-insert A/B is musl `rbitcoin-node` plus `ibd: perf`. Mimalloc
+  in [`docs/reproducible-builds.md`](docs/reproducible-builds.md) is node/cli
+  only.
 - **`store_reorg` extend after a heavier held fork:** `try_apply_held` may
   return `Accepted` above the next height; that is not store corruption.
 

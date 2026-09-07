@@ -50,7 +50,7 @@ depend on the builder’s checkout path or username.
 
 ### Heap allocator
 
-Product binaries (`rbitcoin-node`, `rbitcoin-cli`, `rbitcoin-store-bench`) use
+Product binaries (`rbitcoin-node`, `rbitcoin-cli`) use
 **mimalloc** as the process-wide `#[global_allocator]` on both targets:
 
 | Package | Link | Allocator |

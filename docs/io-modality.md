@@ -200,25 +200,12 @@ grep 'ibd: sizes' host.log       # rss= anon= file=
 SHA vs candidate SHA; compare tip rate, head ms/blk, RssFile. **Fail ship** on
 5×-class head regression or agreed **>+20%** head ms/blk without tip-rate win.
 
-### Store microbench (phase 2 head insert A/B)
-
-Binary: **`rbitcoin-store-bench`** (`crates/rbitcoin-store`).
-
-```bash
-# Dev / agent (glibc nix-shell) — correctness + rough order of magnitude only:
-cargo build -p rbitcoin-store --release --bin rbitcoin-store-bench
-./target/release/rbitcoin-store-bench --n 200000 --bits 18 --dir /var/tmp/head-ab
-
-# Operator preferred: build via musl package (ships when -p rbitcoin-store is built):
-nix build .#rbitcoin-musl --out-link result
-# After install from result, or:
-find result -name 'rbitcoin-store-bench' 2>/dev/null
-# Run on local NVMe, not 9p:
-./target/release/rbitcoin-store-bench --n 500000 --bits 20 --dir /var/tmp/head-ab
-```
+There is no separate store microbench binary (`rbitcoin-store-bench` was
+removed; default graph is product + suite). Head-insert A/B is the live
+`ibd: perf` / `ibd: perf_dbg` window above.
 
 Maps are gone (`memmap2` not in the workspace). There is no `RBITCOIN_TX_HEAD_ACCESS`
-hatch and no `--access` bench flag. Tables are fd pread/pwrite + fallocate.
+hatch. Tables are fd pread/pwrite + fallocate.
 Class C is L2 write-behind (`flush_class_c_tip` before BQ dequeue).
 
 Live head insert is page-coalesced pread → mutate → pwrite (not per-slot uring).
