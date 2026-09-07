@@ -108,8 +108,6 @@ pub struct LivePeer {
     pub conn_type: PeerConnType,
     /// Their `version.relay`. False or `block-relay-only` → `relaytxes=false`.
     pub relay: bool,
-    /// Core `CNode::m_inbound_onion` (accepted on `-bind=…=onion`).
-    inbound_onion: AtomicBool,
     pub stop: AtomicBool,
     /// Full `Block`/`CmpctBlock` messages queued to this session's writer.
     pub serve_inflight: AtomicUsize,
@@ -290,14 +288,6 @@ impl LivePeer {
 
     pub fn v2_transport_ready(&self) -> bool {
         self.v2_transport_ready.load(Ordering::Acquire)
-    }
-
-    pub fn set_inbound_onion(&self) {
-        self.inbound_onion.store(true, Ordering::Relaxed);
-    }
-
-    pub fn inbound_onion(&self) -> bool {
-        self.inbound_onion.load(Ordering::Relaxed)
     }
 
     pub fn set_wants_addrv2(&self) {
@@ -900,9 +890,9 @@ pub struct PeerHub {
     pending_outbound_nonces: Mutex<HashSet<u64>>,
     /// Shared addrman for GetAddr responses (optional until node wires it).
     addrman: Mutex<Option<std::sync::Arc<Mutex<crate::seeds::AddrMan>>>>,
-    /// Per-bind GetAddr cache: (canonical bind, inbound_onion) → (cached_at, addrs).
+    /// Per-listen GetAddr cache: canonical bind → (cached_at, addrs).
     addr_response_cache:
-        Mutex<HashMap<(SocketAddr, bool), (u64, Vec<(u32, bitcoin::p2p::address::Address)>)>>,
+        Mutex<HashMap<SocketAddr, (u64, Vec<(u32, bitcoin::p2p::address::Address)>)>>,
     /// Core `-peertimeout` seconds (VERSION/VERACK). Default 60.
     peer_timeout_secs: AtomicU64,
     /// Core `-externalip` addresses we advertise (`getnetworkinfo.localaddresses`).
@@ -930,7 +920,7 @@ fn mix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-fn addr_sample_seed(bind: SocketAddr, inbound_onion: bool, now: u64) -> u64 {
+fn addr_sample_seed(bind: SocketAddr, now: u64) -> u64 {
     let bind = canonical_bind(bind);
     let mut s = mix64(now);
     s ^= mix64(u64::from(bind.port()));
@@ -947,9 +937,6 @@ fn addr_sample_seed(bind: SocketAddr, inbound_onion: bool, now: u64) -> u64 {
             s ^= mix64(u64::from_be_bytes(hi));
             s ^= mix64(u64::from_be_bytes(lo));
         }
-    }
-    if inbound_onion {
-        s ^= mix64(4);
     }
     s
 }
@@ -1056,24 +1043,21 @@ impl PeerHub {
         }
     }
 
-    /// Core GetAddr reply: per-bind cache (24h) of up to 1000 / 23% of addrman.
-    /// `inbound_onion` is Core `CNode::m_inbound_onion` (tagged `-bind=…=onion`).
+    /// Core GetAddr reply: per-listen cache (24h) of up to 1000 / 23% of addrman.
     pub fn addr_response_for_bind(
         &self,
         bind: SocketAddr,
-        inbound_onion: bool,
     ) -> Vec<(u32, bitcoin::p2p::address::Address)> {
         const MAX_ADDR_TO_SEND: usize = 1000;
         const MAX_PCT_ADDR_TO_SEND: usize = 23;
         const CACHE_SECS: u64 = 24 * 60 * 60;
         let bind = canonical_bind(bind);
-        let key = (bind, inbound_onion);
         let now = self.now_secs();
         let mut cache = self
             .addr_response_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some((cached_at, addrs)) = cache.get(&key) {
+        if let Some((cached_at, addrs)) = cache.get(&bind) {
             if now.saturating_sub(*cached_at) < CACHE_SECS {
                 return addrs.clone();
             }
@@ -1096,7 +1080,7 @@ impl PeerHub {
             return Vec::new();
         }
         let mut idxs: Vec<usize> = (0..n).collect();
-        let mut state = addr_sample_seed(bind, inbound_onion, now);
+        let mut state = addr_sample_seed(bind, now);
         for i in (1..idxs.len()).rev() {
             state = mix64(state);
             let j = (state as usize) % (i + 1);
@@ -1111,7 +1095,7 @@ impl PeerHub {
                 bitcoin::p2p::address::Address::new(&addr, services),
             ));
         }
-        cache.insert(key, (now, out.clone()));
+        cache.insert(bind, (now, out.clone()));
         out
     }
 
@@ -1432,7 +1416,6 @@ impl PeerHub {
             startingheight: ver.start_height,
             conn_type,
             relay: ver.relay,
-            inbound_onion: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             serve_inflight: AtomicUsize::new(0),
             hb_to: AtomicBool::new(false),
@@ -2358,26 +2341,26 @@ mod tests {
         hub.set_mock_now(1_700_000_000);
         hub.set_addrman(Arc::new(Mutex::new(fill_addrman(5_000))));
         let bind = SocketAddr::from(([127, 0, 0, 1], 18444));
-        let a = addr_ips(&hub.addr_response_for_bind(bind, false));
-        let b = addr_ips(&hub.addr_response_for_bind(bind, false));
+        let a = addr_ips(&hub.addr_response_for_bind(bind));
+        let b = addr_ips(&hub.addr_response_for_bind(bind));
         assert_eq!(a.len(), 1000);
         assert_eq!(a, b);
     }
 
     #[test]
-    fn getaddr_cache_onion_differs_from_clearnet_on_same_socket() {
+    fn getaddr_cache_distinct_listens_differ() {
         let hub = PeerHub::new();
         hub.set_mock_now(1_700_000_000);
         hub.set_addrman(Arc::new(Mutex::new(fill_addrman(5_000))));
-        let bind = SocketAddr::from(([127, 0, 0, 1], 18444));
-        let clear = addr_ips(&hub.addr_response_for_bind(bind, false));
-        let onion = addr_ips(&hub.addr_response_for_bind(bind, true));
-        assert_eq!(clear.len(), 1000);
-        assert_eq!(onion.len(), 1000);
-        assert_ne!(
-            clear, onion,
-            "Core m_network_key includes inbound_onion; same bind must not share a GetAddr cache"
-        );
+        let a = addr_ips(&hub.addr_response_for_bind(SocketAddr::from(([127, 0, 0, 1], 18444))));
+        let b = addr_ips(&hub.addr_response_for_bind(SocketAddr::from(([127, 0, 0, 1], 18445))));
+        let c = addr_ips(&hub.addr_response_for_bind(SocketAddr::from(([127, 0, 0, 1], 18446))));
+        assert_eq!(a.len(), 1000);
+        assert_eq!(b.len(), 1000);
+        assert_eq!(c.len(), 1000);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
     }
 
     #[test]
@@ -2387,8 +2370,8 @@ mod tests {
         hub.set_addrman(Arc::new(Mutex::new(fill_addrman(5_000))));
         let v4 = SocketAddr::from(([127, 0, 0, 1], 18444));
         let v6 = SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1).to_ipv6_mapped(), 18444));
-        let a = addr_ips(&hub.addr_response_for_bind(v4, false));
-        let b = addr_ips(&hub.addr_response_for_bind(v6, false));
+        let a = addr_ips(&hub.addr_response_for_bind(v4));
+        let b = addr_ips(&hub.addr_response_for_bind(v6));
         assert_eq!(a.len(), 1000);
         assert_eq!(a, b);
     }
@@ -2399,9 +2382,9 @@ mod tests {
         hub.set_mock_now(1_700_000_000);
         hub.set_addrman(Arc::new(Mutex::new(fill_addrman(5_000))));
         let bind = SocketAddr::from(([127, 0, 0, 1], 18444));
-        let first = addr_ips(&hub.addr_response_for_bind(bind, false));
+        let first = addr_ips(&hub.addr_response_for_bind(bind));
         hub.set_mock_now(1_700_000_000 + 24 * 60 * 60);
-        let second = addr_ips(&hub.addr_response_for_bind(bind, false));
+        let second = addr_ips(&hub.addr_response_for_bind(bind));
         assert_eq!(first.len(), 1000);
         assert_ne!(first, second);
     }
