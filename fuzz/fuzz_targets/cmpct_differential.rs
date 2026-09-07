@@ -9,9 +9,9 @@ use std::time::Duration;
 use libfuzzer_sys::fuzz_target;
 use rbitcoin_fuzz::{spawn_bitcoind_p2p, tmp_dir, CoreChild};
 use rbitcoin_net::{
-    classify_v2_cmpct_peer, cmpct_missing_empty_mempool, encode_cmpctblock_v2, encode_pong_v2,
-    encode_sendcmpct_hb_v2, prepare_cmpct_fuzz_hsi, BlockOracle, CmpctPeerFrame, NetError,
-    V2PlainSession,
+    classify_v2_cmpct_peer, cmpct_missing_for_case, encode_cmpctblock_v2, encode_pong_v2,
+    encode_sendcmpct_hb_v2, encode_tx_v2, prepare_cmpct_fuzz_case, BlockOracle, CmpctPeerFrame,
+    NetError, V2PlainSession,
 };
 use tokio::net::TcpStream;
 use tokio::runtime::{Builder, Runtime};
@@ -164,13 +164,13 @@ enum SendOutcome {
 }
 
 fn send_one(b: &Base, data: &[u8]) -> SendOutcome {
-    let Some(hsi) = prepare_cmpct_fuzz_hsi(data) else {
+    let Some(case) = prepare_cmpct_fuzz_case(data) else {
         return SendOutcome::Live;
     };
-    let Some(ours) = cmpct_missing_empty_mempool(&hsi) else {
+    let Some(ours) = cmpct_missing_for_case(&case) else {
         return SendOutcome::Live;
     };
-    let Ok(payload) = encode_cmpctblock_v2(&hsi) else {
+    let Ok(payload) = encode_cmpctblock_v2(&case.hsi) else {
         return SendOutcome::Live;
     };
     let mut slot = b.session.lock().unwrap_or_else(|e| e.into_inner());
@@ -178,6 +178,13 @@ fn send_one(b: &Base, data: &[u8]) -> SendOutcome {
         return SendOutcome::Dead;
     };
     let result = b.rt.block_on(async {
+        for tx in &case.fill_txs {
+            let p = encode_tx_v2(tx).map_err(|_| NetError::Protocol("tx encode"))?;
+            sess.write_contents(&p).await?;
+        }
+        if !case.fill_txs.is_empty() {
+            drain_frames(sess, None).await?;
+        }
         if let Err(e) = sess.write_contents(&payload).await {
             return Err(e);
         }
@@ -197,7 +204,12 @@ fn send_one(b: &Base, data: &[u8]) -> SendOutcome {
             if core_idx != ours {
                 panic!("cmpct missing-index split: ours={ours:?} core={core_idx:?}");
             }
-            let hash = hsi.header.block_hash().to_string();
+            let hash = case.hsi.header.block_hash().to_string();
+            let _ = b.core.rpc.core_invalidate_hash(&hash);
+            SendOutcome::Compared
+        }
+        Ok(None) if ours.is_empty() => {
+            let hash = case.hsi.header.block_hash().to_string();
             let _ = b.core.rpc.core_invalidate_hash(&hash);
             SendOutcome::Compared
         }

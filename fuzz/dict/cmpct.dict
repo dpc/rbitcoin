@@ -1,0 +1,10 @@
+# Structured recipe tags (data[0] % 8 == 7 is raw BIP152)
+"\x00"
+"\x01"
+"\x02"
+"\x03"
+"\x07"
+# CompactSize / short-id fragments for the raw arm
+"\x00\x00"
+"\x01"
+"\x02"

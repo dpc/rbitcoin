@@ -110,6 +110,18 @@ assert_ok "cmpct-differential dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
 assert_ok "cmpct-differential dry-run BITCOIND_LISTEN=1" \
   grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+assert_ok "cmpct-differential dry-run dict" \
+  grep -qx "FUZZ_DICT=fuzz/dict/cmpct.dict" <<<"$out"
+assert_ok "cmpct-differential two-tx seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_two_tx.bin"
+assert_ok "cmpct-differential all-prefilled seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_all_prefilled.bin"
+assert_ok "cmpct-differential fill seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_fill.bin"
+assert_ok "cmpct-differential dup seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_dup.bin"
+assert_ok "cmpct-differential raw seed" \
+  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_raw.bin"
 
 out="$(FUZZ_DRY_RUN=1 FUZZ_WEEKDAY=6 "$RUN")"
 assert_ok "block_wire dry-run dict" \
@@ -389,6 +401,8 @@ assert_ok "inv dict exists" \
   test -s "$ROOT/fuzz/dict/inv.dict"
 assert_ok "electrum dict exists" \
   test -s "$ROOT/fuzz/dict/electrum.dict"
+assert_ok "cmpct dict exists" \
+  test -s "$ROOT/fuzz/dict/cmpct.dict"
 assert_ok "addrv2 empty seed" \
   test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/addrv2_empty.bin"
 assert_ok "inv one seed" \

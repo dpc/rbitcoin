@@ -29,6 +29,7 @@ wire_dict_for_bin() {
     v2_session) printf 'fuzz/dict/p2p.dict' ;;
     p2p_sequence_differential) printf 'fuzz/dict/p2p.dict' ;;
     script_differential|script_verify_differential|script_kernel_differential) printf 'fuzz/dict/script.dict' ;;
+    cmpct_differential) printf 'fuzz/dict/cmpct.dict' ;;
     *) printf '' ;;
   esac
 }
@@ -298,13 +299,22 @@ fi
 if [[ "$BIN" == "cmpct_differential" ]]; then
   export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
   merge_seed fuzz/corpus/cmpct_differential \
-    crates/rbitcoin-net/tests/fixtures/cmpct_h1_two_tx.bin
+    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_two_tx.bin
+  merge_seed fuzz/corpus/cmpct_differential \
+    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_all_prefilled.bin
+  merge_seed fuzz/corpus/cmpct_differential \
+    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_fill.bin
+  merge_seed fuzz/corpus/cmpct_differential \
+    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_dup.bin
+  merge_seed fuzz/corpus/cmpct_differential \
+    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_raw.bin
   log="${TMPDIR:-/tmp}/rbtc-fuzz-cmpct.$$.log"
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" cmpct_differential -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
+    -dict=fuzz/dict/cmpct.dict \
     -seed="$SEED" \
     2>&1 | tee "$log"
   st=${PIPESTATUS[0]}
@@ -313,7 +323,7 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
     copy_crashers fuzz/artifacts "$CRASHERS"
     exit "$st"
   fi
-  fail_if_no_comparisons "$log" 0
+  fail_if_no_comparisons "$log" 0.005
   exit 0
 fi
 
