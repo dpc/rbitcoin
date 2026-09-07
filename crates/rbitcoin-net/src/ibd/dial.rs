@@ -440,6 +440,21 @@ pub(crate) fn expire_addr_cooldown(cooldown: &mut HashMap<SocketAddr, Instant>, 
     cooldown.retain(|_, until| *until > now);
 }
 
+/// Handshake with no block bytes: last-resort + stall cooldown (not a stall disconnect).
+pub(crate) fn note_dead_without_block_bytes(
+    book: &mut AddrMan,
+    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
+    addr: SocketAddr,
+    first_data_ms: u64,
+    now: Instant,
+) {
+    if first_data_ms != 0 {
+        return;
+    }
+    book.note_connect_failed(addr, false);
+    addr_cooldown.insert(addr, now + STALL_ADDR_COOLDOWN);
+}
+
 /// One stall rule: if a peer has outstanding block getdata and no **block**
 /// progress for `stall`, disconnect it and free its work for reassignment.
 ///
@@ -635,6 +650,33 @@ mod tests {
         expire_addr_cooldown(&mut cooldown, now);
         assert!(cooldown.contains_key(&addr(2)));
         assert!(!cooldown.contains_key(&addr(3)));
+    }
+
+    #[test]
+    fn handshake_then_die_is_failed_and_cooled() {
+        let mut book = AddrMan::new();
+        let lemon = addr(4);
+        book.note_connected(lemon);
+        let mut cooldown = HashMap::new();
+        let now = Instant::now();
+        note_dead_without_block_bytes(&mut book, &mut cooldown, lemon, 0, now);
+        assert!(
+            book.flags(&lemon).failed_last_connect(),
+            "no block bytes → last-resort"
+        );
+        assert_eq!(book.flags(&lemon).dial_tier(), 2);
+        assert!(cooldown.contains_key(&lemon));
+        let blocked = dial_blocked_addrs(&[], &cooldown, now);
+        assert!(blocked.contains(&lemon));
+
+        let good = addr(5);
+        book.note_connected(good);
+        note_dead_without_block_bytes(&mut book, &mut cooldown, good, 42, now);
+        assert!(
+            !book.flags(&good).failed_last_connect(),
+            "peer that sent block bytes keeps its connected rank"
+        );
+        assert!(!cooldown.contains_key(&good));
     }
 
     fn samp(id: usize, bps: u64, inflight: bool) -> RelativeSlowSample {
