@@ -739,7 +739,7 @@ fn extend_valid_header_tip(
 ) -> BlockHash {
     let mut cur = start;
     let mut ht = start_h;
-    for _ in 0..super::MAX_ORDERED_HEADERS {
+    for _ in 0..64 {
         let next_ht = ht.saturating_add(1);
         let Some(cands) = by_h.get(&next_ht) else {
             break;
@@ -879,6 +879,7 @@ pub(crate) fn apply_header_rewind(
     }
     st.reorg.clear_awaiting();
     st.reorg.clear_explore();
+    st.confirm_quiesce = true;
     Ok(true)
 }
 

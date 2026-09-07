@@ -438,6 +438,7 @@ pub async fn ibd_cancellable(
             &archive_write_next,
             &max_ready_shared,
             &mut last_progress,
+            Some(confirm_feed.as_ref()),
         );
         if hub.tip_height() < tip_before_confirm {
             confirm_feed.clear();
@@ -536,6 +537,7 @@ pub async fn ibd_cancellable(
             &archive_write_next,
             &max_ready_shared,
             &mut last_progress,
+            Some(confirm_feed.as_ref()),
         );
         if !drain_ready_peer_and_archive_events(
             &mut st,
@@ -1001,6 +1003,7 @@ pub async fn ibd_cancellable(
                     &archive_write_next,
                     &max_ready_shared,
                     &mut last_progress,
+                    Some(confirm_feed.as_ref()),
                 );
                 if let Some(msg) = st.halt.take() {
                     warn!("ibd: engine fault halt: {msg}");

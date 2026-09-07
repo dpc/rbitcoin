@@ -519,6 +519,7 @@ pub(crate) fn apply_confirm_events(
     archive_write_next: &AtomicU32,
     max_ready_shared: &AtomicU32,
     last_progress: &mut Instant,
+    feed: Option<&super::confirm::ConfirmFeed>,
 ) {
     while let Ok(ev) = rx.try_recv() {
         match ev {
@@ -537,6 +538,7 @@ pub(crate) fn apply_confirm_events(
                 hash,
                 class,
                 err,
+                batch_len,
             } => {
                 apply_confirm_reject(
                     st,
@@ -546,9 +548,17 @@ pub(crate) fn apply_confirm_events(
                     &err,
                     Some(hub.query.as_ref()),
                     Some(hub),
+                    batch_len,
+                    feed,
                 );
             }
         }
+    }
+    if st.confirm_quiesce {
+        if let Some(f) = feed {
+            f.clear();
+        }
+        st.confirm_quiesce = false;
     }
 }
 
@@ -560,6 +570,8 @@ pub(crate) fn apply_confirm_reject(
     err: &str,
     query: Option<&rbitcoin_query::Query>,
     hub: Option<&crate::chain::ChainHub>,
+    batch_len: usize,
+    feed: Option<&super::confirm::ConfirmFeed>,
 ) {
     // Never blacklist the all-zero sentinel (write used to emit this on
     // mis-attributed rejects).
@@ -582,6 +594,12 @@ pub(crate) fn apply_confirm_reject(
     } else {
         class
     };
+    let class = class.isolate_if_batched(batch_len);
+    if class == ConfirmRejectClass::Cascade && batch_len > 1 {
+        if let Some(f) = feed {
+            f.request_single_block();
+        }
+    }
     if class.is_soft() {
         apply_soft_wire_reject(st, height, hash, err, query, hub);
         return;
@@ -592,7 +610,7 @@ pub(crate) fn apply_confirm_reject(
         }
         ConfirmRejectClass::SoftWire => {}
         ConfirmRejectClass::Cascade => {
-            apply_cascade_reject(st, height, hash, err, query);
+            apply_cascade_reject(st, height, hash, err, hub);
         }
         ConfirmRejectClass::EngineFault => {
             apply_engine_fault_reject(st, height, hash, err, query);
@@ -667,12 +685,29 @@ fn apply_cascade_reject(
     height: u32,
     hash: BlockHash,
     err: &str,
-    query: Option<&rbitcoin_query::Query>,
+    hub: Option<&crate::chain::ChainHub>,
 ) {
-    if let Some(q) = query {
-        let _ = q.block_queue_dequeue_height(height);
-    }
+    // Leave the body queue: the plan was stale, the wire is still good.
     clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
+    const CASCADE_HALT_AFTER: u8 = 3;
+    let tip = hub
+        .and_then(|h| h.tip_hash())
+        .map(|t| t.to_byte_array())
+        .unwrap_or([0u8; 32]);
+    let n = match st.cascade_at {
+        Some((h, t, c)) if h == hash && t == tip => c.saturating_add(1),
+        _ => 1u8,
+    };
+    st.cascade_at = Some((hash, tip, n));
+    if n >= CASCADE_HALT_AFTER {
+        st.halt = Some(format!(
+            "cascade repeated {n}× @{height} {hash} (tip unchanged): {err}"
+        ));
+        warn!(
+            "ibd: confirm reject cascade halt @{height} {hash}: {err} ({n} at same tip, not blacklisted)"
+        );
+        return;
+    }
     note_confirm_stuck(st);
     warn!("ibd: confirm reject cascade @{height} {hash}: {err} (requeue, not blacklisted)");
 }
@@ -759,6 +794,9 @@ fn note_confirm_stuck(st: &mut IbdWorkState) {
 
 /// Proactive most-work apply: header-work rewind only (no gathered `accept_branch`).
 fn try_apply_exploration(st: &mut IbdWorkState, hub: &crate::chain::ChainHub) -> bool {
+    if st.reorg.explore_tips().is_empty() && st.reorg.awaiting().is_none() {
+        return false;
+    }
     match super::reorg::maybe_rewind_to_best_work(st, hub) {
         Ok(true) => {
             rbitcoin_log::info!(
@@ -766,7 +804,10 @@ fn try_apply_exploration(st: &mut IbdWorkState, hub: &crate::chain::ChainHub) ->
             );
             true
         }
-        Ok(false) => false,
+        Ok(false) => {
+            st.reorg.clear_explore();
+            false
+        }
         Err(e) => {
             warn!("ibd: exploration rewind failed: {e}");
             false

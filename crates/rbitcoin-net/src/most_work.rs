@@ -219,6 +219,10 @@ impl InvalidHashSet {
         self.hashes.insert(hash);
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        self.hashes.iter().copied()
+    }
+
     pub fn contains(&self, hash: [u8; 32]) -> bool {
         self.hashes.contains(&hash)
     }

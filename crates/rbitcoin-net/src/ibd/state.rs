@@ -130,6 +130,10 @@ pub(crate) struct IbdWorkState {
     pub halt: Option<String>,
     /// First time confirm rejected without tip progress (download gate timer).
     pub confirm_stuck_since: Option<Instant>,
+    /// Set by header-work rewind/plant so the main loop can drop in-channel plans.
+    pub confirm_quiesce: bool,
+    /// Repeated Cascade at the same tip for the same hash → escalate to halt.
+    pub cascade_at: Option<(BlockHash, [u8; 32], u8)>,
 }
 
 impl IbdWorkState {
@@ -183,6 +187,8 @@ impl IbdWorkState {
             engine_fault_seen: HashSet::new(),
             halt: None,
             confirm_stuck_since: None,
+            confirm_quiesce: false,
+            cascade_at: None,
         }
     }
 

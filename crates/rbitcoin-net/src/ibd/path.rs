@@ -17,10 +17,12 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
     // Operator breadcrumb: crash between "peers ready" and this line is in
     // resume_work_path (header graph walk), not getdata assign.
     info!("ibd: resume seed walk start tip={tip_h} max_ordered={MAX_ORDERED_HEADERS}");
-    let path = match hub.query.resume_work_path_after_tip(
+    let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();
+    let path = match hub.query.resume_work_path_after_tip_excluding(
         tip_hash.to_byte_array(),
         tip_h,
         MAX_ORDERED_HEADERS,
+        &exclude,
     ) {
         Ok(p) => p,
         Err(e) => {

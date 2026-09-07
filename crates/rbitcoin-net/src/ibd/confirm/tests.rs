@@ -289,6 +289,7 @@ fn split_wave_into_load_batches_is_eight_by_8000() {
         items: vec![],
         parent_ids: None,
         drop_inflight_below: None,
+        epoch: 0,
     }
     .items
     .is_empty());
@@ -555,12 +556,14 @@ fn load_recv_is_lookup_order() {
         items: vec![mk(1), mk(2)],
         parent_ids: None,
         drop_inflight_below: None,
+        epoch: 0,
     })
     .unwrap();
     tx.send(LoadBatch {
         items: vec![mk(3)],
         parent_ids: None,
         drop_inflight_below: Some(7),
+        epoch: 0,
     })
     .unwrap();
     let a = rx.recv().unwrap();
@@ -594,6 +597,7 @@ fn load_stamp_items_keep_pres() {
         )],
         parent_ids: None,
         drop_inflight_below: None,
+        epoch: 0,
     };
     let items = load_stamp_items(lb.items.into_iter().map(|(h, _, w)| (h, w.block, w.pres)));
     assert_eq!(items.len(), 1);
@@ -614,6 +618,7 @@ fn lookup_blocks_when_loadq_full() {
             items: vec![],
             parent_ids: None,
             drop_inflight_below: None,
+            epoch: 0,
         })
         .unwrap();
     }
@@ -622,6 +627,7 @@ fn lookup_blocks_when_loadq_full() {
             items: vec![],
             parent_ids: None,
             drop_inflight_below: None,
+            epoch: 0,
         })
         .is_err(),
         "9th send must wait / fail while loadq is full"
@@ -631,6 +637,7 @@ fn lookup_blocks_when_loadq_full() {
         items: vec![],
         parent_ids: None,
         drop_inflight_below: None,
+        epoch: 0,
     })
     .unwrap();
 }
@@ -1239,4 +1246,38 @@ fn confirm_feed_clear_drops_queued_plans() {
     let (ready, inflight) = feed.size_snap();
     assert_eq!(ready, 0, "rewind must drop ready confirm plans");
     assert_eq!(inflight, 0, "rewind must drop inflight confirm plans");
+    assert_eq!(feed.epoch(), 1, "clear bumps the rewind epoch");
+}
+
+#[test]
+fn isolate_if_batched_downgrades_multi_block_consensus() {
+    use super::ConfirmRejectClass;
+    assert_eq!(
+        ConfirmRejectClass::ConsensusInvalid.isolate_if_batched(1),
+        ConfirmRejectClass::ConsensusInvalid
+    );
+    assert_eq!(
+        ConfirmRejectClass::ConsensusInvalid.isolate_if_batched(8),
+        ConfirmRejectClass::Cascade
+    );
+    assert_eq!(
+        ConfirmRejectClass::EngineFault.isolate_if_batched(8),
+        ConfirmRejectClass::EngineFault
+    );
+}
+
+#[test]
+fn plan_epoch_stale_after_clear() {
+    let feed = ConfirmFeed::new();
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.claimed_epoch.insert(1, feed.epoch());
+    }
+    assert!(!feed.plan_epoch_stale(1), "claimed at live epoch");
+    feed.clear();
+    assert!(
+        feed.plan_epoch_stale(1),
+        "in-channel plan claimed before rewind is stale"
+    );
+    assert!(!feed.plan_epoch_stale(99), "unknown height is not stale");
 }

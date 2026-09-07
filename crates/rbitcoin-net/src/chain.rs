@@ -1149,7 +1149,10 @@ impl ChainHub {
             .collect())
     }
 
-    fn note_confirmed_tip(&self, need_meta: &[(u32, BlockHash)]) -> Result<(), NetError> {
+    pub(crate) fn note_confirmed_tip(
+        &self,
+        need_meta: &[(u32, BlockHash)],
+    ) -> Result<(), NetError> {
         if let Some(mp) = self.mempool() {
             if mp.relay_enabled() {
                 for &(_height, hash) in need_meta {

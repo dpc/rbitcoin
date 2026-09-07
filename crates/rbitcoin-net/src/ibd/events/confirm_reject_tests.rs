@@ -29,6 +29,8 @@ fn apply_confirm_reject(
         err,
         query,
         hub,
+        1,
+        None,
     );
 }
 
@@ -153,6 +155,42 @@ fn body_rejected_subset_of_consensus_invalid() {
             "rejected({err}) want {must_reject}"
         );
     }
+}
+
+#[test]
+fn multi_block_consensus_invalid_does_not_blacklist_first_hash() {
+    let mut st = IbdWorkState::new(Vec::new(), None, Some(10));
+    let hash = h(7);
+    apply_confirm_reject_class(
+        &mut st,
+        11,
+        hash,
+        ConfirmRejectClass::ConsensusInvalid,
+        "consensus: script verification failed: script false",
+        None,
+        None,
+        8,
+        None,
+    );
+    assert!(
+        !st.body.is_rejected(&hash),
+        "batch-first hash must not be blacklisted"
+    );
+    assert!(!st.reorg.invalid.contains(hash.to_byte_array()));
+}
+
+#[test]
+fn cascade_repeats_at_same_tip_halt() {
+    let mut st = IbdWorkState::new(Vec::new(), None, Some(10));
+    let hash = h(9);
+    for i in 1..=2 {
+        apply_confirm_reject(&mut st, 11, hash, "connect height not tip+1", None, None);
+        assert!(st.halt.is_none(), "cascade {i} must requeue");
+        assert!(!st.body.is_rejected(&hash));
+    }
+    apply_confirm_reject(&mut st, 11, hash, "connect height not tip+1", None, None);
+    assert!(st.halt.is_some(), "third cascade at same tip must halt");
+    assert!(!st.body.is_rejected(&hash));
 }
 
 /// Soft re-get is wire-only (`unexpected previous header`). Internal
@@ -2144,13 +2182,14 @@ fn apply_confirm_events_accepted_and_reject() {
         hash: h(12),
         class: ConfirmRejectClass::ConsensusInvalid,
         err: "consensus: script verification failed: script false".into(),
+        batch_len: 1,
     })
     .unwrap();
     drop(tx);
     let archive = AtomicU32::new(1);
     let max_ready = AtomicU32::new(0);
     let mut last = Instant::now() - std::time::Duration::from_secs(5);
-    apply_confirm_events(&mut st, &hub, &rx, &archive, &max_ready, &mut last);
+    apply_confirm_events(&mut st, &hub, &rx, &archive, &max_ready, &mut last, None);
     assert!(!st.ordered_set.contains(&acc));
     assert!(st.body.is_known_archived(&acc));
     assert!(st.body.is_rejected(&h(12)));
@@ -3111,6 +3150,19 @@ fn heavier_fork_invalid_mid_does_not_blacklist_weaker() {
             "fork A Class A bodies stay eligible for linear confirm"
         );
     }
+
+    // Hygiene may drop the loser from hash_height; store ranking must still
+    // skip the invalid B subtree and replant A.
+    for blk in &a {
+        st.hash_height.remove(&blk.block_hash());
+        st.height_to_hash.retain(|_, h| *h != blk.block_hash());
+    }
+    super::super::path::seed_work_path_from_store(&mut st, &hub);
+    assert_eq!(
+        st.height_to_hash.get(&1).copied(),
+        Some(a[0].block_hash()),
+        "store resume excluding invalid B mid-path replants fork A"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
