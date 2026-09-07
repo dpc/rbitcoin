@@ -337,8 +337,10 @@ on leftover garbage is not a consensus split.
 
 Skip-rate gate: after `Done N runs` with N≥1000, `comparisons/runs` must
 be ≥ **0.01** for submitblock diffs. Skip-heavy jobs (`mempool_differential`,
-`script_verify_differential`, `cmpct_differential`, `v2_session`) need
-≥ **0.005**. Zero comparisons always fail. Unset `FUZZ_MAX_TOTAL_TIME` is
+`script_verify_differential`, `v2_session`) need ≥ **0.005**.
+`cmpct_differential` needs ≥ **1** comparison (no rate vs libFuzzer execs:
+almost all random bytes are not a BIP152 `cmpctblock`). Zero comparisons
+always fail. Unset `FUZZ_MAX_TOTAL_TIME` is
 **600** (3600 when `date +%u` is Sunday).
 
 `cmpct_differential` sends `sendcmpct(1, 2)` then a fuzzed height-1
