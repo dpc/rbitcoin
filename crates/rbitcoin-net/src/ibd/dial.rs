@@ -310,6 +310,19 @@ pub(crate) async fn dial_batch(
     out
 }
 
+/// How many new dials to start when below `target` live peers.
+///
+/// At least 2 so a single lemon cannot occupy the only spare slot forever;
+/// at most 8 to bound burst. 0 when already at/above target.
+pub(crate) fn redial_want(alive: usize, target: usize) -> usize {
+    let target = target.max(1);
+    if alive >= target {
+        0
+    } else {
+        (target - alive).clamp(2, 8)
+    }
+}
+
 /// Apply dial successes / failures to the peer book.
 pub(crate) fn apply_dial_result(book: &mut AddrMan, result: &DialBatchResult) {
     for &addr in &result.attempted {
@@ -862,6 +875,17 @@ mod tests {
             "recently attempted addrs skipped while another remains: {got:?}"
         );
         assert_eq!(got, vec![addr(8)]);
+    }
+
+    #[test]
+    fn redial_want_at_least_two_when_short() {
+        assert_eq!(redial_want(16, 16), 0);
+        assert_eq!(redial_want(15, 16), 2);
+        assert_eq!(redial_want(14, 16), 2);
+        assert_eq!(redial_want(9, 16), 7);
+        assert_eq!(redial_want(8, 16), 8);
+        assert_eq!(redial_want(0, 16), 8);
+        assert_eq!(redial_want(0, 1), 2);
     }
 
     #[test]
