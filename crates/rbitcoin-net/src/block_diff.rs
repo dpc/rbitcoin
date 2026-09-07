@@ -185,13 +185,14 @@ fn store_reorg_accept(hub: &ChainHub, block: Block, expect_h: Option<u32>) -> Re
     match hub.accept_received_block(block) {
         Ok(AcceptOutcome::Accepted { height }) => {
             if let Some(e) = expect_h {
-                if height != e {
+                if height < e {
                     return Err(format!("height {height} != {e}"));
                 }
             }
             // Sibling hold + try_apply_held may connect a heavier archived
-            // path; Accepted height is that tip, not necessarily `hash`.
-            store_reorg_check_tip(hub, height, expect_h.is_some().then_some(hash))?;
+            // path; Accepted height/hash need not be the submitted block.
+            let want_hash = expect_h.filter(|&e| e == height).map(|_| hash);
+            store_reorg_check_tip(hub, height, want_hash)?;
             Ok(true)
         }
         Ok(AcceptOutcome::AlreadyHave | AcceptOutcome::IgnoredWeaker) => Ok(true),
@@ -2167,6 +2168,40 @@ mod tests {
         // and return Accepted for a hash that is not the submitted sibling.
         let (dir, hub, _tip) = tmp_diff_hub();
         store_reorg_apply(&hub, &[0, 0, 0, 1, 2, 2, 1]).expect("sibling apply of held/archive");
+        assert!(hub.tip_height().is_some());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn store_reorg_extend_after_sibling_may_accept_past_next_height() {
+        let (dir, hub, _tip) = tmp_diff_hub();
+        store_reorg_apply(&hub, &[0]).expect("h1");
+        let g = genesis_block(&diff_regtest_params());
+        let mut s1 = mine_empty_regtest(
+            g.block_hash(),
+            g.header.time.saturating_add(REGTEST_BLOCK_SPACING + 1),
+            1,
+        );
+        stamp_diff_coinbase(&mut s1, next_diff_cb_uniq());
+        remine_diff_header(&mut s1);
+        let mut s2 = mine_empty_regtest(
+            s1.block_hash(),
+            s1.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+            2,
+        );
+        stamp_diff_coinbase(&mut s2, next_diff_cb_uniq());
+        remine_diff_header(&mut s2);
+        let mut s3 = mine_empty_regtest(
+            s2.block_hash(),
+            s2.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+            3,
+        );
+        stamp_diff_coinbase(&mut s3, next_diff_cb_uniq());
+        remine_diff_header(&mut s3);
+        hub.hold_unconnected_body(s1);
+        hub.hold_unconnected_body(s2);
+        hub.hold_unconnected_body(s3);
+        store_reorg_step(&hub, StoreReorgOp::Extend).expect("held heavier fork after extend");
         assert!(hub.tip_height().is_some());
         let _ = fs::remove_dir_all(dir);
     }
