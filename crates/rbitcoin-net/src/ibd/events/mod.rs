@@ -482,20 +482,15 @@ pub(crate) fn inject_learned_addrs(
     local_addr: SocketAddr,
     from_peer: usize,
 ) {
-    if addrs.is_empty() || book.len() >= MAX_PEER_POOL {
+    if addrs.is_empty() {
         return;
     }
     let mut added = 0usize;
     for &a in addrs {
-        if book.len() >= MAX_PEER_POOL {
-            break;
-        }
         if a == local_addr || a.ip().is_unspecified() || a.port() == 0 {
             continue;
         }
-        let before = book.len();
-        book.add(a);
-        if book.len() > before {
+        if book.add_learned(a, MAX_PEER_POOL) {
             added += 1;
         }
     }

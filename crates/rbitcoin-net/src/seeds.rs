@@ -325,6 +325,45 @@ impl AddrMan {
         self.order.push(addr);
     }
 
+    /// Insert a newly learned addr, evicting a last-resort entry if `cap` is full.
+    ///
+    /// Returns true when `addr` is now in the book. Duplicates, and a full book
+    /// of only preferred/slow (not failed/incompat) addrs, return false.
+    pub fn add_learned(&mut self, addr: SocketAddr, cap: usize) -> bool {
+        if self.by_addr.contains_key(&addr) {
+            return false;
+        }
+        if cap == 0 {
+            return false;
+        }
+        if self.order.len() >= cap && !self.evict_for_learn() {
+            return false;
+        }
+        self.add(addr);
+        true
+    }
+
+    fn evict_for_learn(&mut self) -> bool {
+        let victim = self
+            .order
+            .iter()
+            .copied()
+            .find(|a| self.flags(a).is_incompatible())
+            .or_else(|| {
+                self.order
+                    .iter()
+                    .copied()
+                    .find(|a| self.flags(a).failed_last_connect())
+            });
+        let Some(addr) = victim else {
+            return false;
+        };
+        self.by_addr.remove(&addr);
+        self.last_attempt.remove(&addr);
+        self.order.retain(|a| *a != addr);
+        true
+    }
+
     /// Merge another book into this one (flag bits OR'd for shared addrs).
     pub fn merge_from(&mut self, other: &AddrMan) {
         for e in other.entries() {
@@ -834,6 +873,35 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!(got.contains(&addr(1)));
         assert!(got.contains(&addr(2)));
+    }
+
+    #[test]
+    fn add_learned_evicts_failed_when_at_cap() {
+        let mut am = AddrMan::new();
+        for i in 1..=3 {
+            am.add(addr(i));
+            am.note_connect_failed(addr(i), i == 1);
+        }
+        assert!(am.add_learned(addr(9), 3));
+        assert_eq!(am.len(), 3);
+        assert!(am.entry(&addr(9)).is_some());
+        assert!(
+            am.entry(&addr(1)).is_none(),
+            "incompatible is evicted before failed-last-connect"
+        );
+    }
+
+    #[test]
+    fn add_learned_keeps_good_when_full() {
+        let mut am = AddrMan::new();
+        for i in 1..=3 {
+            am.add(addr(i));
+            am.note_connected(addr(i));
+        }
+        assert!(!am.add_learned(addr(9), 3));
+        assert_eq!(am.len(), 3);
+        assert!(am.entry(&addr(9)).is_none());
+        assert!(!am.add_learned(addr(1), 3));
     }
 
     #[test]
