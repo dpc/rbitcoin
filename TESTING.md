@@ -267,7 +267,7 @@ in-tree extras (`store_reorg`, later `script_kernel_differential` /
 | `inv_getdata_wire` | `inv` / `getdata` payload parse (ASan, `inv.dict`) | none |
 | `electrum_json` | Electrum JSON-RPC line parse (ASan, `electrum.dict`) | none |
 | `v2_session` | BIP324 handshake + structured ping/pong vs a live v31.1 `bitcoind` v2 peer (ASan). Matching `pong` is a comparison. Garbage slice remains for encoder ASan. | official **v31.1** `bitcoind` tarball (`scripts/core-functional/fetch-bitcoind.sh`), `-listen=1` |
-| `cmpct_differential` | empty-mempool BIP152 `try_reconstruct` missing indexes vs Core `getblocktxn` on a fuzzed `cmpctblock` (ASan). Malformed compact that Core drops is skip. **Not** accept/reject; **not** two-node reorg. | same tarball, `-listen=1` |
+| `cmpct_differential` | structured BIP152 recipe → `try_reconstruct` missing indexes vs Core `getblocktxn` (ASan). Fill-flag extras go to Core extra-txn first. Raw-wire arm is skip if decode fails. Full reconstruct (no `getblocktxn`) is a comparison. **Not** accept/reject; **not** two-node reorg. | same tarball, `-listen=1` |
 | `block_differential` | height-1 `ChainHub::accept_received_block` vs Core `submitblock`, **accept vs reject only** | same tarball |
 | `block_spend_differential` | height-101 spend of a mature pad coinbase, same path and oracle | same tarball |
 | `script_differential` | height-101 same-block spend whose **executed scriptPubKey** is fuzzer-owned, same path and oracle | same tarball |
@@ -341,14 +341,19 @@ be ≥ **0.01** for submitblock diffs. Skip-heavy jobs (`mempool_differential`,
 ≥ **0.005**. Zero comparisons always fail. Unset `FUZZ_MAX_TOTAL_TIME` is
 **600** (3600 when `date +%u` is Sunday).
 
-`cmpct_differential` sends `sendcmpct(1, 2)` then a fuzzed height-1
-`cmpctblock`. Each input restamps a unique grinded header (prev = genesis)
-so Core treats it as a new compact. Spawn `setmocktime`s Core to regtest
-genesis time (`CanDirectFetch` / not IBD). Empty mempool: our missing
-indexes must match Core `getblocktxn`. After a compared request, Core
-`invalidateblock`s that header. Seed is a 2-tx compact (coinbase prefilled,
-one short-id → missing `[1]`). Disagreement panics. It does not compare
-accept/reject and does not drive a two-node reorg.
+`cmpct_differential` maps fuzzer bytes to a height-1 BIP152 recipe (extra
+count, prefill mask, fill/duplicate/corrupt flags, nonce) then encodes a
+well-formed `cmpctblock`. `data[0] % 8 == 7` is the raw-wire arm
+(`prepare_cmpct_fuzz_hsi` restamp; malformed decode is skip). Each case
+grinds a unique header (prev = genesis) so Core treats it as a new compact.
+Spawn `setmocktime`s Core to regtest genesis time (`CanDirectFetch` / not
+IBD). Fill-flag extras are sent as `tx` first (Core extra-txn / orphan pool)
+and included in our short-id map. Missing indexes must match Core
+`getblocktxn`. Fully reconstructed (empty missing, Core sends no request)
+is a comparison. After a compared case, Core `invalidateblock`s that
+header. Seeds: 2-tx hole, coinbase-only, fill, duplicate short-id, raw
+fixture. Disagreement panics. It does not compare accept/reject and does
+not drive a two-node reorg.
 
 `cmpct_reorg_differential` uses the same pad+stem and fork child as
 `block_fork_differential`, but the hub never `accept_received_block`s B or C.

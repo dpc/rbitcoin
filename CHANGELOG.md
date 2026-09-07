@@ -11,6 +11,11 @@ before 1.0).
 
 ### Changed
 
+- **`cmpct_differential` encodes a structured BIP152 recipe:** extra-tx
+  count, prefill mask, fill/duplicate/corrupt flags, then grind+short-ids.
+  Raw consensus bytes remain one arm (`data[0] % 8 == 7`). Fill sends those
+  txs before `cmpctblock`; empty missing (full reconstruct) counts as a
+  comparison. Seeds and `fuzz/dict/cmpct.dict` ship with the job.
 - **IBD outbound diversity stays, but last-resort no longer fills the spare slot:**
   unused-netgroup preference is per dial tier; a handshake with no block
   bytes is a failed connect plus 10-minute cooldown; recently attempted
