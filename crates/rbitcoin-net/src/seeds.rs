@@ -14,9 +14,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::asmap::AsMap;
 use crate::netgroup::{netgroup, select_diverse};
+
+/// Skip a recently dialed addr while any other candidate remains (Core `nLastTry`).
+pub(crate) const DIAL_ATTEMPT_RECENT: Duration = Duration::from_secs(10 * 60);
 
 /// Service bits we advertise and ask DNS seeds for (`NETWORK|WITNESS|P2P_V2` = `0x809`).
 pub fn required_seed_services() -> ServiceFlags {
@@ -272,6 +276,7 @@ pub struct AddrMan {
     order: Vec<SocketAddr>,
     by_addr: HashMap<SocketAddr, PeerFlags>,
     asmap: Option<Arc<AsMap>>,
+    last_attempt: HashMap<SocketAddr, Instant>,
 }
 
 impl AddrMan {
@@ -369,6 +374,21 @@ impl AddrMan {
         }
     }
 
+    /// Record a dial attempt. Not persisted.
+    pub fn note_attempt(&mut self, addr: SocketAddr) {
+        self.note_attempt_at(addr, Instant::now());
+    }
+
+    pub(crate) fn note_attempt_at(&mut self, addr: SocketAddr, when: Instant) {
+        self.last_attempt.insert(addr, when);
+    }
+
+    fn recently_attempted(&self, addr: SocketAddr, now: Instant) -> bool {
+        self.last_attempt
+            .get(&addr)
+            .is_some_and(|&t| now.saturating_duration_since(t) < DIAL_ATTEMPT_RECENT)
+    }
+
     /// Dial failed. `incompatible` = no v2 / protocol reject; else network/timeout.
     pub fn note_connect_failed(&mut self, addr: SocketAddr, incompatible: bool) {
         self.add(addr);
@@ -401,6 +421,9 @@ impl AddrMan {
     /// [`select_diverse`] runs **per tier**: unused netgroups of `occupied`
     /// (live peers) first, then fill. An occupied-group tier-0 addr always
     /// beats an unused-group last-resort addr.
+    ///
+    /// Addrs attempted within [`DIAL_ATTEMPT_RECENT`] are omitted while any
+    /// other candidate remains.
     pub fn take_dial_candidates(
         &self,
         max: usize,
@@ -422,6 +445,13 @@ impl AddrMan {
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         if ranked.iter().any(|(_, _, incompat, _)| !*incompat) {
             ranked.retain(|(_, _, incompat, _)| !*incompat);
+        }
+        let now = Instant::now();
+        if ranked
+            .iter()
+            .any(|(_, _, _, a)| !self.recently_attempted(*a, now))
+        {
+            ranked.retain(|(_, _, _, a)| !self.recently_attempted(*a, now));
         }
         let asmap = self.asmap.as_deref();
         let mut occupied_groups: HashSet<u64> =
@@ -773,6 +803,37 @@ mod tests {
             vec![good_same],
             "diversity must not pick a last-resort unused group ahead of a preferred occupied-group addr"
         );
+    }
+
+    #[test]
+    fn take_dial_skips_recent_attempt_while_others_remain() {
+        let mut am = AddrMan::new();
+        am.add(addr(1));
+        am.add(addr(2));
+        am.note_attempt(addr(1));
+        let got = am.take_dial_candidates(2, &HashSet::new(), &[]);
+        assert_eq!(got, vec![addr(2)]);
+
+        let mut only = AddrMan::new();
+        only.add(addr(1));
+        only.note_attempt(addr(1));
+        assert_eq!(
+            only.take_dial_candidates(1, &HashSet::new(), &[]),
+            vec![addr(1)],
+            "sole remaining addr is still dialed even if recently attempted"
+        );
+
+        let mut aged = AddrMan::new();
+        aged.add(addr(1));
+        aged.add(addr(2));
+        let old = Instant::now()
+            .checked_sub(DIAL_ATTEMPT_RECENT + Duration::from_secs(1))
+            .expect("clock");
+        aged.note_attempt_at(addr(1), old);
+        let got = aged.take_dial_candidates(2, &HashSet::new(), &[]);
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&addr(1)));
+        assert!(got.contains(&addr(2)));
     }
 
     #[test]

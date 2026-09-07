@@ -220,6 +220,7 @@ fn classify_dial_err(e: &NetError) -> DialFailKind {
 pub(crate) struct DialBatchResult {
     pub slots: Vec<PeerSlot>,
     pub failed: Vec<(SocketAddr, DialFailKind)>,
+    pub attempted: Vec<SocketAddr>,
 }
 
 /// Dial up to `count` ranked candidates from `book`. `already` is exclude
@@ -241,6 +242,7 @@ pub(crate) async fn dial_batch(
     let mut out = DialBatchResult {
         slots: Vec::new(),
         failed: Vec::new(),
+        attempted: Vec::new(),
     };
     if count == 0 || book.is_empty() {
         return out;
@@ -253,6 +255,7 @@ pub(crate) async fn dial_batch(
     };
 
     let candidates = book.take_dial_candidates(count, &already, occupied);
+    out.attempted = candidates.clone();
     let mut handles = Vec::new();
     for addr in candidates {
         if cancelled() {
@@ -309,6 +312,9 @@ pub(crate) async fn dial_batch(
 
 /// Apply dial successes / failures to the peer book.
 pub(crate) fn apply_dial_result(book: &mut AddrMan, result: &DialBatchResult) {
+    for &addr in &result.attempted {
+        book.note_attempt(addr);
+    }
     for s in &result.slots {
         book.note_connected(s.addr);
     }
@@ -801,11 +807,19 @@ mod tests {
                 (bad, DialFailKind::Network),
                 (inc, DialFailKind::Incompatible),
             ],
+            attempted: vec![good, bad, inc],
         };
         apply_dial_result(&mut book, &result);
         assert!(book.flags(&good).has_connected());
         assert!(book.flags(&bad).failed_last_connect());
         assert!(book.flags(&inc).is_incompatible());
+        book.add(addr(8));
+        let got = book.take_dial_candidates(8, &HashSet::new(), &[]);
+        assert!(
+            !got.contains(&good) && !got.contains(&bad) && !got.contains(&inc),
+            "recently attempted addrs skipped while another remains: {got:?}"
+        );
+        assert_eq!(got, vec![addr(8)]);
     }
 
     #[test]
