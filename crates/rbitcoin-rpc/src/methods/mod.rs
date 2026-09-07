@@ -49,7 +49,8 @@ pub struct RpcContext {
     pub stop: Arc<AtomicBool>,
     /// Best-effort live peer count (updated by node; 0 if unknown).
     pub connections: Arc<AtomicU64>,
-    /// `true` while IBD catch-up is incomplete (node sets).
+    /// Fallback IBD flag when no [`ChainHub`] is attached (tests / smoke RPC).
+    /// `getblockchaininfo` prefers [`ChainHub::in_ibd`] (Core `IsInitialBlockDownload`).
     pub initial_block_download: Arc<AtomicBool>,
     /// `getnetworkinfo.subversion` (BIP14 / Core `-uacomment` shape).
     pub subversion: String,

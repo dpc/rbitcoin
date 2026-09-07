@@ -199,11 +199,16 @@ fn getblockchaininfo_disk_and_progress() {
     assert_eq!(info["size_on_disk"].as_u64().unwrap(), store_bytes);
     assert!(store_bytes > 0);
 
-    // IBD flag must not force the old dummy 0.5 when the tip is caught up.
+    // Progress is tip/headers, not the IBD bit. A stale node-loop copy of
+    // IBD must not resurrect dummy 0.5, and must not override `ChainHub::in_ibd`
+    // (`feature_maxtipage` asserts the flag immediately after generate+sync).
     ctx.initial_block_download.store(true, Ordering::Relaxed);
     let info = dispatch(&ctx, "getblockchaininfo", vec![]).unwrap();
     assert_eq!(info["verificationprogress"], 1.0);
-    assert_eq!(info["initialblockdownload"], true);
+    assert_eq!(
+        info["initialblockdownload"], false,
+        "fresh generated tip has left IBD; stale RPC atomic must not win"
+    );
     ctx.initial_block_download.store(false, Ordering::Relaxed);
 
     let prev = hub.tip_hash().unwrap();
@@ -221,6 +226,28 @@ fn getblockchaininfo_disk_and_progress() {
     );
     assert!((p - 0.5).abs() < 1e-9, "1/2 == 0.5, got {p}");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `feature_maxtipage`: Core computes `IsInitialBlockDownload` on the RPC call.
+/// The node-loop atomic can lag a tip event by a tick.
+#[test]
+fn getblockchaininfo_ibd_follows_hub_not_stale_atomic() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    ctx.initial_block_download.store(false, Ordering::Relaxed);
+    let info = dispatch(&ctx, "getblockchaininfo", vec![]).unwrap();
+    assert_eq!(
+        info["initialblockdownload"], true,
+        "regtest genesis is older than 24h"
+    );
+    let (addr, _) = p2wpkh_regtest();
+    dispatch(&ctx, "generatetoaddress", vec![json!(1), json!(addr)]).unwrap();
+    ctx.initial_block_download.store(true, Ordering::Relaxed);
+    let info = dispatch(&ctx, "getblockchaininfo", vec![]).unwrap();
+    assert_eq!(
+        info["initialblockdownload"], false,
+        "fresh tip must leave IBD even if the node-loop copy is still true"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
