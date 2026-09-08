@@ -2530,6 +2530,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Known mempool parent with an out-of-range vout is a hard reject, not an
+    /// orphan that waits forever (quality Q-58).
+    #[test]
+    fn known_parent_oob_vout_does_not_park() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = spend_tx(op, 99_000);
+        mp.accept_tx(&parent, &utxos, TIP_OK).expect("parent");
+        let child = spend_tx(
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 9,
+            },
+            1_000,
+        );
+        let err = mp.accept_tx(&child, &utxos, TIP_OK).expect_err("oob vout");
+        assert!(
+            matches!(err, AcceptError::MissingPrevout(_)),
+            "got {err}"
+        );
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Dry-run must not park: a later parent accept must not promote the child.
     #[test]
     fn prepare_admit_without_park_does_not_orphan() {
