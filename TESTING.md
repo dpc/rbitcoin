@@ -277,7 +277,7 @@ in-tree extras (`store_reorg`, later `script_kernel_differential` /
 | `block_csv_differential` | BIP68 relative lock (full `u32` nSequence + version + MTP `time_shift`) vs Core `submitblock` | same tarball |
 | `mempool_differential` | `MempoolHub::test_accept` vs Core `testmempoolaccept`. **Consensus-class only** — Core standardness / fee / RBF / dust is skip (COMPAT) | same tarball, `-acceptnonstdtxn=1` |
 | `script_verify_differential` | `verify_tx_scripts_detached` vs Core `testmempoolaccept` of the parent+spend package. Same policy skip | same tarball, `-acceptnonstdtxn=1` |
-| `store_reorg` | Tiny-hub `{extend, sibling, rewind}` connect churn (ASan, no Core). Store `Corrupt` / probe-exhausted **panics** | none |
+| `store_reorg` | Tiny-hub `{extend, sibling, rewind}` connect churn (ASan, no Core). Equal-work siblings park in `held_bodies`; the hub is reopened every 16 applies so `try_apply_held` stays inside `-timeout=30`. Store `Corrupt` / probe-exhausted **panics** | none |
 | `script_kernel_differential` | In-process `verify_tx_scripts_detached_forks` vs `bitcoinconsensus::verify_with_flags` (ASan, **fuzz workspace only**) | Core interpreter via `bitcoinconsensus` crate |
 | `p2p_sequence_differential` | Up to 8 `{ping, headers, block}` steps vs live Core v2 + `compare_one` for block | same tarball, `-listen=1` |
 
@@ -346,8 +346,11 @@ count, prefill mask, fill/duplicate/corrupt flags, nonce) then encodes a
 well-formed `cmpctblock`. `data[0] % 8 == 7` is the raw-wire arm
 (`prepare_cmpct_fuzz_hsi` restamp; malformed decode is skip). Each case
 grinds a unique header (prev = genesis) so Core treats it as a new compact.
-Spawn `setmocktime`s Core to regtest genesis time (`CanDirectFetch` / not
-IBD). Fill-flag extras are sent as `tx` first (Core extra-txn / orphan pool)
+Spawn `setmocktime`s Core to regtest genesis time (`CanDirectFetch`).
+P2P `bitcoind` also gets `-maxtipage=999999999` so Core v31's IBD latch
+(`UpdateIBDStatus` on `LoadChainTip`, not `setmocktime`) leaves IBD at
+genesis — otherwise P2P `tx` is dropped and fill extra-txn never matches.
+Fill-flag extras are sent as `tx` first (Core extra-txn / orphan pool)
 and included in our short-id map. Missing indexes must match Core
 `getblocktxn`. Fully reconstructed (empty missing, Core sends no request)
 is a comparison. After a compared case, Core `invalidateblock`s that

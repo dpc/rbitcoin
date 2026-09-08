@@ -9,6 +9,17 @@ before 1.0).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cmpct_differential` fill vs Core extra-txn:** Core v31 latches IBD in
+  `UpdateIBDStatus` (`LoadChainTip` / connect), not `setmocktime`. A fresh
+  regtest genesis stays in IBD under the default 24h `-maxtipage`, so P2P
+  `tx` is dropped and the fill seed panics `ours=[] core=[1]`. P2P
+  `bitcoind` now gets `-maxtipage=999999999`.
+- **`store_reorg` overnight ASan timeout:** equal-work siblings park in
+  `held_bodies` and `try_apply_held` walks all of them. The fuzz hub is
+  reopened every 16 applies so a 4-byte unit cannot run past `-timeout=30`.
+
 ### Changed
 
 - **Workspace version 0.6.99:** in-tree toward 0.7.0.
