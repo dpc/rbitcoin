@@ -54,12 +54,7 @@ either module into a NixOS configuration:
           {
             services.rbitcoin = {
               enable = true;
-              dataDir = "/var/lib/rbitcoin-signet";
-              network = "signet";
-              p2p = {
-                address = "127.0.0.1";
-                port = 38333;
-              };
+              dataDir = "/var/lib/rbitcoin-mainnet";
             };
           }
         ];
@@ -68,7 +63,7 @@ either module into a NixOS configuration:
 }
 ```
 
-The service defaults to signet, uses the flake's store-native glibc package,
+The service defaults to mainnet, uses the flake's store-native glibc package,
 and leaves the firewall closed. It creates the configured data directory for
 the `rbitcoin` service account without changing ownership below that directory.
 Set `package` to use another build. Importing the module does not replace or

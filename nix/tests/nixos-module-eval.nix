@@ -1,4 +1,5 @@
 {
+  expectedPackage,
   module,
   nixpkgs,
   pkgs,
@@ -47,7 +48,19 @@ let
   cfg = system.config;
   service = cfg.systemd.services.rbitcoin;
   execStart = service.serviceConfig.ExecStart;
+  defaultSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      { services.rbitcoin.enable = true; }
+    ];
+  };
+  defaultCfg = defaultSystem.config.services.rbitcoin;
 in
+assert defaultCfg.package == expectedPackage;
+assert defaultCfg.network == "mainnet";
+assert defaultCfg.p2p.port == 8333;
+assert defaultCfg.rpc.port == 8332;
 assert cfg.services.rbitcoin.p2p.port == 18444;
 assert cfg.services.rbitcoin.rpc.port == 18443;
 assert

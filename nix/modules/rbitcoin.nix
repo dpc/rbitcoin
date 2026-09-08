@@ -108,8 +108,8 @@ in
         "signet"
         "regtest"
       ];
-      default = "signet";
-      description = "Bitcoin network to join. Signet is the safe default for initial evaluation.";
+      default = "mainnet";
+      description = "Bitcoin network to join.";
     };
 
     logLevel = mkOption {
@@ -245,10 +245,20 @@ in
       home = cfg.dataDir;
     };
 
-    systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0700 ${cfg.user} ${cfg.group} - -"
-    ]
-    ++ optional (cfg.coldDataDir != null) "d ${cfg.coldDataDir} 0700 ${cfg.user} ${cfg.group} - -";
+    systemd.tmpfiles.settings."10-rbitcoin" = {
+      "${cfg.dataDir}".d = {
+        mode = "0700";
+        user = cfg.user;
+        group = cfg.group;
+      };
+    }
+    // lib.optionalAttrs (cfg.coldDataDir != null) {
+      "${cfg.coldDataDir}".d = {
+        mode = "0700";
+        user = cfg.user;
+        group = cfg.group;
+      };
+    };
 
     systemd.services.rbitcoin = {
       description = "rbitcoin full node";
