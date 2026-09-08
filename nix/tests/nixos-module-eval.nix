@@ -1,18 +1,17 @@
+{
+  module,
+  nixpkgs,
+  pkgs,
+}:
 let
-  flake = builtins.getFlake (toString ../..);
-  pkgs = import flake.inputs.nixpkgs {
-    system = builtins.currentSystem;
-  };
   fakePackage = pkgs.runCommand "rbitcoin-test-package" { } ''
     mkdir -p "$out/bin"
     touch "$out/bin/rbitcoin-node"
   '';
-  system = flake.inputs.nixpkgs.lib.nixosSystem {
+  system = nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
-      (import ../modules/rbitcoin.nix {
-        defaultPackage = fakePackage;
-      })
+      module
       {
         services.rbitcoin = {
           enable = true;
@@ -51,14 +50,16 @@ let
 in
 assert cfg.services.rbitcoin.p2p.port == 18444;
 assert cfg.services.rbitcoin.rpc.port == 18443;
-assert cfg.networking.firewall.allowedTCPPorts == [
-  18444
-  50001
-  3000
-];
+assert
+  builtins.sort builtins.lessThan cfg.networking.firewall.allowedTCPPorts == [
+    3000
+    18444
+    50001
+  ];
 assert service.environment.RBITCOIN_IO == "uring";
 assert service.serviceConfig.User == "rbitcoin";
 assert service.serviceConfig.Group == "rbitcoin";
+assert service.serviceConfig.KillSignal == "SIGTERM";
 assert builtins.match ".*--datadir /srv/rbitcoin.*" execStart != null;
 assert builtins.match ".*--datadir-cold /srv/rbitcoin-cold.*" execStart != null;
 assert builtins.match ".*--network regtest.*" execStart != null;
@@ -70,4 +71,4 @@ assert builtins.match ".*--shindex.*" execStart != null;
 assert builtins.match ".*--sptweaks.*" execStart != null;
 assert builtins.match ".*--log-level debug.*" execStart != null;
 assert builtins.match ".*--max-outbound 8.*" execStart != null;
-true
+pkgs.runCommand "rbitcoin-nixos-module-eval" { } "touch $out"

@@ -31,6 +31,61 @@ Linux is always musl static. Compiling the tree as a contributor (rustup, no
 Nix, macOS/Windows): [`CONTRIBUTING.md`](./CONTRIBUTING.md). See
 [`docs/reproducible-builds.md`](./docs/reproducible-builds.md).
 
+### NixOS service
+
+The flake exports `nixosModules.default` and `nixosModules.rbitcoin`. Import
+either module into a NixOS configuration:
+
+```nix
+{
+  inputs.rbitcoin.url = "github:reardencode/rbitcoin";
+
+  outputs =
+    {
+      nixpkgs,
+      rbitcoin,
+      ...
+    }:
+    {
+      nixosConfigurations.example = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          rbitcoin.nixosModules.default
+          {
+            services.rbitcoin = {
+              enable = true;
+              dataDir = "/var/lib/rbitcoin-signet";
+              network = "signet";
+              p2p = {
+                address = "127.0.0.1";
+                port = 38333;
+              };
+            };
+          }
+        ];
+      };
+    };
+}
+```
+
+The service defaults to signet, uses the flake's store-native glibc package,
+and leaves the firewall closed. It creates the configured data directory for
+the `rbitcoin` service account without changing ownership below that directory.
+Set `package` to use another build. Importing the module does not replace or
+overlay the NixOS system's `nixpkgs`.
+
+RPC, Electrum, and Esplora listeners are disabled by default. Their module
+options bind to loopback unless changed. Enabling Electrum or Esplora also
+enables the required scripthash index. `p2p.openFirewall`,
+`electrum.openFirewall`, and `esplora.openFirewall` are separate opt-ins.
+JSON-RPC has no firewall option; expose it only through an explicitly managed
+firewall or tunnel.
+
+Use `coldDataDir` to place the large `inwit` store on another volume. The
+service creates the directory but does not mount or size the volume. Use
+`environment` for documented advanced `RBITCOIN_*` settings and `extraArgs`
+for daemon flags not represented by module options.
+
 **GitHub Release** (`v*.*.*` tags) is the operator snapshot: Linux musl +
 Windows CRT-static PE + Darwin aarch64 binaries + SHA256SUMS. Cut, merge,
 tag, and `vX.Y.x` / `.99` follow-up: [`docs/releases.md`](./docs/releases.md).

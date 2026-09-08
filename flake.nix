@@ -11,7 +11,11 @@
   inputs.crane.url = "github:ipetkov/crane/v0.24.0";
 
   outputs =
-    { self, nixpkgs, crane }:
+    {
+      self,
+      nixpkgs,
+      crane,
+    }:
     let
       # Systems we expose packages for (native builds when host matches).
       systems = [
@@ -27,6 +31,13 @@
         };
     in
     {
+      nixosModules = {
+        default = self.nixosModules.rbitcoin;
+        rbitcoin = import ./nix/modules/rbitcoin.nix {
+          defaultPackage = system: self.packages.${system}.rbitcoin-glibc;
+        };
+      };
+
       packages = forAllSystems (
         system:
         let
@@ -112,8 +123,25 @@
       # `nix flake check` can validate the package builds on the current system.
       checks = forAllSystems (
         system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            config = { };
+            overlays = [ ];
+          };
+        in
         {
           rbitcoin = self.packages.${system}.rbitcoin-musl;
+          nixos-module-eval = import ./nix/tests/nixos-module-eval.nix {
+            inherit nixpkgs pkgs;
+            module = self.nixosModules.rbitcoin;
+          };
+        }
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          nixos-module-runtime = import ./nix/tests/nixos-module-runtime.nix {
+            inherit pkgs;
+            module = self.nixosModules.rbitcoin;
+          };
         }
       );
     };
