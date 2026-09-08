@@ -3372,6 +3372,102 @@ fn inv_of_parked_orphan_does_not_getdata() {
     });
 }
 
+/// After parking a child, GETDATA unique missing parent txids from this peer
+/// (Core TxDownloadManager unique_parents).
+#[test]
+fn parked_orphan_getdatas_missing_parent() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, Network, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use tokio::runtime::Builder;
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        use bitcoin::p2p::message::RawNetworkMessage;
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        let payload = full[24..].to_vec();
+        FramedMessage {
+            magic,
+            command,
+            payload,
+        }
+    }
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (dir, q) = tmp_store("orphan-parent-gd");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        mp.set_relay_enabled(true);
+        assert!(hub.attach_mempool(mp).is_ok());
+
+        let parent_txid = bitcoin::Txid::from_byte_array([0x33; 32]);
+        let orphan = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: parent_txid,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut wants_headers = false;
+        let mut wtxid_relay = false;
+        let mut send_cmpct = false;
+        let mut cmpct_ver = 2u32;
+        let mut pending_headers = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut pending_cmpct = HashMap::new();
+        let mut from_peer = HashMap::new();
+        let mut ban = 0u32;
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Tx(orphan)),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid_relay,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut HashSet::new(),
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hub.mempool().unwrap().orphan_count(), 1);
+        match out_rx.try_recv().expect("parent GetData").expect_msg() {
+            NetworkMessage::GetData(v) => {
+                assert!(
+                    v.contains(&Inventory::WitnessTransaction(parent_txid)),
+                    "expected parent getdata, got {v:?}"
+                );
+            }
+            other => panic!("expected GetData, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
 /// GetData serves a mempool tx only after we INV'd it, or if it re-entered
 /// from a disconnected block (`mempool_reorg.py` test_reorg_relay).
 #[test]
