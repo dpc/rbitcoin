@@ -206,9 +206,37 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  nixos-module-runtime:
+    name: nixos-module-runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BUILD_REF }}
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ github.token }}
+          extra_nix_config: |
+            max-jobs = auto
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nixos-module-runtime-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nixos-module-runtime-${{ runner.os }}-
+          gc-max-store-size-linux: 4G
+
+      - name: Test NixOS module service
+        run: timeout 20m nix build .#checks.x86_64-linux.nixos-module-runtime --no-link
+
   publish:
     name: github-release
-    needs: [musl, windows, macos]
+    needs: [musl, windows, macos, nixos-module-runtime]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
