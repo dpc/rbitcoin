@@ -252,6 +252,15 @@ pub fn store_reorg_apply(hub: &ChainHub, data: &[u8]) -> Result<u32, String> {
     Ok(n)
 }
 
+/// Equal-work siblings are parked in `held_bodies`; `try_apply_held` walks
+/// all of them. Overnight ASan `-timeout=30` fires once the persistent hub
+/// has accumulated too many. Recycle the fuzz hub this often.
+pub const STORE_REORG_RECYCLE_EVERY: u64 = 16;
+
+pub fn store_reorg_recycle_hub(apply_n: u64) -> bool {
+    apply_n > 0 && apply_n.is_multiple_of(STORE_REORG_RECYCLE_EVERY)
+}
+
 pub fn mine_diff_pad(hub: &ChainHub, last: u32) -> Result<DiffPad, &'static str> {
     if last < 1 {
         return Err("pad last");
@@ -2148,6 +2157,15 @@ mod tests {
             Err("store: corrupt")
         );
         assert!(verdict_from_accept(Err(NetError::Io(std::io::Error::other("x")))).is_err());
+    }
+
+    #[test]
+    fn store_reorg_recycle_hub_every_sixteen_applies() {
+        assert!(!store_reorg_recycle_hub(0));
+        assert!(!store_reorg_recycle_hub(15));
+        assert!(store_reorg_recycle_hub(STORE_REORG_RECYCLE_EVERY));
+        assert!(store_reorg_recycle_hub(STORE_REORG_RECYCLE_EVERY * 2));
+        assert!(!store_reorg_recycle_hub(STORE_REORG_RECYCLE_EVERY + 1));
     }
 
     #[test]
