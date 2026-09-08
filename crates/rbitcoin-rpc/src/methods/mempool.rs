@@ -20,6 +20,7 @@ pub(crate) fn getmempoolinfo(ctx: &RpcContext) -> Result<Value, Value> {
             "unbroadcastcount": 0,
             "permitbaremultisig": ctx.permit_bare_multisig,
             "optimal": true,
+            "orphanage": { "size": 0, "bytes": 0 },
         }));
     };
     let live = mp.list_live_meta();
@@ -30,6 +31,7 @@ pub(crate) fn getmempoolinfo(ctx: &RpcContext) -> Result<Value, Value> {
         bytes += weight / 4;
         total_fee += fee;
     }
+    let (orphan_size, orphan_wu) = mp.orphan_stats();
     Ok(json!({
         "loaded": true,
         "size": size,
@@ -44,6 +46,10 @@ pub(crate) fn getmempoolinfo(ctx: &RpcContext) -> Result<Value, Value> {
         "unbroadcastcount": mp.unbroadcast_count(),
         "permitbaremultisig": ctx.permit_bare_multisig,
         "optimal": true,
+        "orphanage": {
+            "size": orphan_size,
+            "bytes": orphan_wu / 4,
+        },
     }))
 }
 

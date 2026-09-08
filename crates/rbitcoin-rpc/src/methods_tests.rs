@@ -127,6 +127,8 @@ fn blockchain_empty_store() {
     assert_eq!(mem["size"], 0);
     assert_eq!(mem["loaded"], true);
     assert_eq!(mem["permitbaremultisig"], true);
+    assert_eq!(mem["orphanage"]["size"], 0);
+    assert_eq!(mem["orphanage"]["bytes"], 0);
     let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap();
     assert_eq!(raw, json!([]));
     let seq = dispatch(&ctx, "getrawmempool", vec![json!(false), json!(true)]).unwrap();
