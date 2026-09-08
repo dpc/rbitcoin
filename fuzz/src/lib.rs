@@ -207,6 +207,10 @@ impl Drop for CoreChild {
 }
 
 /// Argv for a listening BIP324 peer. RPC-only [`spawn_bitcoind`] stays `-listen=0`.
+///
+/// `-maxtipage=999999999`: Core v31 latches IBD in `UpdateIBDStatus` (startup
+/// `LoadChainTip` / connect), not `setmocktime`. Default 24h keeps a 2011
+/// regtest genesis in IBD, so P2P `tx` is dropped (cmpct fill extra-txn miss).
 pub fn bitcoind_p2p_args(datadir: &Path, rpcport: u16, p2pport: u16, cookie: &Path) -> Vec<String> {
     vec![
         "-regtest".into(),
@@ -220,6 +224,7 @@ pub fn bitcoind_p2p_args(datadir: &Path, rpcport: u16, p2pport: u16, cookie: &Pa
         "-dnsseed=0".into(),
         "-listenonion=0".into(),
         "-printtoconsole=0".into(),
+        "-maxtipage=999999999".into(),
         format!("-datadir={}", datadir.display()),
         "-rpcbind=127.0.0.1".into(),
         "-rpcallowip=127.0.0.1".into(),
@@ -389,6 +394,10 @@ mod tests {
         assert!(args.iter().any(|a| a == "-dnsseed=0"));
         assert!(args.iter().any(|a| a == "-listenonion=0"));
         assert!(args.iter().any(|a| a == "-port=18444"));
+        assert!(
+            args.iter().any(|a| a == "-maxtipage=999999999"),
+            "P2P bitcoind must leave IBD at genesis so fill txs reach extra-txn"
+        );
     }
 
     #[test]

@@ -9,6 +9,14 @@ before 1.0).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cmpct_differential` fill vs Core extra-txn:** Core v31 latches IBD in
+  `UpdateIBDStatus` (`LoadChainTip` / connect), not `setmocktime`. A fresh
+  regtest genesis stays in IBD under the default 24h `-maxtipage`, so P2P
+  `tx` is dropped and the fill seed panics `ours=[] core=[1]`. P2P
+  `bitcoind` now gets `-maxtipage=999999999`.
+
 ### Changed
 
 - **Workspace version 0.6.99:** in-tree toward 0.7.0.

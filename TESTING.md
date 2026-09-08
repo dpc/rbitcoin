@@ -346,8 +346,11 @@ count, prefill mask, fill/duplicate/corrupt flags, nonce) then encodes a
 well-formed `cmpctblock`. `data[0] % 8 == 7` is the raw-wire arm
 (`prepare_cmpct_fuzz_hsi` restamp; malformed decode is skip). Each case
 grinds a unique header (prev = genesis) so Core treats it as a new compact.
-Spawn `setmocktime`s Core to regtest genesis time (`CanDirectFetch` / not
-IBD). Fill-flag extras are sent as `tx` first (Core extra-txn / orphan pool)
+Spawn `setmocktime`s Core to regtest genesis time (`CanDirectFetch`).
+P2P `bitcoind` also gets `-maxtipage=999999999` so Core v31's IBD latch
+(`UpdateIBDStatus` on `LoadChainTip`, not `setmocktime`) leaves IBD at
+genesis — otherwise P2P `tx` is dropped and fill extra-txn never matches.
+Fill-flag extras are sent as `tx` first (Core extra-txn / orphan pool)
 and included in our short-id map. Missing indexes must match Core
 `getblocktxn`. Fully reconstructed (empty missing, Core sends no request)
 is a comparison. After a compared case, Core `invalidateblock`s that
