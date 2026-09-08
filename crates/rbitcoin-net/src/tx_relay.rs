@@ -1038,11 +1038,12 @@ impl MempoolHub {
     }
 
     /// Session INV filter: never parks. Busy write → `false` (may re-getdata).
+    /// Live graph **or** orphanage (Core AlreadyHave).
     pub fn try_contains(&self, txid: &Txid) -> bool {
         self.inner
             .try_read()
             .ok()
-            .is_some_and(|g| g.graph.contains(txid))
+            .is_some_and(|g| g.graph.contains(txid) || g.orphanage.contains(txid))
     }
 
     pub fn get_tx(&self, txid: &Txid) -> Option<Transaction> {
@@ -1079,7 +1080,7 @@ impl MempoolHub {
         self.inner
             .try_read()
             .ok()
-            .is_some_and(|g| g.graph.contains_wtxid(wtxid))
+            .is_some_and(|g| g.graph.contains_wtxid(wtxid) || g.orphanage.contains_wtxid(wtxid))
     }
 
     /// Confirmed tip snapshot for mempool structural checks (height + BIP113 MTP).

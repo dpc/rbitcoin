@@ -11,7 +11,7 @@
 //! Eviction: FIFO by insert order when over weight or count (simple DoS bound;
 //! Core picks DoSiest peer's oldest announcement — we are single-process).
 
-use bitcoin::{Transaction, Txid};
+use bitcoin::{Transaction, Txid, Wtxid};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Core `DEFAULT_RESERVED_ORPHAN_WEIGHT_PER_PEER`.
@@ -28,6 +28,7 @@ pub const MAX_ORPHAN_TX_WEIGHT: u64 = 404_000;
 #[derive(Debug, Clone)]
 struct OrphanEntry {
     tx: Transaction,
+    wtxid: Wtxid,
     weight: u64,
     /// Missing parent txids (prevout.txid not in mempool/chain at insert).
     missing: BTreeSet<Txid>,
@@ -37,6 +38,7 @@ struct OrphanEntry {
 #[derive(Debug, Default)]
 pub struct Orphanage {
     by_txid: HashMap<Txid, OrphanEntry>,
+    by_wtxid: HashMap<Wtxid, Txid>,
     /// parent txid → orphan children waiting on it.
     by_parent: HashMap<Txid, HashSet<Txid>>,
     fifo: VecDeque<Txid>,
@@ -53,6 +55,7 @@ impl Orphanage {
     pub fn with_limits(max_weight: u64, max_count: usize) -> Self {
         Self {
             by_txid: HashMap::new(),
+            by_wtxid: HashMap::new(),
             by_parent: HashMap::new(),
             fifo: VecDeque::new(),
             total_weight: 0,
@@ -77,6 +80,10 @@ impl Orphanage {
         self.by_txid.contains_key(txid)
     }
 
+    pub fn contains_wtxid(&self, wtxid: &Wtxid) -> bool {
+        self.by_wtxid.contains_key(wtxid)
+    }
+
     /// Insert orphan waiting on `missing` parent txids. Returns true if newly stored.
     pub fn insert(&mut self, tx: Transaction, missing: BTreeSet<Txid>) -> bool {
         if missing.is_empty() {
@@ -86,6 +93,7 @@ impl Orphanage {
         if self.by_txid.contains_key(&txid) {
             return false;
         }
+        let wtxid = tx.compute_wtxid();
         let weight = tx.weight().to_wu();
         if weight > MAX_ORPHAN_TX_WEIGHT {
             return false;
@@ -106,10 +114,12 @@ impl Orphanage {
         for p in &missing {
             self.by_parent.entry(*p).or_default().insert(txid);
         }
+        self.by_wtxid.insert(wtxid, txid);
         self.by_txid.insert(
             txid,
             OrphanEntry {
                 tx,
+                wtxid,
                 weight,
                 missing,
             },
@@ -131,6 +141,7 @@ impl Orphanage {
         let Some(e) = self.by_txid.remove(txid) else {
             return;
         };
+        self.by_wtxid.remove(&e.wtxid);
         self.total_weight = self.total_weight.saturating_sub(e.weight);
         for p in &e.missing {
             if let Some(set) = self.by_parent.get_mut(p) {
@@ -151,6 +162,7 @@ impl Orphanage {
         let mut out = Vec::with_capacity(children.len());
         for cid in children {
             if let Some(e) = self.by_txid.remove(&cid) {
+                self.by_wtxid.remove(&e.wtxid);
                 self.total_weight = self.total_weight.saturating_sub(e.weight);
                 for p in &e.missing {
                     if p == parent {
@@ -232,12 +244,15 @@ mod tests {
         let tid = tx.compute_txid();
         let mut miss = BTreeSet::new();
         miss.insert(p);
+        let wtxid = tx.compute_wtxid();
         assert!(o.insert(tx, miss));
         assert!(o.contains(&tid));
+        assert!(o.contains_wtxid(&wtxid));
         assert_eq!(o.len(), 1);
         let kids = o.take_children_of(&p);
         assert_eq!(kids.len(), 1);
         assert!(o.is_empty());
+        assert!(!o.contains_wtxid(&wtxid));
     }
 
     #[test]
