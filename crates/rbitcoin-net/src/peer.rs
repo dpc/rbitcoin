@@ -2941,6 +2941,21 @@ async fn on_blocktxn(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxAcceptLog {
+    Silent,
+    Park,
+    Reject,
+}
+
+fn tx_accept_log(e: &rbitcoin_mempool::AcceptError) -> TxAcceptLog {
+    match e {
+        rbitcoin_mempool::AcceptError::Duplicate(_) => TxAcceptLog::Silent,
+        rbitcoin_mempool::AcceptError::Orphaned(_) => TxAcceptLog::Park,
+        _ => TxAcceptLog::Reject,
+    }
+}
+
 async fn on_tx(
     hub: &ChainHub,
     _out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -2986,15 +3001,20 @@ async fn on_tx(
                         }
                     }
                 }
-                Err(rbitcoin_mempool::AcceptError::Duplicate(_)) => {}
-                Err(e) => {
-                    let id = session.map(|s| s.id).unwrap_or(0);
-                    rbitcoin_log::info!(
-                        "{txid} (wtxid={}) from peer={id} was not accepted: {e}",
-                        tx.compute_wtxid()
-                    );
-                    rbitcoin_log::debug!("txrelay: reject {txid}: {e}");
-                }
+                Err(e) => match tx_accept_log(&e) {
+                    TxAcceptLog::Silent => {}
+                    TxAcceptLog::Park => {
+                        rbitcoin_log::debug!("txrelay: park {txid} orphans={}", mp.orphan_count());
+                    }
+                    TxAcceptLog::Reject => {
+                        let id = session.map(|s| s.id).unwrap_or(0);
+                        rbitcoin_log::info!(
+                            "{txid} (wtxid={}) from peer={id} was not accepted: {e}",
+                            tx.compute_wtxid()
+                        );
+                        rbitcoin_log::debug!("txrelay: reject {txid}: {e}");
+                    }
+                },
             }
         }
     }

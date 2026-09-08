@@ -3139,6 +3139,24 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
     });
 }
 
+#[test]
+fn tx_accept_log_parks_orphans_silences_duplicates() {
+    use bitcoin::hashes::Hash;
+    let txid = bitcoin::Txid::from_byte_array([1u8; 32]);
+    assert_eq!(
+        tx_accept_log(&rbitcoin_mempool::AcceptError::Duplicate(txid)),
+        TxAcceptLog::Silent
+    );
+    assert_eq!(
+        tx_accept_log(&rbitcoin_mempool::AcceptError::Orphaned(txid)),
+        TxAcceptLog::Park
+    );
+    assert_eq!(
+        tx_accept_log(&rbitcoin_mempool::AcceptError::Policy("min relay fee")),
+        TxAcceptLog::Reject
+    );
+}
+
 /// Parked orphans are not hard rejects: no INFO "was not accepted" and no
 /// `txrelay: reject` (Core logs missing-inputs at debug mempoolrej only).
 #[test]
