@@ -3,8 +3,8 @@
 What an operator or library user should be able to **count on** at **1.0**.
 Day-to-day ranked work stays in [`quality.md`](./quality.md).
 
-**Today (0.6.0):** named published 0.6 line. Patch branch is **`v0.6.x`**.
-Last 0.5 tags are **0.5.1** and the **0.5.2** maintenance branch. Schema **20**
+**Today (0.6.99):** in-tree toward **0.7.0**. Last published tag is **0.6.0**
+(`v0.6.x` patch line). Schema **20**
 (BDZ2 `tx.head` / BDZ3 SH) can still refuse a named index wipe.
 Electrum/Esplora need `--shindex` (default off). BIP324 v2-only. Install is
 a GitHub Release (Linux musl; Windows/Darwin snapshots). Nightly
@@ -15,7 +15,7 @@ are fixed.
 1.0 is the first **frozen-format, support-windowed** line. Not a Bitcoin
 Core clone, not a soak badge, not a desktop wallet.
 
-0.6 / 0.7 can ship any remaining gate without freezing the store.
+0.6.99 / 0.7 can ship any remaining gate without freezing the store.
 
 ---
 
