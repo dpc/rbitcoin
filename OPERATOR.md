@@ -63,11 +63,16 @@ either module into a NixOS configuration:
 }
 ```
 
-The service defaults to mainnet, uses the flake's store-native glibc package,
+The service defaults to mainnet, uses the flake's static musl operator package,
 and leaves the firewall closed. It creates the configured data directory for
 the `rbitcoin` service account without changing ownership below that directory.
-Set `package` to use another build. Importing the module does not replace or
-overlay the NixOS system's `nixpkgs`.
+Importing the module does not replace or overlay the NixOS system's `nixpkgs`.
+Use the store-native glibc build instead when wanted:
+
+```nix
+services.rbitcoin.package =
+  inputs.rbitcoin.packages.${pkgs.system}.rbitcoin-glibc;
+```
 
 RPC, Electrum, and Esplora listeners are disabled by default. Their module
 options bind to loopback unless changed. Enabling Electrum or Esplora also

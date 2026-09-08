@@ -73,7 +73,7 @@ in
           defaultPackage pkgs.stdenv.hostPlatform.system
         else
           defaultPackage;
-      defaultText = lib.literalExpression "inputs.rbitcoin.packages.\${pkgs.system}.rbitcoin-glibc";
+      defaultText = lib.literalExpression "inputs.rbitcoin.packages.\${pkgs.system}.rbitcoin-musl";
       description = "The rbitcoin package to run.";
     };
 

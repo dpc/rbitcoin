@@ -34,7 +34,7 @@
       nixosModules = {
         default = self.nixosModules.rbitcoin;
         rbitcoin = import ./nix/modules/rbitcoin.nix {
-          defaultPackage = system: self.packages.${system}.rbitcoin-glibc;
+          defaultPackage = system: self.packages.${system}.rbitcoin-musl;
         };
       };
 
