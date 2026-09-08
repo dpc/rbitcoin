@@ -92,6 +92,7 @@ jobs:
       CARGO_TARGET_DIR: target/dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -121,6 +122,12 @@ jobs:
         run: ./scripts/ci-os-smoke.test.sh
       - name: cargo test
         run: cargo test --workspace
+      - name: NixOS module tests
+        run: >-
+          nix build
+          .#checks.x86_64-linux.nixos-module-eval
+          .#checks.x86_64-linux.nixos-module-runtime
+          --no-link
 
   # Windows IOCP store + --smoke. Required. Not a CRT-static snapshot.
   windows:
