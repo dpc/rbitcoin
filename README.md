@@ -7,10 +7,10 @@ index via `--shindex`, default off; not a graphical block-explorer stack) — bu
 around a **libbitcoin-class relational archive** and a **pure-Rust
 consensus/script** path.
 
-> **0.5.99** is the in-tree version (pre-**0.6.0**). Last published GitHub
-> Release tags are **0.5.1** and **0.5.2** (0.5.1 maintenance branch:
-> Linux musl + Windows CRT-static + Darwin aarch64). **Not 1.0:** schema can
-> still refuse a named wipe ([`SCHEMA.md`](./SCHEMA.md), [`OPERATOR.md`](./OPERATOR.md));
+> **0.6.0** is the current **named published** 0.x line (GitHub Release:
+> Linux musl + Windows CRT-static + Darwin aarch64). Patch line is **`v0.6.x`**.
+> **Not 1.0:** schema can still refuse a named wipe ([`SCHEMA.md`](./SCHEMA.md),
+> [`OPERATOR.md`](./OPERATOR.md));
 > default mainnet **`--milestone 840000` skips historical script/sig checks**
 > (`--milestone 0` is full scripts); Electrum/Esplora need **`--shindex`**
 > (default off) after tip. Run **signet first**, then mainnet with monitoring.
@@ -20,9 +20,9 @@ consensus/script** path.
 | | |
 |--|--|
 | **License** | MIT OR Apache-2.0 ([`LICENSE-MIT`](./LICENSE-MIT), [`LICENSE-APACHE`](./LICENSE-APACHE)) |
-| **Version** | **0.5.99** (pre-0.6.0) — [`CHANGELOG.md`](./CHANGELOG.md) |
+| **Version** | **0.6.0** — [`CHANGELOG.md`](./CHANGELOG.md) |
 | **Platform** | **Linux musl** is the operator path. Windows / Darwin are published snapshots (no IoRing; Darwin not notarized) |
-| **Security** | [`SECURITY.md`](./SECURITY.md) — **0.5.x** supported published line; no LTS until 1.0 |
+| **Security** | [`SECURITY.md`](./SECURITY.md) — **0.6.x** supported published line; no LTS until 1.0 |
 | **Design** | [`docs/architecture.md`](./docs/architecture.md) — why this node is different |
 | **Develop** | rustup 1.95, no Nix — [`CONTRIBUTING.md`](./CONTRIBUTING.md) |
 
@@ -46,7 +46,7 @@ Product surface: [`COMPAT.md`](./COMPAT.md). RPC subset: [`docs/rpc.md`](./docs/
 
 Core pipelines exist (store, consensus, P2P IBD, tip follow, scripthash,
 Electrum, Esplora REST, libre mempool) for the **server-side / wallet-client
-backend** role. **0.5 mainnet** is early production / high-scrutiny — not a
+backend** role. **0.6 mainnet** is early production / high-scrutiny — not a
 Core or Fulcrum replacement, not a soak badge. Run **signet first**, then
 mainnet with monitoring ([`OPERATOR.md`](./OPERATOR.md)). First hour on
 regtest (mine → Electrum → Esplora): [`OPERATOR.md`](./OPERATOR.md#first-hour-regtest).

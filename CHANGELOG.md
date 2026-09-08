@@ -9,6 +9,39 @@ before 1.0).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-08
+
+Named published **0.6** line. **Not 1.0.** Patch branch is `v0.6.x`. Schema 20
+is still bumpable (named refuse/wipe, no silent wipe). Default mainnet
+`--milestone 840000` skips historical script/sig checks (`--milestone 0` is
+full scripts). `--shindex` default off. BIP324 v2-only. GitHub Release: Linux
+musl (operator) + Windows CRT-static PE + Darwin aarch64.
+
+### Highlights
+
+- **Schema 20:** sealed `tx.head` is packed BDZ2; sealed SH is BDZ3. Occupied
+  schema 18/19 `tx.head` or `scripthash*` is refused (wipe those index dirs,
+  keep Class A). Empty 18/19 indexes rewrite `meta` to 20.
+- **RPC decode on the node:** `decoderawtransaction`, `decodescript`, and
+  `validateaddress`. Verbose `getrawtransaction` / `getblock` v2 vin include
+  `scriptSig`; `scriptPubKey` includes Core-style `type`.
+  `getnetworkinfo.version` is `600`.
+- **P2P / IBD:** Core asmap outbound diversity (`--asmap` /
+  `{datadir}/ip_asn.dat`; `getpeerinfo.mapped_as`); learned book 4096 with
+  last-resort eviction; handshake-then-die is a failed connect; IBD follows
+  most-work (not max advertised height); unanswered getdata retried after
+  10s; compact HB announce before tip-accept; IBD getdata serve reconstructs
+  from Class A spans.
+- **Tip-follow does not stall the reactor:** mempool accept is
+  `spawn_blocking`; session never parks on mempool `inner`; FeeFilter overlay
+  is atomic; tip connect runs on a dedicated `tip-accept` OS thread.
+- **`--shindex` after IBD:** unsorted-shard materialize is the default (nCPU
+  collect, in-place unique-sort, sealed heads kept on SIGINT). Pack workers
+  auto-tune to free RAM.
+- **Core functional / fuzz:** 71 unmodified v31.1 scripts `run` (14 at 0.5.0).
+  Nightly differential fuzz vs Core v31.1 is continuous (Q-30: block / spend /
+  fork / compact / script / BIP324).
+
 ### Added
 
 - **RPC decode subset:** `decoderawtransaction`, `decodescript`, and
