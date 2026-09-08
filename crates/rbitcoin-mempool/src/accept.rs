@@ -493,6 +493,14 @@ impl ActiveMempool {
                         s.direct_conflicts.insert(c);
                     }
                 } else {
+                    let oob = self
+                        .bodies
+                        .get(&creator)
+                        .map(|t| (op.vout as usize) >= t.output.len())
+                        .unwrap_or(true);
+                    if oob {
+                        return Err(AcceptError::MissingPrevout(op));
+                    }
                     return Err(AcceptError::Policy("mempool double-spend"));
                 }
             }
@@ -568,10 +576,7 @@ impl ActiveMempool {
                     .ok_or(AcceptError::Durable("parent body missing".into()))?;
                 match parent_tx.output.get(op.vout as usize).cloned() {
                     Some(o) => (o, None),
-                    None => {
-                        missing_parents.insert(op.txid);
-                        continue;
-                    }
+                    None => return Err(AcceptError::MissingPrevout(op)),
                 }
             } else if let Some(coin) = utxos.get_coin(&op) {
                 // Confirmed unspent only — spent/missing create → None (finding 010).
@@ -2547,10 +2552,7 @@ mod tests {
             1_000,
         );
         let err = mp.accept_tx(&child, &utxos, TIP_OK).expect_err("oob vout");
-        assert!(
-            matches!(err, AcceptError::MissingPrevout(_)),
-            "got {err}"
-        );
+        assert!(matches!(err, AcceptError::MissingPrevout(_)), "got {err}");
         assert_eq!(mp.orphan_count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
