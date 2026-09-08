@@ -7,8 +7,11 @@ use crate::store::Mempool;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::{OutPoint, Transaction, TxOut, Txid};
 use rbitcoin_consensus::policy::{self, PolicyResult};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::time::Instant;
+
+const EXTRA_COMPACT_CAP: usize = 100;
+const RECENT_INVALID_CAP: usize = 4_096;
 
 /// Stage wall times (µs) for one accept attempt (or sum across package/orphan promote).
 ///
@@ -301,6 +304,11 @@ pub struct ActiveMempool {
     cluster_size_kvb_overlay: Option<u32>,
     /// Core `-minrelaytxfee` in sat/kvB (default Libre 100).
     min_relay_sat_kvb: u64,
+    /// Txids recently rejected as invalid (not policy-reconsiderable).
+    recent_invalid: HashSet<Txid>,
+    /// Recent rejects / RBF replacements for compact fill and 1p1c.
+    extra_compact: VecDeque<Transaction>,
+    skip_min_relay: bool,
 }
 
 impl ActiveMempool {
@@ -333,6 +341,10 @@ impl ActiveMempool {
 
     pub fn min_relay_sat_kvb(&self) -> u64 {
         self.min_relay_sat_kvb
+    }
+
+    pub fn set_skip_min_relay(&mut self, skip: bool) {
+        self.skip_min_relay = skip;
     }
 
     /// `persist=false` abandons any on-disk live set (Core `-persistmempool=0`).
@@ -375,6 +387,9 @@ impl ActiveMempool {
             cluster_count_overlay: None,
             cluster_size_kvb_overlay: None,
             min_relay_sat_kvb: rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB,
+            recent_invalid: HashSet::new(),
+            extra_compact: VecDeque::new(),
+            skip_min_relay: false,
         })
     }
 
@@ -457,8 +472,28 @@ impl ActiveMempool {
         self.last_accept_stages = AcceptStageUs::default();
         let prep = match self.prepare_admit(tx, utxos, tip, 0, true) {
             Ok(p) => p,
-            Err(AcceptError::Orphaned(_)) => return Err(self.park_orphan(tx)),
-            Err(e) => return Err(e),
+            Err(AcceptError::Orphaned(_)) => {
+                if let Some(pkg) = self.try_one_parent_package(tx, utxos) {
+                    self.skip_min_relay = true;
+                    let pkg_res = self.accept_package(&pkg, utxos, tip);
+                    self.skip_min_relay = false;
+                    match pkg_res {
+                        Ok(results) => {
+                            let child_id = tx.compute_txid();
+                            if let Some(r) = results.into_iter().find(|r| r.txid == child_id) {
+                                return Ok(r);
+                            }
+                            return Err(self.park_orphan(tx));
+                        }
+                        Err(_) => return Err(self.park_orphan(tx)),
+                    }
+                }
+                return Err(self.park_orphan(tx));
+            }
+            Err(e) => {
+                self.note_accept_failure(tx, &e);
+                return Err(e);
+            }
         };
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
@@ -467,7 +502,10 @@ impl ActiveMempool {
             .last_accept_stages
             .script_us
             .saturating_add(t_script.elapsed().as_micros() as u64);
-        script_res?;
+        if let Err(e) = script_res {
+            self.note_invalid(tx.compute_txid());
+            return Err(e);
+        }
         let r = self.commit_after_script(tx, prep)?;
         self.promote_orphans_of(r.txid, utxos, tip);
         Ok(r)
@@ -592,6 +630,12 @@ impl ActiveMempool {
         let utxo_us = t_utxo.elapsed().as_micros() as u64;
 
         if !missing_parents.is_empty() {
+            if missing_parents
+                .iter()
+                .any(|p| self.recent_invalid.contains(p))
+            {
+                return Err(AcceptError::MissingPrevout(tx.input[0].previous_output));
+            }
             if park_orphans {
                 return Err(AcceptError::Orphaned(txid));
             }
@@ -614,7 +658,12 @@ impl ActiveMempool {
         let weight = tx.weight().to_wu();
         let admit_fee = (i128::from(fee_sat).saturating_add(i128::from(fee_delta))).max(0) as u64;
 
-        match policy::check_libre_admission_at(tx, admit_fee, weight, self.min_relay_sat_kvb) {
+        let min_relay = if self.skip_min_relay {
+            0
+        } else {
+            self.min_relay_sat_kvb
+        };
+        match policy::check_libre_admission_at(tx, admit_fee, weight, min_relay) {
             PolicyResult::Standard => {}
             PolicyResult::NonStandard(s) => return Err(AcceptError::Policy(s)),
         }
@@ -681,7 +730,8 @@ impl ActiveMempool {
 
         let mut replaced_scripthashes: Vec<[u8; 32]> = Vec::new();
         for c in &conflict_set {
-            if let Some(old_tx) = self.bodies.get(c) {
+            if let Some(old_tx) = self.bodies.get(c).cloned() {
+                self.note_extra(&old_tx);
                 for o in &old_tx.output {
                     replaced_scripthashes
                         .push(Self::electrum_scripthash(o.script_pubkey.as_bytes()));
@@ -1136,6 +1186,114 @@ impl ActiveMempool {
 
     pub fn orphan_count(&self) -> usize {
         self.orphanage.len()
+    }
+
+    pub fn extra_compact_txs(&self) -> impl Iterator<Item = &Transaction> {
+        self.extra_compact.iter()
+    }
+
+    pub fn note_accept_failure(&mut self, tx: &Transaction, e: &AcceptError) {
+        match e {
+            AcceptError::InputsDuplicate
+            | AcceptError::Coinbase
+            | AcceptError::ImmatureCoinbase
+            | AcceptError::NotFinal
+            | AcceptError::NonBip68Final
+            | AcceptError::Script(_) => self.note_invalid(tx.compute_txid()),
+            AcceptError::Policy("min relay fee") => self.note_extra(tx),
+            _ => {}
+        }
+    }
+
+    fn note_invalid(&mut self, txid: Txid) {
+        if self.recent_invalid.len() >= RECENT_INVALID_CAP {
+            self.recent_invalid.clear();
+        }
+        self.recent_invalid.insert(txid);
+    }
+
+    fn note_extra(&mut self, tx: &Transaction) {
+        let txid = tx.compute_txid();
+        self.extra_compact.retain(|t| t.compute_txid() != txid);
+        if self.extra_compact.len() >= EXTRA_COMPACT_CAP {
+            self.extra_compact.pop_front();
+        }
+        self.extra_compact.push_back(tx.clone());
+    }
+
+    pub fn try_one_parent_package(
+        &self,
+        child: &Transaction,
+        utxos: &impl UtxoProvider,
+    ) -> Option<Vec<Transaction>> {
+        let mut missing = BTreeSet::new();
+        for inp in &child.input {
+            if self.graph.creator(&inp.previous_output).is_some() {
+                continue;
+            }
+            missing.insert(inp.previous_output.txid);
+        }
+        if missing.len() != 1 {
+            return None;
+        }
+        let pid = *missing.iter().next()?;
+        if self.recent_invalid.contains(&pid) {
+            return None;
+        }
+        let parent = self
+            .extra_compact
+            .iter()
+            .find(|t| t.compute_txid() == pid)?
+            .clone();
+        if !self.package_pays_min_relay(&parent, child, utxos) {
+            return None;
+        }
+        Some(vec![parent, child.clone()])
+    }
+
+    fn package_pays_min_relay(
+        &self,
+        parent: &Transaction,
+        child: &Transaction,
+        utxos: &impl UtxoProvider,
+    ) -> bool {
+        let mut p_in = 0u64;
+        for inp in &parent.input {
+            let Some(coin) = utxos.get_coin(&inp.previous_output) else {
+                return false;
+            };
+            p_in = p_in.saturating_add(coin.txout.value.to_sat());
+        }
+        let p_out: u64 = parent.output.iter().map(|o| o.value.to_sat()).sum();
+        if p_out > p_in {
+            return false;
+        }
+        let mut c_in = 0u64;
+        for inp in &child.input {
+            let op = inp.previous_output;
+            let val = if op.txid == parent.compute_txid() {
+                parent
+                    .output
+                    .get(op.vout as usize)
+                    .map(|o| o.value.to_sat())
+            } else {
+                utxos.get_coin(&op).map(|c| c.txout.value.to_sat())
+            };
+            let Some(v) = val else {
+                return false;
+            };
+            c_in = c_in.saturating_add(v);
+        }
+        let c_out: u64 = child.output.iter().map(|o| o.value.to_sat()).sum();
+        if c_out > c_in {
+            return false;
+        }
+        let fee = (p_in - p_out).saturating_add(c_in - c_out);
+        let weight = parent
+            .weight()
+            .to_wu()
+            .saturating_add(child.weight().to_wu());
+        policy::meets_min_relay_fee_at(fee, weight, self.min_relay_sat_kvb)
     }
 
     /// Re-accept non-coinbase txs after a reorg disconnect (best-effort).
@@ -2577,11 +2735,10 @@ mod tests {
             },
             1_000,
         );
-        let err = mp.accept_tx(&child, &utxos, TIP_OK).expect_err("invalid parent");
-        assert!(
-            matches!(err, AcceptError::MissingPrevout(_)),
-            "got {err}"
-        );
+        let err = mp
+            .accept_tx(&child, &utxos, TIP_OK)
+            .expect_err("invalid parent");
+        assert!(matches!(err, AcceptError::MissingPrevout(_)), "got {err}");
         assert_eq!(mp.orphan_count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

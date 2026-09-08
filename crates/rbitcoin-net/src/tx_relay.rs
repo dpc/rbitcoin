@@ -1195,6 +1195,18 @@ impl MempoolHub {
         let prep = match self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
             Err(e) => {
+                {
+                    let mut g = self.lock_write();
+                    g.note_accept_failure(tx, &e);
+                }
+                if matches!(&e, AcceptError::Orphaned(_)) {
+                    if let Some(r) = self.admit_1p1c(tx, utxo) {
+                        let us = t0.elapsed().as_micros() as u64;
+                        self.meter_accept_stages(lock_us, stages);
+                        self.meter_accept_wall(us, true);
+                        return Ok(r);
+                    }
+                }
                 let us = t0.elapsed().as_micros() as u64;
                 self.meter_accept_stages(lock_us, stages);
                 return self.finish_accept_err(us, e);
@@ -1246,6 +1258,28 @@ impl MempoolHub {
             }
             Err(e) => self.finish_accept_err(us, e),
         }
+    }
+
+    fn admit_1p1c(
+        &self,
+        child: &Transaction,
+        utxo: &impl rbitcoin_mempool::UtxoProvider,
+    ) -> Option<AcceptResult> {
+        let pkg = {
+            let g = self.lock_read();
+            g.try_one_parent_package(child, utxo)?
+        };
+        {
+            let mut g = self.lock_write();
+            g.set_skip_min_relay(true);
+        }
+        let res = self.accept_package(&pkg);
+        {
+            let mut g = self.lock_write();
+            g.set_skip_min_relay(false);
+        }
+        let results = res.ok()?;
+        results.into_iter().find(|r| r.txid == child.compute_txid())
     }
 
     fn promote_orphans_staged(&self, parent: Txid, utxo: &impl rbitcoin_mempool::UtxoProvider) {
@@ -1655,6 +1689,12 @@ impl MempoolHub {
         self.lock_read().orphan_count()
     }
 
+    /// `(count, weight WU)` of the orphanage.
+    pub fn orphan_stats(&self) -> (usize, u64) {
+        let g = self.lock_read();
+        (g.orphanage.len(), g.orphanage.total_weight())
+    }
+
     pub fn orphan_missing_parents(&self, txid: &Txid) -> Vec<Txid> {
         self.lock_read()
             .orphanage
@@ -1929,7 +1969,7 @@ impl MempoolHub {
                 }
             }
         }
-        for tx in g.orphanage.txs() {
+        for tx in g.orphanage.txs().chain(g.extra_compact_txs()) {
             let sid = if version == 1 {
                 ShortId::with_siphash_keys(&tx.compute_txid().to_raw_hash(), keys)
             } else {
