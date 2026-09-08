@@ -88,6 +88,10 @@ impl Orphanage {
         self.by_txid.get(txid).map(|e| &e.missing)
     }
 
+    pub fn txs(&self) -> impl Iterator<Item = &Transaction> {
+        self.by_txid.values().map(|e| &e.tx)
+    }
+
     /// Insert orphan waiting on `missing` parent txids. Returns true if newly stored.
     pub fn insert(&mut self, tx: Transaction, missing: BTreeSet<Txid>) -> bool {
         if missing.is_empty() {

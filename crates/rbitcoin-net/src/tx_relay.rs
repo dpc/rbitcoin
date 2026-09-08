@@ -1929,6 +1929,16 @@ impl MempoolHub {
                 }
             }
         }
+        for tx in g.orphanage.txs() {
+            let sid = if version == 1 {
+                ShortId::with_siphash_keys(&tx.compute_txid().to_raw_hash(), keys)
+            } else {
+                ShortId::with_siphash_keys(&tx.compute_wtxid().to_raw_hash(), keys)
+            };
+            if needed.contains(&sid) {
+                out.push(tx.clone());
+            }
+        }
         Some(out)
     }
 
