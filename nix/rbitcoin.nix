@@ -115,11 +115,7 @@ let
     CARGO_BUILD_TARGET = rustTarget;
     "CARGO_TARGET_${rustTargetEnv}_LINKER" = "${hostCc}/bin/${hostCc.targetPrefix}cc";
     "CARGO_TARGET_${rustTargetEnv}_RUSTFLAGS" = hostRUSTFLAGS;
-    # Explicit build-platform linker so proc-macro/build-script links stay dynamic.
-    "CARGO_TARGET_${buildRustTargetEnv}_LINKER" = "${buildCc}/bin/${buildCc.targetPrefix}cc";
-    "CARGO_TARGET_${buildRustTargetEnv}_RUSTFLAGS" = commonRUSTFLAGS;
     # Also set CC_*/HOST_CC for crates that shell out to the C compiler.
-    "CC_${buildRustTargetEnv}" = "${buildCc}/bin/${buildCc.targetPrefix}cc";
     "CC_${rustTargetEnv}" = "${hostCc}/bin/${hostCc.targetPrefix}cc";
     HOST_CC = "${buildCc}/bin/${buildCc.targetPrefix}cc";
     # pkgsStatic's stdenv injects `-static` into NIX_* link flags for *every*
@@ -138,6 +134,12 @@ let
     '';
     # Release product only — full workspace tests stay on the CI/dev path.
     doCheck = false;
+  }
+  // lib.optionalAttrs (buildRustTargetEnv != rustTargetEnv) {
+    # Explicit build-platform linker so proc-macro/build-script links stay dynamic.
+    "CARGO_TARGET_${buildRustTargetEnv}_LINKER" = "${buildCc}/bin/${buildCc.targetPrefix}cc";
+    "CARGO_TARGET_${buildRustTargetEnv}_RUSTFLAGS" = commonRUSTFLAGS;
+    "CC_${buildRustTargetEnv}" = "${buildCc}/bin/${buildCc.targetPrefix}cc";
   };
 
   # Layer 1: registry/git deps (+ build scripts). Invalidates on Cargo.lock /
