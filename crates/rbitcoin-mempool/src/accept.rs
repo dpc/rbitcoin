@@ -2557,6 +2557,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A parent rejected as invalid must not leave its children parked forever.
+    #[test]
+    fn child_of_recent_invalid_parent_does_not_park() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let mut parent = spend_tx(op, 99_000);
+        parent.input.push(parent.input[0].clone());
+        let parent_id = parent.compute_txid();
+        assert!(matches!(
+            mp.accept_tx(&parent, &utxos, TIP_OK),
+            Err(AcceptError::InputsDuplicate)
+        ));
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            1_000,
+        );
+        let err = mp.accept_tx(&child, &utxos, TIP_OK).expect_err("invalid parent");
+        assert!(
+            matches!(err, AcceptError::MissingPrevout(_)),
+            "got {err}"
+        );
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Parent below min-relay + paying child: 1p1c package admits both.
+    #[test]
+    fn one_parent_one_child_admits_below_minrelay_parent() {
+        let dir = tmp_dir();
+        let (op, txout, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.set_min_relay_sat_kvb(50_000);
+        let parent = spend_tx(op, txout.value.to_sat() - 200);
+        let parent_id = parent.compute_txid();
+        assert!(
+            matches!(
+                mp.accept_tx(&parent, &utxos, TIP_OK),
+                Err(AcceptError::Policy("min relay fee"))
+            ),
+            "parent must fail min-relay alone"
+        );
+        assert_eq!(mp.live_count(), 0);
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            1_000,
+        );
+        mp.accept_tx(&child, &utxos, TIP_OK)
+            .expect("1p1c child should pull parent");
+        assert!(mp.graph.contains(&parent_id), "parent in package");
+        assert!(mp.graph.contains(&child.compute_txid()), "child in package");
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Dry-run must not park: a later parent accept must not promote the child.
     #[test]
     fn prepare_admit_without_park_does_not_orphan() {
