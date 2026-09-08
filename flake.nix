@@ -134,7 +134,7 @@
           rbitcoin = self.packages.${system}.rbitcoin-musl;
           nixos-module-eval = import ./nix/tests/nixos-module-eval.nix {
             inherit nixpkgs pkgs;
-            expectedPackage = self.packages.${system}.rbitcoin-glibc;
+            expectedPackage = self.packages.${system}.rbitcoin-musl;
             module = self.nixosModules.rbitcoin;
           };
         }
