@@ -2922,6 +2922,11 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
         599,
         "0.5.99 is the in-tree pre-0.6.0 mapping"
     );
+    assert_eq!(
+        rpc_client_version("0.6.0"),
+        600,
+        "0.6.0 is the same mapping (not Core 27.0 / 270000)"
+    );
     let flags = rbitcoin_net::local_service_flags();
     let bits = flags.to_u64();
     let hex = format!("{bits:016x}");
