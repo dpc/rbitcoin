@@ -322,6 +322,10 @@ pub struct MempoolPerfSample {
 
 /// Core default `-mempoolexpiry` (336 hours) in seconds.
 const DEFAULT_MEMPOOL_EXPIRY_SECS: u64 = 336 * 3600;
+/// Do not re-GETDATA the same missing parent from a park for this long.
+const PARENT_GETDATA_TTL: Duration = Duration::from_secs(60);
+/// Cap unique parent GETDATA items issued from one park.
+const MAX_PARENTS_PER_PARK: usize = 16;
 
 struct AdmitSpec {
     park_orphans: bool,
@@ -414,6 +418,8 @@ pub struct MempoolHub {
     min_live_accept_at: AtomicU64,
     /// Cached tip MTP for accept (`{header_fk, ctx}`).
     tip_ctx: Mutex<Option<(Fk, ChainTipCtx)>>,
+    /// Missing parent txids we already GETDATA'd after a park (TTL).
+    parent_asked: Mutex<HashMap<Txid, Instant>>,
 }
 
 impl MempoolHub {
@@ -514,6 +520,7 @@ impl MempoolHub {
             age_inv: Mutex::new(BTreeMap::new()),
             min_live_accept_at: AtomicU64::new(u64::MAX),
             tip_ctx: Mutex::new(None),
+            parent_asked: Mutex::new(HashMap::new()),
         };
         {
             let mut u = hub.unbroadcast.lock().unwrap();
@@ -1646,6 +1653,36 @@ impl MempoolHub {
     /// Unique txs parked waiting on missing parents (Core-class orphanage).
     pub fn orphan_count(&self) -> usize {
         self.lock_read().orphan_count()
+    }
+
+    pub fn orphan_missing_parents(&self, txid: &Txid) -> Vec<Txid> {
+        self.lock_read()
+            .orphanage
+            .missing_of(txid)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Unique missing parents not already held and not asked within TTL.
+    pub fn take_parent_getdata(&self, missing: &[Txid]) -> Vec<Txid> {
+        let now = Instant::now();
+        let mut asked = self.parent_asked.lock().unwrap();
+        asked.retain(|_, t| now.saturating_duration_since(*t) < PARENT_GETDATA_TTL);
+        let mut out = Vec::new();
+        for p in missing {
+            if self.try_contains(p) {
+                continue;
+            }
+            if asked.contains_key(p) {
+                continue;
+            }
+            asked.insert(*p, now);
+            out.push(*p);
+            if out.len() >= MAX_PARENTS_PER_PARK {
+                break;
+            }
+        }
+        out
     }
 
     /// Re-admit txs after reorg disconnect (best-effort).

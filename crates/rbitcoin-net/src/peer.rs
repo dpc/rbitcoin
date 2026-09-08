@@ -2956,9 +2956,30 @@ fn tx_accept_log(e: &rbitcoin_mempool::AcceptError) -> TxAcceptLog {
     }
 }
 
+fn queue_orphan_parent_getdata(
+    mp: &crate::tx_relay::MempoolHub,
+    txid: bitcoin::Txid,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+) -> Result<(), NetError> {
+    let missing = mp.orphan_missing_parents(&txid);
+    let want = mp.take_parent_getdata(&missing);
+    if want.is_empty() {
+        return Ok(());
+    }
+    mp.note_getdata_tx(want.len() as u64);
+    queue_out(
+        out_tx,
+        NetworkMessage::GetData(
+            want.into_iter()
+                .map(Inventory::WitnessTransaction)
+                .collect(),
+        ),
+    )
+}
+
 async fn on_tx(
     hub: &ChainHub,
-    _out_tx: &mpsc::UnboundedSender<PeerOut>,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
     follow: &mut PeerFollowState,
     session: Option<&crate::peers::LivePeer>,
     tx: &Transaction,
@@ -3005,6 +3026,7 @@ async fn on_tx(
                     TxAcceptLog::Silent => {}
                     TxAcceptLog::Park => {
                         rbitcoin_log::debug!("txrelay: park {txid} orphans={}", mp.orphan_count());
+                        queue_orphan_parent_getdata(mp, txid, out_tx)?;
                     }
                     TxAcceptLog::Reject => {
                         let id = session.map(|s| s.id).unwrap_or(0);

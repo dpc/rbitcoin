@@ -84,6 +84,10 @@ impl Orphanage {
         self.by_wtxid.contains_key(wtxid)
     }
 
+    pub fn missing_of(&self, txid: &Txid) -> Option<&BTreeSet<Txid>> {
+        self.by_txid.get(txid).map(|e| &e.missing)
+    }
+
     /// Insert orphan waiting on `missing` parent txids. Returns true if newly stored.
     pub fn insert(&mut self, tx: Transaction, missing: BTreeSet<Txid>) -> bool {
         if missing.is_empty() {
@@ -248,6 +252,7 @@ mod tests {
         assert!(o.insert(tx, miss));
         assert!(o.contains(&tid));
         assert!(o.contains_wtxid(&wtxid));
+        assert_eq!(o.missing_of(&tid).map(|s| s.len()), Some(1));
         assert_eq!(o.len(), 1);
         let kids = o.take_children_of(&p);
         assert_eq!(kids.len(), 1);
