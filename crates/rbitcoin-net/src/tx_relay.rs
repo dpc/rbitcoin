@@ -2980,6 +2980,46 @@ mod tests {
     }
 
     #[test]
+    fn compact_fill_uses_parked_orphan() {
+        use bitcoin::bip152::ShortId;
+        use bitcoin::hashes::Hash;
+        let dir = tmp();
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+        hub.set_relay_enabled(true);
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([9u8; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        assert!(matches!(hub.accept_tx(&tx), Err(AcceptError::Orphaned(_))));
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let nonce = 1u64;
+        let keys = ShortId::calculate_siphash_keys(&genesis.header, nonce);
+        let sid = ShortId::with_siphash_keys(&tx.compute_wtxid().to_raw_hash(), keys);
+        let got = hub
+            .try_clone_matching_shortids(&genesis.header, nonce, 2, &[sid])
+            .expect("read lock");
+        assert_eq!(got.len(), 1, "orphan must fill compact short-id");
+        assert_eq!(got[0].compute_txid(), tx.compute_txid());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
     fn open_with_weight_and_package_empty() {
         let dir = tmp();
         let store_dir = tmp();
