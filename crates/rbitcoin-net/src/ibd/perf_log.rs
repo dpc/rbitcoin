@@ -33,8 +33,8 @@
 //!   `ibd-confirm`; excludes head-of-line wait for write handoff). `thr script work`
 //!   is that same ns. Recv/send are wait. Publisher parks; it does not `wait_done`
 //!   on steal workers.
-//! - **write** = Class A + ensure + structural + class_c + spend + tweaks + tip GC
-//!   + `recent_pub=` / `pins=` / `head_sub=` / `drain_join=` / `dequeue=`.
+//! - **write** = Class A + ensure + structural + class_c + spend + tweaks
+//!   + `pins=` / `head_sub=` / `drain_join=` / `dequeue=`.
 //!   `other=` is write-thread work minus that inventory.
 //!
 //! **Inventory rule:** new work on lookup / load / scripts / write (or a sidecar
@@ -58,8 +58,8 @@ use rbitcoin_query::ProcessOwnedSizes;
 /// Write-stage tokens that must sum to `write=` / [`write_stage_ms`].
 ///
 /// Inventory: `class_a` + `ensure` + `struct` + `class_c` + `sh` + `spend`
-/// + `tweaks` + `tip_gc` + `recent_pub` + `pins` + `head_sub` + `drain_join`
-/// + `dequeue`. `other=` is write-thread work minus this inventory.
+/// + `tweaks` + `pins` + `head_sub` + `drain_join` + `dequeue`. `other=` is
+/// write-thread work minus this inventory.
 /// Subtimers (spent_sub, ann, class_a_sub, pins take/map) stay on the outer
 /// sample until a later nest.
 #[derive(Clone, Debug, Default)]
@@ -85,12 +85,6 @@ pub(crate) struct WriteStageSample {
     /// Tip write-through `index_sp_tweaks_batch` (`tweaks=`)
     pub tweak_ms: u64,
     pub tweak_ns: u64,
-    /// `advance_parent_cache_tip` (`tip_gc=`)
-    pub cache_tip_ms: u64,
-    pub cache_tip_ns: u64,
-    /// RecentCreates note+expire+one snapshot (`recent_pub=`)
-    pub recent_pub_ms: u64,
-    pub recent_pub_ns: u64,
     /// Write-thread pin Arc copies: plan take + create-pin FkMap (`pins=`)
     pub pins_ms: u64,
     pub pins_ns: u64,
@@ -118,8 +112,6 @@ impl WriteStageSample {
             .saturating_add(self.sh_ms)
             .saturating_add(self.utxo_ms)
             .saturating_add(self.tweak_ms)
-            .saturating_add(self.cache_tip_ms)
-            .saturating_add(self.recent_pub_ms)
             .saturating_add(self.pins_ms)
             .saturating_add(self.head_sub_ms)
             .saturating_add(self.class_c_join_ms)
@@ -136,8 +128,6 @@ impl WriteStageSample {
             .saturating_add(self.sh_ns)
             .saturating_add(self.utxo_apply_ns)
             .saturating_add(self.tweak_ns)
-            .saturating_add(self.cache_tip_ns)
-            .saturating_add(self.recent_pub_ns)
             .saturating_add(self.pins_ns)
             .saturating_add(self.head_sub_ns)
             .saturating_add(self.class_c_join_ns)
@@ -176,8 +166,6 @@ pub(crate) struct IbdPerfSample {
     pub live: Option<(u32, u32, u32, u64)>,
 
     pub phase_blks: u64,
-    pub recon_ms: u64,
-    pub wire_ms: u64,
     pub connect_ms: u64,
     pub script_ms: u64,
     /// Write-stage exclusive tokens (`write=` = [`WriteStageSample::stage_ms`]).
@@ -185,9 +173,6 @@ pub(crate) struct IbdPerfSample {
     /// Ensure mix: residency/pin hits vs cold denserels body loads.
     pub ensure_res_hit: u64,
     pub ensure_cold_n: u64,
-    /// RecentCreates idx vs snapshot clone (`recent_idx=` / `recent_clone=`).
-    pub recent_idx_ms: u64,
-    pub recent_clone_ms: u64,
     /// `pins=` part: planned_fks clone + pin Arc vec before Class A.
     pub pins_take_ms: u64,
     /// `pins=` part: write_create_pins FkMap insert after Class A.
@@ -199,23 +184,17 @@ pub(crate) struct IbdPerfSample {
     pub asm_job_ms: u64,
     /// Non-coinbase inputs resolved (us/in = prevout_ns / max(1, asm_in_n)).
     pub asm_in_n: u64,
-    /// Prevout path: batch pin hit ms / count.
-    pub asm_prev_batch_ms: u64,
+    /// Prevout path: batch pin hit count.
     pub asm_prev_batch_n: u64,
-    /// Prevout path: residency hit ms / count.
-    /// Prevout path: same-block ms / count.
-    pub asm_prev_same_ms: u64,
+    /// Prevout path: same-block count.
     pub asm_prev_same_n: u64,
-    /// Prevout path: cold Class A ms / count.
-    pub asm_prev_cold_ms: u64,
+    /// Prevout path: cold Class A count.
     pub asm_prev_cold_n: u64,
     /// N1: cold success reasons (sum ≈ asm_prev_cold_n).
     pub asm_cold_null_fk_n: u64,
     pub asm_cold_not_pin_n: u64,
     pub asm_cold_txid_mismatch_n: u64,
     pub asm_cold_vout_miss_n: u64,
-    /// Prevout path: durable txid→fk lookup ms.
-    pub asm_prev_fk_ms: u64,
     pub strong_ms: u64,
     /// Structural sub: durable spentness probes.
     pub structural_spent_ms: u64,
@@ -232,19 +211,14 @@ pub(crate) struct IbdPerfSample {
     /// Structural sub: BIP68 + coin MTP.
     pub structural_bip68_ms: u64,
     pub spend_ranged: u64,
-    pub spend_idx: u64,
-    pub spend_skip: u64,
     /// Pure-write annotate wall ms / edge count.
     pub ann_ms: u64,
     pub ann_n: u64,
     /// Annotate edges without body pread (should equal annotate edges).
     pub ann_pread_skip: u64,
-    /// Annotate body preads (must stay 0 on pure-write path).
-    pub ann_pread: u64,
     /// Structural meta bulk read wall ms / peek count.
     pub meta_ms: u64,
     pub meta_n: u64,
-    pub resolve_ms: u64,
     pub load_ms: u64,
     /// Wire load residual (inside load/pre_asm, outside pin): Arc clone.
     pub prep_wire_arc_ms: u64,
@@ -256,8 +230,6 @@ pub(crate) struct IbdPerfSample {
     pub prep_prepare_ms: u64,
     /// filter need + plan batch + tx_fks wiring.
     pub prep_filter_plan_ms: u64,
-    pub recon_ns: u64,
-    pub wire_ns: u64,
     pub connect_ns: u64,
     pub script_ns: u64,
     pub strong_ns: u64,
@@ -265,7 +237,6 @@ pub(crate) struct IbdPerfSample {
     pub structural_spent_ns: u64,
     pub structural_create_h_ns: u64,
     pub structural_bip68_ns: u64,
-    pub resolve_ns: u64,
     pub load_ns: u64,
 
     pub sh_runs: usize,
@@ -286,7 +257,6 @@ pub(crate) struct IbdPerfSample {
     pub load_win_ms: u64,
     pub load_blocks: u64,
     pub load_utxo_parents: u64,
-    pub load_creates: u64,
     pub load_parent_unique: u64,
     pub load_pin_cache_body: u64,
     /// Pin hits from pipeline pins (subset of pin_cache when residency filled).
@@ -294,14 +264,11 @@ pub(crate) struct IbdPerfSample {
     pub load_pin_plan: u64,
     pub load_pin_new: u64,
     pub load_pin_body_ms: u64,
-    pub load_pin_new_meta_ms: u64,
     pub load_plan_pin_ms: u64,
-    /// Pin residual sub-walls (adopt / recent-outs / range-fill insert / contract / publish).
-    pub load_pin_adopt_ms: u64,
+    /// Pin residual sub-walls (recent-outs / range-fill insert / contract).
     pub load_pin_range_fill_ms: u64,
     pub load_pin_recent_outs_ms: u64,
     pub load_pin_contract_ms: u64,
-    pub load_pin_publish_ms: u64,
     pub load_cold_io_ms: u64,
     /// Cold denserels by plan body range (ms / create count).
     pub load_cold_range_ms: u64,
@@ -309,15 +276,7 @@ pub(crate) struct IbdPerfSample {
     /// N2.0: body pread vs sparse denserels decode (ms; sum ≈ cold_range).
     pub load_cold_range_body_ms: u64,
     pub load_cold_range_decode_ms: u64,
-    /// Cold denserels by idx→body (ms / create count).
-    pub load_cold_idx_ms: u64,
-    pub load_cold_idx_n: u64,
-    pub load_cold_decode_ms: u64,
-    /// pipeline pins lock: write wait/hold ms, write count.
-    /// pipeline pins lock: read wait/hold ms, read count.
     pub load_body_tx_reads: u64,
-    pub load_parent_tx_reads: u64,
-    pub load_missing_parents: u64,
     pub load_ready_through: u32,
     pub cache_bodies: usize,
     pub cache_plans: usize,
@@ -388,14 +347,8 @@ pub(crate) struct IbdPerfSample {
     pub plan_already: u64,
     pub plan_cold: u64,
     pub plan_same_batch: u64,
-    pub load_hdr_ms: u64,
-    pub load_decode_ms: u64,
     pub load_thin_ms: u64,
     pub load_parent_pin_ms: u64,
-    pub load_cache_put_ms: u64,
-    pub load_edge_same: u64,
-    pub load_edge_fk: u64,
-    pub load_edge_cb: u64,
 
     pub arch_ext_need: u64,
     pub arch_head_need: u64,
@@ -489,15 +442,11 @@ impl Default for IbdPerfSample {
             dominant: "idle",
             live: None,
             phase_blks: 0,
-            recon_ms: 0,
-            wire_ms: 0,
             connect_ms: 0,
             script_ms: 0,
             write: WriteStageSample::default(),
             ensure_res_hit: 0,
             ensure_cold_n: 0,
-            recent_idx_ms: 0,
-            recent_clone_ms: 0,
             pins_take_ms: 0,
             pins_map_ms: 0,
             asm_prevout_ms: 0,
@@ -505,17 +454,13 @@ impl Default for IbdPerfSample {
             asm_final_ms: 0,
             asm_job_ms: 0,
             asm_in_n: 0,
-            asm_prev_batch_ms: 0,
             asm_prev_batch_n: 0,
-            asm_prev_same_ms: 0,
             asm_prev_same_n: 0,
-            asm_prev_cold_ms: 0,
             asm_prev_cold_n: 0,
             asm_cold_null_fk_n: 0,
             asm_cold_not_pin_n: 0,
             asm_cold_txid_mismatch_n: 0,
             asm_cold_vout_miss_n: 0,
-            asm_prev_fk_ms: 0,
             strong_ms: 0,
             structural_spent_ms: 0,
             spent_abs_ms: 0,
@@ -525,23 +470,17 @@ impl Default for IbdPerfSample {
             structural_create_h_ms: 0,
             structural_bip68_ms: 0,
             spend_ranged: 0,
-            spend_idx: 0,
-            spend_skip: 0,
             ann_ms: 0,
             ann_n: 0,
             ann_pread_skip: 0,
-            ann_pread: 0,
             meta_ms: 0,
             meta_n: 0,
-            resolve_ms: 0,
             load_ms: 0,
             prep_wire_arc_ms: 0,
             prep_struct_ms: 0,
             prep_header_ms: 0,
             prep_prepare_ms: 0,
             prep_filter_plan_ms: 0,
-            recon_ns: 0,
-            wire_ns: 0,
             connect_ns: 0,
             script_ns: 0,
             strong_ns: 0,
@@ -549,7 +488,6 @@ impl Default for IbdPerfSample {
             structural_spent_ns: 0,
             structural_create_h_ns: 0,
             structural_bip68_ns: 0,
-            resolve_ns: 0,
             load_ns: 0,
             sh_runs: 0,
             wf_body_store: 0,
@@ -564,30 +502,21 @@ impl Default for IbdPerfSample {
             load_win_ms: 0,
             load_blocks: 0,
             load_utxo_parents: 0,
-            load_creates: 0,
             load_parent_unique: 0,
             load_pin_cache_body: 0,
             load_pin_plan: 0,
             load_pin_new: 0,
             load_pin_body_ms: 0,
-            load_pin_new_meta_ms: 0,
             load_plan_pin_ms: 0,
-            load_pin_adopt_ms: 0,
             load_pin_range_fill_ms: 0,
             load_pin_recent_outs_ms: 0,
             load_pin_contract_ms: 0,
-            load_pin_publish_ms: 0,
             load_cold_io_ms: 0,
             load_cold_range_ms: 0,
             load_cold_range_n: 0,
             load_cold_range_body_ms: 0,
             load_cold_range_decode_ms: 0,
-            load_cold_idx_ms: 0,
-            load_cold_idx_n: 0,
-            load_cold_decode_ms: 0,
             load_body_tx_reads: 0,
-            load_parent_tx_reads: 0,
-            load_missing_parents: 0,
             load_ready_through: 0,
             cache_bodies: 0,
             cache_plans: 0,
@@ -645,14 +574,8 @@ impl Default for IbdPerfSample {
             plan_already: 0,
             plan_cold: 0,
             plan_same_batch: 0,
-            load_hdr_ms: 0,
-            load_decode_ms: 0,
             load_thin_ms: 0,
             load_parent_pin_ms: 0,
-            load_cache_put_ms: 0,
-            load_edge_same: 0,
-            load_edge_fk: 0,
-            load_edge_cb: 0,
             arch_ext_need: 0,
             arch_head_need: 0,
             arch_head_hit: 0,
@@ -855,8 +778,6 @@ pub(crate) fn sample(
     let thr = super::confirm::confirm_thr_stats::sample_and_reset();
     let stamp_sub = rbitcoin_consensus::plan_stamp_sub_stats::sample_and_reset();
     let (
-        recon_ns,
-        wire_ns,
         connect_ns,
         script_ns,
         class_c_ns,
@@ -865,13 +786,8 @@ pub(crate) fn sample(
         tip_ns,
         utxo_apply_ns,
         phase_blks,
-        resolve_ns,
         load_ns,
-        _unpin_ns,
-        cache_tip_ns,
         spend_ranged,
-        spend_idx,
-        spend_skip,
         structural_ns,
         structural_spent_ns,
         structural_create_h_ns,
@@ -879,9 +795,6 @@ pub(crate) fn sample(
     ) = rbitcoin_consensus::confirm_phase_stats::sample_and_reset();
     let (class_a_ns, ensure_ns) =
         rbitcoin_consensus::confirm_phase_stats::sample_class_a_ensure_and_reset();
-    let recent_pub_ns = rbitcoin_consensus::confirm_phase_stats::sample_write_recent_and_reset();
-    let (recent_idx_ns, recent_clone_ns) =
-        rbitcoin_consensus::confirm_phase_stats::sample_write_recent_parts_and_reset();
     let (drain_join_ns, dequeue_ns) =
         rbitcoin_consensus::confirm_phase_stats::sample_write_residuals_and_reset();
     let (pins_take_ns, pins_map_ns, head_sub_ns) =
@@ -893,23 +806,15 @@ pub(crate) fn sample(
         rbitcoin_consensus::confirm_phase_stats::sample_spent_sub_and_reset();
     let (script_jobs, script_skip) =
         rbitcoin_consensus::confirm_phase_stats::sample_script_mix_and_reset();
-    let (ann_ns, ann_n, ann_pread_skip, ann_pread) =
+    let (ann_ns, ann_n, ann_pread_skip) =
         rbitcoin_consensus::confirm_phase_stats::sample_spend_ann_and_reset();
     let (meta_ns, meta_n) = rbitcoin_consensus::confirm_phase_stats::sample_spend_meta_and_reset();
     let (ensure_res_hit, ensure_cold_n) =
         rbitcoin_consensus::confirm_phase_stats::sample_ensure_mix_and_reset();
     let (asm_prevout_ns, asm_sigop_ns, asm_final_ns, asm_job_ns) =
         rbitcoin_consensus::confirm_phase_stats::sample_assemble_and_reset();
-    let (
-        asm_in_n,
-        asm_prev_batch_ns,
-        asm_prev_batch_n,
-        asm_prev_same_ns,
-        asm_prev_same_n,
-        asm_prev_cold_ns,
-        asm_prev_cold_n,
-        asm_prev_fk_ns,
-    ) = rbitcoin_consensus::confirm_phase_stats::sample_assemble_prevout_detail_and_reset();
+    let (asm_in_n, asm_prev_batch_n, asm_prev_same_n, asm_prev_cold_n) =
+        rbitcoin_consensus::confirm_phase_stats::sample_assemble_prevout_detail_and_reset();
     let (asm_cold_null_fk_n, asm_cold_not_pin_n, asm_cold_txid_mismatch_n, asm_cold_vout_miss_n) =
         rbitcoin_consensus::confirm_phase_stats::sample_assemble_cold_why_and_reset();
     let (prep_wire_arc_ns, prep_struct_ns, prep_header_ns, prep_prepare_ns, prep_filter_plan_ns) =
@@ -948,8 +853,6 @@ pub(crate) fn sample(
         dominant: hot.dominant(),
         live: hot.confirm_live,
         phase_blks,
-        recon_ms: ns_ms(recon_ns),
-        wire_ms: ns_ms(wire_ns),
         connect_ms: ns_ms(connect_ns),
         script_ms: ns_ms(script_ns),
         write: WriteStageSample {
@@ -967,10 +870,6 @@ pub(crate) fn sample(
             utxo_apply_ns,
             tweak_ms: ns_ms(tweak_ns),
             tweak_ns,
-            cache_tip_ms: ns_ms(cache_tip_ns),
-            cache_tip_ns,
-            recent_pub_ms: ns_ms(recent_pub_ns),
-            recent_pub_ns,
             pins_ms: ns_ms(pins_ns),
             pins_ns,
             head_sub_ms: ns_ms(head_sub_ns),
@@ -984,8 +883,6 @@ pub(crate) fn sample(
         },
         ensure_res_hit,
         ensure_cold_n,
-        recent_idx_ms: ns_ms(recent_idx_ns),
-        recent_clone_ms: ns_ms(recent_clone_ns),
         pins_take_ms: ns_ms(pins_take_ns),
         pins_map_ms: ns_ms(pins_map_ns),
         asm_prevout_ms: ns_ms(asm_prevout_ns),
@@ -993,17 +890,13 @@ pub(crate) fn sample(
         asm_final_ms: ns_ms(asm_final_ns),
         asm_job_ms: ns_ms(asm_job_ns),
         asm_in_n,
-        asm_prev_batch_ms: ns_ms(asm_prev_batch_ns),
         asm_prev_batch_n,
-        asm_prev_same_ms: ns_ms(asm_prev_same_ns),
         asm_prev_same_n,
-        asm_prev_cold_ms: ns_ms(asm_prev_cold_ns),
         asm_prev_cold_n,
         asm_cold_null_fk_n,
         asm_cold_not_pin_n,
         asm_cold_txid_mismatch_n,
         asm_cold_vout_miss_n,
-        asm_prev_fk_ms: ns_ms(asm_prev_fk_ns),
         strong_ms: ns_ms(strong_ns),
         structural_spent_ms: ns_ms(structural_spent_ns),
         spent_abs_ms: ns_ms(spent_abs_ns),
@@ -1013,23 +906,17 @@ pub(crate) fn sample(
         structural_create_h_ms: ns_ms(structural_create_h_ns),
         structural_bip68_ms: ns_ms(structural_bip68_ns),
         spend_ranged,
-        spend_idx,
-        spend_skip,
         ann_ms: ns_ms(ann_ns),
         ann_n,
         ann_pread_skip,
-        ann_pread,
         meta_ms: ns_ms(meta_ns),
         meta_n,
-        resolve_ms: ns_ms(resolve_ns),
         load_ms: ns_ms(load_ns),
         prep_wire_arc_ms: ns_ms(prep_wire_arc_ns),
         prep_struct_ms: ns_ms(prep_struct_ns),
         prep_header_ms: ns_ms(prep_header_ns),
         prep_prepare_ms: ns_ms(prep_prepare_ns),
         prep_filter_plan_ms: ns_ms(prep_filter_plan_ns),
-        recon_ns,
-        wire_ns,
         connect_ns,
         script_ns,
         strong_ns,
@@ -1037,7 +924,6 @@ pub(crate) fn sample(
         structural_spent_ns,
         structural_create_h_ns,
         structural_bip68_ns,
-        resolve_ns,
         load_ns,
         sh_runs,
         wf_body_store,
@@ -1052,30 +938,21 @@ pub(crate) fn sample(
         load_win_ms: ns_ms(pw.ns),
         load_blocks: pw.blocks,
         load_utxo_parents: pw.utxo_parents,
-        load_creates: pw.creates,
         load_parent_unique: pw.parent_unique,
         load_pin_cache_body: pw.pin_cache_body,
         load_pin_plan: pw.pin_plan,
         load_pin_new: pw.pin_new,
         load_pin_body_ms: ns_ms(pw.pin_body_ns),
-        load_pin_new_meta_ms: ns_ms(pw.pin_new_meta_ns),
         load_plan_pin_ms: ns_ms(pw.plan_pin_ns),
-        load_pin_adopt_ms: ns_ms(pw.pin_adopt_ns),
         load_pin_range_fill_ms: ns_ms(pw.pin_range_fill_ns),
         load_pin_recent_outs_ms: ns_ms(pw.pin_recent_outs_ns),
         load_pin_contract_ms: ns_ms(pw.pin_contract_ns),
-        load_pin_publish_ms: ns_ms(pw.pin_publish_ns),
         load_cold_io_ms: ns_ms(pw.cold_io_ns),
         load_cold_range_ms: ns_ms(pw.cold_range_ns),
         load_cold_range_n: pw.cold_range_n,
         load_cold_range_body_ms: ns_ms(pw.cold_range_body_ns),
         load_cold_range_decode_ms: ns_ms(pw.cold_range_decode_ns),
-        load_cold_idx_ms: ns_ms(pw.cold_idx_ns),
-        load_cold_idx_n: pw.cold_idx_n,
-        load_cold_decode_ms: ns_ms(pw.cold_decode_ns),
         load_body_tx_reads: pw.body_tx,
-        load_parent_tx_reads: pw.parent_tx,
-        load_missing_parents: pw.missing,
         load_ready_through,
         cache_bodies,
         cache_plans,
@@ -1133,14 +1010,8 @@ pub(crate) fn sample(
         plan_already: dens.already,
         plan_cold: dens.cold,
         plan_same_batch: dens.unresolved,
-        load_hdr_ms: ns_ms(pw.header_ns),
-        load_decode_ms: ns_ms(pw.body_decode_ns),
         load_thin_ms: ns_ms(pw.thin_ns),
         load_parent_pin_ms: ns_ms(pw.parent_pin_ns),
-        load_cache_put_ms: ns_ms(pw.cache_put_ns),
-        load_edge_same: pw.edge_same_batch,
-        load_edge_fk: pw.edge_fk,
-        load_edge_cb: pw.edge_coinbase,
         arch_ext_need: arch_res.ext_need,
         arch_head_need: arch_res.head_need,
         arch_head_hit: arch_res.head_hit,
@@ -1246,7 +1117,7 @@ fn plan_batch_ms(s: &IbdPerfSample) -> u64 {
 ///
 /// Class A + denserels ensure + structural + **Class C tables** (strong+tip) +
 /// **SH** (parallel with strong on tip; was previously folded into a join-wall
-/// `class_c`) + spend annotate + SP tweaks + tip GC.
+/// `class_c`) + spend annotate + SP tweaks.
 fn write_stage_ms(s: &IbdPerfSample) -> u64 {
     s.write.stage_ms()
 }
@@ -1398,10 +1269,6 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
             s.plan_cold_io_ms,
         ));
     }
-    append_nz(&mut out, "recon_ms", s.recon_ms);
-    append_nz(&mut out, "wire_ms", s.wire_ms);
-    append_nz(&mut out, "resolve_ms", s.resolve_ms);
-
     // CACHE_BODY is adopt / plan / in-flight / same-batch only — this
     // window's cold range-fills increment PIN_NEW, not cache.
     let pin_hit_pct = {
@@ -1418,16 +1285,10 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
     } else {
         s.load_pin_body_ms
     };
-    let cold_io_ms = if s.load_cold_io_ms > 0 {
-        s.load_cold_io_ms
-    } else {
-        s.load_pin_new_meta_ms
-    };
-    let cold_dec_ms = s.load_cold_decode_ms;
+    let cold_io_ms = s.load_cold_io_ms;
     let cold_range_ms = s.load_cold_range_ms;
-    let cold_idx_ms = s.load_cold_idx_ms;
-    let cold_for_us = if cold_range_ms + cold_idx_ms > 0 {
-        cold_range_ms.saturating_add(cold_idx_ms)
+    let cold_for_us = if cold_range_ms > 0 {
+        cold_range_ms
     } else {
         cold_io_ms
     };
@@ -1455,12 +1316,12 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
     out.push_str(&format!(
         " | load blks={} total={}ms pre_asm={}ms(wire_arc={}ms struct={}ms header={}ms prepare={}ms \
          filter_plan={}ms plan_batch={}ms pin={}ms) \
-         assemble={}ms(prevout={} us/in={} batch={}/n={} same={}/n={} cold={}/n={} \
-         cold_why(null_fk={} not_pin={} mismatch={} vout_miss={}) fk={}ms \
+         assemble={}ms(prevout={} us/in={} batch_n={} same_n={} cold_n={} \
+         cold_why(null_fk={} not_pin={} mismatch={} vout_miss={}) \
          sigop={} final={} job={}) \
-         pin(thin={}ms plan={}ms/n={} cold_range={}ms(body={} dec={})/n={} cold_idx={}ms/n={} cold_io={}ms cold_dec={}ms us/new={} \
-         adopt={}ms recent_outs={}ms range_fill={}ms contract={}ms publish={}ms) \
-         pin_hit%={} pin_plan={} pin_new={} body_io={} parent_io={}",
+         pin(thin={}ms plan={}ms/n={} cold_range={}ms(body={} dec={})/n={} cold_io={}ms us/new={} \
+         recent_outs={}ms range_fill={}ms contract={}ms) \
+         pin_hit%={} pin_plan={} pin_new={} body_io={}",
         s.load_blocks,
         load_wall_ms,
         pre_assemble,
@@ -1474,17 +1335,13 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.connect_ms,
         s.asm_prevout_ms,
         asm_prev_us_per_in,
-        s.asm_prev_batch_ms,
         s.asm_prev_batch_n,
-        s.asm_prev_same_ms,
         s.asm_prev_same_n,
-        s.asm_prev_cold_ms,
         s.asm_prev_cold_n,
         s.asm_cold_null_fk_n,
         s.asm_cold_not_pin_n,
         s.asm_cold_txid_mismatch_n,
         s.asm_cold_vout_miss_n,
-        s.asm_prev_fk_ms,
         s.asm_sigop_ms,
         s.asm_final_ms,
         s.asm_job_ms,
@@ -1495,41 +1352,26 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.load_cold_range_body_ms,
         s.load_cold_range_decode_ms,
         s.load_cold_range_n,
-        cold_idx_ms,
-        s.load_cold_idx_n,
         cold_io_ms,
-        cold_dec_ms,
         pin_cold_us_per,
-        s.load_pin_adopt_ms,
         s.load_pin_recent_outs_ms,
         s.load_pin_range_fill_ms,
         s.load_pin_contract_ms,
-        s.load_pin_publish_ms,
         pin_hit_pct,
         s.load_pin_plan,
         s.load_pin_new,
         s.load_body_tx_reads,
-        s.load_parent_tx_reads,
     ));
     if s.load_win_ms > 0 {
         out.push_str(&format!(" pin_win={}ms", s.load_win_ms));
-    }
-    if s.load_edge_same > 0 || s.load_edge_fk > 0 || s.load_edge_cb > 0 {
-        out.push_str(&format!(
-            " edges same={} fk={} cb={}",
-            s.load_edge_same, s.load_edge_fk, s.load_edge_cb
-        ));
-    }
-    if s.load_missing_parents > 0 {
-        out.push_str(&format!(" miss_p={}", s.load_missing_parents));
     }
 
     out.push_str(&format!(
         " | write class_a={}ms ensure={}ms(pin={} cold={}) struct={}ms(spent={} create_h={} bip68={}) \
          spent_sub(abs={} strong={} cold={} pending={}) \
-         class_c={}ms class_c_join={}ms sh={}ms spend={}ms tweaks={}ms tip_gc={}ms recent_pub={}ms(idx={} clone={}) \
+         class_c={}ms class_c_join={}ms sh={}ms spend={}ms tweaks={}ms \
          pins={}ms(take={} map={}) head_sub={}ms drain_join={}ms dequeue={}ms other={}ms \
-         ann={}ms/n={} pread_skip={} pread={} \
+         ann={}ms/n={} pread_skip={} \
          meta={}ms/n={}",
         s.write.class_a_ms,
         s.write.ensure_ms,
@@ -1548,10 +1390,6 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.write.sh_ms,
         s.write.utxo_ms,
         s.write.tweak_ms,
-        s.write.cache_tip_ms,
-        s.write.recent_pub_ms,
-        s.recent_idx_ms,
-        s.recent_clone_ms,
         s.write.pins_ms,
         s.pins_take_ms,
         s.pins_map_ms,
@@ -1562,7 +1400,6 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.ann_ms,
         s.ann_n,
         s.ann_pread_skip,
-        s.ann_pread,
         s.meta_ms,
         s.meta_n,
     ));
@@ -1576,12 +1413,6 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         ));
     }
     append_nz(&mut out, "strong_ms", s.strong_ms);
-    if s.spend_idx > 0 || s.spend_skip > 0 {
-        out.push_str(&format!(
-            " spend_mix(r={} i={} skip={})",
-            s.spend_ranged, s.spend_idx, s.spend_skip
-        ));
-    }
 
     let conf_q = super::confirm::format_conf_q(
         s.conf_pipe.load_batches,
@@ -1627,7 +1458,7 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
     let mut out = format!(
         "ibd: perf_dbg us/blk load={} (pre_asm={} assemble={}) script={} write={} \
          class_a={} ensure={} struct={} spent={} create_h={} bip68={} class_c={} sh={} \
-         spend={}(r={} i={} skip={}) tweaks={} tip_gc={} recent_pub={} pins={} head_sub={} drain_join={} dequeue={}",
+         spend={}(r={}) tweaks={} pins={} head_sub={} drain_join={} dequeue={}",
         us(prep_ns),
         us(s.load_ns),
         us(s.connect_ns),
@@ -1643,19 +1474,12 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
         us(s.write.sh_ns),
         us(s.write.utxo_apply_ns),
         s.spend_ranged,
-        s.spend_idx,
-        s.spend_skip,
         us(s.write.tweak_ns),
-        us(s.write.cache_tip_ns),
-        us(s.write.recent_pub_ns),
         us(s.write.pins_ns),
         us(s.write.head_sub_ns),
         us(s.write.drain_join_ns),
         us(s.write.dequeue_ns),
     );
-    append_nz(&mut out, "recon_us", us(s.recon_ns));
-    append_nz(&mut out, "wire_us", us(s.wire_ns));
-    append_nz(&mut out, "resolve_us", us(s.resolve_ns));
     append_nz(&mut out, "strong_us", us(s.strong_ns));
     append_nz(&mut out, "tip_us", us(s.tip_ns));
     if s.wf_body_store > 0 || s.wf_store_body_ms > 0 {
@@ -1686,7 +1510,7 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
     );
     let bq_mib = s.bq_bytes / (1024 * 1024);
     out.push_str(&format!(
-        " | bq soft={}/{} RAM={}MiB | {conf_q} | load thru={} bodies={} plans={} win_ms={} blks={} utxo_p={} creates={} uniq_p={} pin_cache={} pin_new={} body_io={} parent_io={}",
+        " | bq soft={}/{} RAM={}MiB | {conf_q} | load thru={} bodies={} plans={} win_ms={} blks={} utxo_p={} uniq_p={} pin_cache={} pin_new={} body_io={}",
         s.bq_count,
         s.bq_soft_stop,
         bq_mib,
@@ -1696,27 +1520,14 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
         s.load_win_ms,
         s.load_blocks,
         s.load_utxo_parents,
-        s.load_creates,
         s.load_parent_unique,
         s.load_pin_cache_body,
         s.load_pin_new,
         s.load_body_tx_reads,
-        s.load_parent_tx_reads,
-    ));
-    append_nz(&mut out, "miss_p", s.load_missing_parents);
-    out.push_str(&format!(
-        " phases hdr={} dec={} thin={} pin={} put={} pin_sub body={} new={}",
-        s.load_hdr_ms,
-        s.load_decode_ms,
-        s.load_thin_ms,
-        s.load_parent_pin_ms,
-        s.load_cache_put_ms,
-        s.load_pin_body_ms,
-        s.load_pin_new_meta_ms,
     ));
     out.push_str(&format!(
-        " edges same={} fk={} cb={}",
-        s.load_edge_same, s.load_edge_fk, s.load_edge_cb,
+        " phases thin={} pin={} pin_sub body={}",
+        s.load_thin_ms, s.load_parent_pin_ms, s.load_pin_body_ms,
     ));
     out.push_str(&format!(" sh_runs={}", s.sh_runs));
 
@@ -1875,10 +1686,6 @@ pub(crate) fn format_sizes(s: &IbdPerfSample) -> String {
     };
     let bq_mib = s.bq_bytes / (1024 * 1024);
     let if_mib = o.inflight_bytes / (1024 * 1024);
-    let ps_mib = o.pstore_bytes / (1024 * 1024);
-    // CreatePin payload bytes (Arc-shared with in-flight while overlapping).
-    let recent_bytes = o.recent_pin_bytes;
-    let recent_mib = recent_bytes / (1024 * 1024);
     let h2h_mib = (o.h2h_keys as u64).saturating_mul(48) / (1024 * 1024);
     let fence_mib = (o.fence_runs as u64).saturating_mul(16) / (1024 * 1024);
     let conf_wire_mib = (load_wire_mib
@@ -1890,8 +1697,6 @@ pub(crate) fn format_sizes(s: &IbdPerfSample) -> String {
     let class_c_l2_mib = h.class_c_l2_bytes / (1024 * 1024);
     let accounted_mib = bq_mib
         .saturating_add(if_mib)
-        .saturating_add(ps_mib)
-        .saturating_add(recent_mib)
         .saturating_add(h2h_mib)
         .saturating_add(fence_mib)
         .saturating_add(conf_wire_mib)
@@ -1909,9 +1714,8 @@ pub(crate) fn format_sizes(s: &IbdPerfSample) -> String {
          | conf_plans={} \
          | conf loadq={}/{} blks={} wire={}MiB scriptq={}/{} blks={} wire={}MiB writeq={}/{} blks={} wire={}MiB parents={} \
            feed ready={} inflight={} \
-         | heap bq={}MiB iflight={}L/{}pin≈{}MiB recent={}h live={}k/pub={}k/ov={} fifo={}k≈{}MiB \
+         | heap bq={}MiB iflight={}L/{}pin≈{}MiB \
            h2h={}k≈{}MiB fence={}≈{}MiB \
-           pstore weak={}/live={}≈{}MiB \
            wire={}MiB fuse8={}MiB mphf_g={}MiB open_keys={}MiB class_c_l2={}MiB \
            accounted≈{}MiB residual≈{}MiB \
          | txhead bits={} entry={}B slots={} occ={} body={}MiB segs={} sealed={} class_a={} \
@@ -1958,19 +1762,10 @@ pub(crate) fn format_sizes(s: &IbdPerfSample) -> String {
         o.inflight_layers,
         o.inflight_pins,
         if_mib,
-        o.recent_heights,
-        o.recent_keys,
-        o.recent_pub_keys,
-        o.recent_overlay_keys,
-        o.recent_fifo_keys,
-        recent_mib,
         o.h2h_keys,
         h2h_mib,
         o.fence_runs,
         fence_mib,
-        o.pstore_weak,
-        o.pstore_live,
-        ps_mib,
         conf_wire_mib,
         fuse8_mib,
         mphf_g_mib,
@@ -2036,23 +1831,22 @@ mod tests {
         write.sh_ms = 16;
         write.utxo_ms = 32;
         write.tweak_ms = 64;
-        write.cache_tip_ms = 128;
         write.drain_join_ms = 0;
         write.dequeue_ms = 0;
         assert_eq!(
             write.stage_ms(),
-            255,
-            "inventory: class_a+ensure+struct+class_c+sh+spend+tweaks+tip_gc+recent_pub+pins+head_sub+drain_join+dequeue"
+            127,
+            "inventory: class_a+ensure+struct+class_c+sh+spend+tweaks+pins+head_sub+drain_join+dequeue"
         );
         let mut s = IbdPerfSample::default();
         s.write = write;
-        assert_eq!(write_stage_ms(&s), 255);
+        assert_eq!(write_stage_ms(&s), 127);
         let line = format_info(&s);
-        assert!(line.contains("write=255ms"), "{line}");
+        assert!(line.contains("write=127ms"), "{line}");
         assert!(line.contains("tweaks=64ms"), "{line}");
-        assert!(line.contains("tip_gc=128ms"), "{line}");
+        assert!(!line.contains("tip_gc="), "{line}");
         assert!(line.contains("spend=32ms"), "{line}");
-        assert!(line.contains("recent_pub=0ms(idx=0 clone=0)"), "{line}");
+        assert!(!line.contains("recent_pub="), "{line}");
         assert!(line.contains("class_c_join=0ms"), "{line}");
         assert!(line.contains("drain_join=0ms"), "{line}");
         assert!(line.contains("dequeue=0ms"), "{line}");
@@ -2095,9 +1889,8 @@ mod tests {
         s.write.sh_ms = 100; // SH exclusive (parallel with strong; counted separately)
         s.write.utxo_ms = 25;
         s.write.tweak_ms = 80;
-        s.write.cache_tip_ms = 5;
-        // 15+2+50+40+100+25+80+5 = 317
-        assert_eq!(write_stage_ms(&s), 317);
+        // 15+2+50+40+100+25+80 = 312
+        assert_eq!(write_stage_ms(&s), 312);
     }
 
     #[test]
@@ -2117,6 +1910,59 @@ mod tests {
     }
 
     #[test]
+    fn format_lines_omit_never_written_inventory_tokens() {
+        let mut s = IbdPerfSample::default();
+        s.phase_blks = 8;
+        s.load_ms = 30;
+        s.connect_ms = 8;
+        s.script_ms = 20;
+        s.write.class_a_ms = 12;
+        s.write.ensure_ms = 3;
+        s.write.class_c_ms = 4;
+        s.load_body_tx_reads = 12;
+        s.load_pin_new = 6;
+        s.ann_pread_skip = 4;
+        s.asm_prev_batch_n = 2000;
+        s.asm_prev_same_n = 50;
+        s.asm_prev_cold_n = 250;
+        let info = format_info(&s);
+        let dbg = format_debug(&s);
+        let sizes = format_sizes(&s);
+        assert!(info.starts_with("ibd: perf "), "{info}");
+        assert!(info.contains("load="), "{info}");
+        assert!(info.contains("script="), "{info}");
+        assert!(info.contains("write="), "{info}");
+        assert!(info.contains("class_a="), "{info}");
+        assert!(dbg.contains("us/blk load="), "{dbg}");
+        assert!(dbg.contains("script="), "{dbg}");
+        assert!(dbg.contains("write="), "{dbg}");
+        for line in [&info, &dbg] {
+            assert!(!line.contains("recon_ms="), "{line}");
+            assert!(!line.contains("recon_us="), "{line}");
+            assert!(!line.contains("wire_ms="), "{line}");
+            assert!(!line.contains("wire_us="), "{line}");
+            assert!(!line.contains("resolve_ms="), "{line}");
+            assert!(!line.contains("resolve_us="), "{line}");
+            assert!(!line.contains("parent_io="), "{line}");
+            assert!(!line.contains("recent_pub="), "{line}");
+            assert!(!line.contains("unpin"), "{line}");
+            assert!(!line.contains("miss_p="), "{line}");
+            assert!(!line.contains("cold_idx="), "{line}");
+            assert!(!line.contains("cold_dec="), "{line}");
+            assert!(!line.contains("edges same="), "{line}");
+            assert!(!line.contains("tip_gc="), "{line}");
+            assert!(!line.contains("spend_mix"), "{line}");
+            assert!(!line.contains(" pread="), "{line}");
+        }
+        assert!(!dbg.contains("creates="), "{dbg}");
+        assert!(!sizes.contains("pstore"), "{sizes}");
+        assert!(
+            !sizes.contains("recent="),
+            "always-zero recent= occupancy: {sizes}"
+        );
+    }
+
+    #[test]
     fn format_info_has_stable_tokens() {
         let mut s = IbdPerfSample::default();
         s.inflight = 3;
@@ -2128,7 +1974,6 @@ mod tests {
         s.hole = 0;
         s.peers = 16;
         s.phase_blks = 32;
-        s.recon_ms = 100;
         s.script_ms = 20;
         s.load_ms = 30;
         s.connect_ms = 8;
@@ -2137,7 +1982,6 @@ mod tests {
         s.write.class_c_ms = 40;
         s.write.utxo_ms = 25;
         s.write.tweak_ms = 7;
-        s.write.cache_tip_ms = 5;
         s.dominant = "confirm";
         s.live = Some((100, 32, 8000, 1500));
         s.confirm_reject_stops = 2;
@@ -2198,15 +2042,15 @@ mod tests {
             !line.contains("connect="),
             "assemble is inside load, not a peer stage: {line}"
         );
-        // write = class_a(12)+ensure(3)+class_c(40)+sh(0)+spend(25)+tweaks(7)+tip_gc(5) = 92
-        assert!(line.contains("write=92ms"), "{line}");
+        // write = class_a(12)+ensure(3)+class_c(40)+sh(0)+spend(25)+tweaks(7) = 87
+        assert!(line.contains("write=87ms"), "{line}");
         assert!(line.contains("class_a=12ms"), "{line}");
         assert!(line.contains("ensure=3ms"), "{line}");
         assert!(line.contains("class_c=40ms"), "{line}");
         assert!(line.contains("spend=25ms"), "{line}");
         assert!(line.contains("tweaks=7ms"), "{line}");
         assert!(line.contains("struct=0ms"), "{line}");
-        assert!(line.contains("recon_ms=100"), "{line}"); // non-zero only
+        assert!(!line.contains("recon_ms="), "{line}");
         assert!(!line.contains("prefetch"), "{line}");
         assert!(!line.contains("unpin"), "{line}");
         assert!(line.contains("loop confirm"), "{line}");
@@ -2222,14 +2066,11 @@ mod tests {
         s.load_pin_cache_body = 8;
         s.load_pin_new = 12;
         s.load_body_tx_reads = 400;
-        s.load_parent_tx_reads = 12;
         s.load_win_ms = 40;
         s.load_thin_ms = 5;
-        s.load_decode_ms = 15;
-        s.load_cache_put_ms = 2;
         s.load_parent_pin_ms = 18;
         s.load_pin_body_ms = 4;
-        s.load_pin_new_meta_ms = 14;
+        s.load_cold_io_ms = 14;
         s.sh_runs = 3;
         s.write.structural_ms = 50;
         s.structural_spent_ms = 30;
@@ -2243,7 +2084,8 @@ mod tests {
         // pin_residency slot always 0 (process pin FIFO removed); pin_plan_cache label retired.
         assert!(!line.contains("pin_res="), "{line}");
         assert!(line.contains("pin_new=12"), "{line}");
-        assert!(line.contains("body_io=400 parent_io=12"), "{line}");
+        assert!(line.contains("body_io=400"), "{line}");
+        assert!(!line.contains("parent_io="), "{line}");
         s.spent_abs_ms = 20;
         s.spent_strong_ms = 5;
         s.spent_cold_ms = 3;
@@ -2257,8 +2099,8 @@ mod tests {
             line.contains("spent_sub(abs=20 strong=5 cold=3 pending=2)"),
             "{line}"
         );
-        // write = 12+3+50+40+25+7+5 = 142
-        assert!(line.contains("write=142ms"), "{line}");
+        // write = 12+3+50+40+25+7 = 137
+        assert!(line.contains("write=137ms"), "{line}");
         assert!(line.contains("class_a_sub(body=7 head=2"), "{line}");
         assert!(line.contains("pre_asm=30ms"), "{line}");
         assert!(line.contains("assemble=8ms"), "{line}");
@@ -2281,8 +2123,8 @@ mod tests {
         assert!(line.contains("us/in="), "{line}");
         assert!(line.contains("us/new="), "{line}");
         assert!(line.contains("cold_range="), "{line}");
-        assert!(line.contains("cold_idx="), "{line}");
-        assert!(line.contains("batch="), "{line}");
+        assert!(!line.contains("cold_idx="), "{line}");
+        assert!(line.contains("batch_n="), "{line}");
         assert!(!line.contains("thin[col="), "{line}");
         assert!(!line.contains("by_fk="), "{line}");
         assert!(!line.contains("pin_cached="), "{line}");
@@ -2300,40 +2142,31 @@ mod tests {
         s.load_blocks = 10;
         s.asm_prevout_ms = 2500;
         s.asm_in_n = 50_000;
-        s.asm_prev_batch_ms = 2000;
         s.asm_prev_batch_n = 40_000;
-        s.asm_prev_same_ms = 50;
         s.asm_prev_same_n = 2_000;
-        s.asm_prev_cold_ms = 250;
         s.asm_prev_cold_n = 3_000;
-        s.asm_prev_fk_ms = 10;
         s.asm_sigop_ms = 2;
         s.asm_final_ms = 0;
         s.asm_job_ms = 40;
         s.load_thin_ms = 7;
         s.load_plan_pin_ms = 100;
         s.load_pin_plan = 20_000;
-        s.load_pin_adopt_ms = 15;
         s.load_pin_recent_outs_ms = 8;
         s.load_pin_range_fill_ms = 40;
         s.load_pin_contract_ms = 25;
-        s.load_pin_publish_ms = 12;
         s.load_cold_range_ms = 1200;
         s.load_cold_range_n = 4_000;
-        s.load_cold_idx_ms = 400;
-        s.load_cold_idx_n = 2_000;
         s.load_cold_io_ms = 1600;
-        s.load_cold_decode_ms = 10;
         s.load_pin_new = 6_000;
         s.load_pin_cache_body = 30_000;
         let line = format_info(&s);
         // Residual pin sub-timers named in pin(...) block.
         assert!(line.contains("thin=7ms"), "{line}");
-        assert!(line.contains("adopt=15ms"), "{line}");
+        assert!(!line.contains("adopt="), "{line}");
         assert!(line.contains("recent_outs=8ms"), "{line}");
         assert!(line.contains("range_fill=40ms"), "{line}");
         assert!(line.contains("contract=25ms"), "{line}");
-        assert!(line.contains("publish=12ms"), "{line}");
+        assert!(!line.contains("publish="), "{line}");
         // I1: total = load+connect = 5000; pin=1800; asm=3000; other=200
         assert!(
             line.contains("load_budget total=5000ms pin=1800ms asm=3000ms other=200ms"),
@@ -2341,13 +2174,13 @@ mod tests {
         );
         // I3: us/in = 2500*1000/50000 = 50
         assert!(line.contains("us/in=50"), "{line}");
-        assert!(line.contains("batch=2000/n=40000"), "{line}");
+        assert!(line.contains("batch_n=40000"), "{line}");
         assert!(!line.contains("res=/n="), "{line}");
         assert!(!line.contains("res_lk"), "{line}");
-        assert!(line.contains("same=50/n=2000"), "{line}");
-        assert!(line.contains("cold=250/n=3000"), "{line}");
+        assert!(line.contains("same_n=2000"), "{line}");
+        assert!(line.contains("cold_n=3000"), "{line}");
         assert!(line.contains("cold_why(null_fk="), "{line}");
-        assert!(line.contains("fk=10ms"), "{line}");
+        assert!(!line.contains(" fk="), "{line}");
         // N1 reason breakdown when set.
         s.asm_cold_null_fk_n = 10;
         s.asm_cold_not_pin_n = 2900;
@@ -2358,7 +2191,7 @@ mod tests {
             line.contains("cold_why(null_fk=10 not_pin=2900 mismatch=50 vout_miss=40)"),
             "{line}"
         );
-        // I2: us/new = (1200+400)*1000/6000 = 266
+        // I2: us/new = 1200*1000/6000 = 200
         assert!(line.contains("cold_range=1200ms(body="), "{line}");
         s.load_cold_range_body_ms = 800;
         s.load_cold_range_decode_ms = 400;
@@ -2367,8 +2200,8 @@ mod tests {
             line.contains("cold_range=1200ms(body=800 dec=400)/n=4000"),
             "{line}"
         );
-        assert!(line.contains("cold_idx=400ms/n=2000"), "{line}");
-        assert!(line.contains("us/new=266"), "{line}");
+        assert!(!line.contains("cold_idx="), "{line}");
+        assert!(line.contains("us/new=200"), "{line}");
         assert!(!line.contains("res_lk"), "{line}");
         assert!(!line.contains("pin_res="), "{line}");
     }
@@ -2444,7 +2277,6 @@ mod tests {
         s.sh_head_ms = 4;
         s.wf_body_store = 1;
         s.wf_store_body_ms = 2;
-        s.load_missing_parents = 3;
         s.thr_lookup_stamp_ms = 1;
         s.stamp_struct_ms = 8;
         s.stamp_struct_txid_ms = 6;
@@ -2522,12 +2354,9 @@ mod tests {
     fn format_debug_has_detail_tokens() {
         let mut s = IbdPerfSample::default();
         s.phase_blks = 10;
-        s.recon_ns = 10_000_000; // 1ms/blk → 1000 us/blk
         s.write.utxo_apply_ns = 5_000_000; // 500 us/blk
         s.write.tweak_ns = 3_000_000; // 300 us/blk
         s.spend_ranged = 10;
-        s.spend_idx = 2;
-        s.spend_skip = 0;
         s.wf_body_store = 3;
         s.wf_store_body_ms = 50;
         // (no cache/lock fields — pruned)
@@ -2539,14 +2368,9 @@ mod tests {
         s.load_ready_through = 200;
         s.load_blocks = 16;
         s.load_utxo_parents = 100;
-        s.load_creates = 50;
         s.load_body_tx_reads = 200;
-        s.load_parent_tx_reads = 50;
         s.load_pin_cache_body = 0;
         s.load_pin_new = 38;
-        s.load_edge_same = 10;
-        s.load_edge_fk = 5;
-        s.load_edge_cb = 1;
         s.sh_collect_ms = 12;
         s.sh_runs = 2;
         s.arch_ext_need = 100;
@@ -2561,7 +2385,7 @@ mod tests {
         assert!(line.contains("class_a="), "{line}");
         assert!(line.contains("ensure="), "{line}");
         assert!(line.contains("write="), "{line}");
-        assert!(line.contains("spend=500(r=10 i=2 skip=0)"), "{line}");
+        assert!(line.contains("spend=500(r=10)"), "{line}");
         assert!(line.contains("tweaks=300"), "{line}");
         assert!(!line.contains("prefetch="), "{line}");
         assert!(!line.contains("wave body="), "{line}");
@@ -2581,13 +2405,14 @@ mod tests {
         );
         assert!(line.contains("thru=200"), "{line}");
         assert!(line.contains("utxo_p=100"), "{line}");
-        assert!(line.contains("creates=50"), "{line}");
-        assert!(line.contains("body_io=200 parent_io=50"), "{line}");
+        assert!(!line.contains("creates="), "{line}");
+        assert!(line.contains("body_io=200"), "{line}");
+        assert!(!line.contains("parent_io="), "{line}");
         assert!(line.contains("pin_cache=0"), "{line}");
         assert!(!line.contains("pin_res="), "{line}");
         assert!(line.contains("pin_new=38"), "{line}");
         assert!(!line.contains("pin_cached="), "{line}");
-        assert!(line.contains("edges same=10 fk=5 cb=1"), "{line}");
+        assert!(!line.contains("edges same="), "{line}");
         assert!(line.contains("sh_runs=2"), "{line}");
         assert!(line.contains("plan_batch "), "{line}");
         assert!(!line.contains("res_txid"), "{line}");
@@ -2639,16 +2464,8 @@ mod tests {
         s.owned.inflight_layers = 3;
         s.owned.inflight_pins = 12_000;
         s.owned.inflight_bytes = 48 * 1024 * 1024;
-        s.owned.recent_heights = 12;
-        s.owned.recent_keys = 400;
-        s.owned.recent_pub_keys = 400;
-        s.owned.recent_overlay_keys = 0;
-        s.owned.recent_fifo_keys = 400;
         s.owned.h2h_keys = 50;
         s.owned.fence_runs = 10;
-        s.owned.pstore_weak = 20_000;
-        s.owned.pstore_live = 8_000;
-        s.owned.pstore_bytes = 16 * 1024 * 1024;
         s.bq_count = 4;
         s.bq_bytes = 32 * 1024 * 1024;
         s.bq_soft_stop = 256;
@@ -2706,13 +2523,14 @@ mod tests {
         assert!(line.contains("segs=3 sealed=2"), "{line}");
         assert!(line.contains("class_a=2000000"), "{line}");
         assert!(
-            line.contains("heap bq=32MiB iflight=3L/12000pin≈48MiB recent=12h live=400k/pub=400k/ov=0 fifo=400k≈0MiB"),
+            line.contains("heap bq=32MiB iflight=3L/12000pin≈48MiB"),
             "{line}"
         );
         assert!(!line.contains("union="), "{line}");
+        assert!(!line.contains("recent="), "{line}");
         assert!(line.contains("h2h=50k≈0MiB"), "{line}");
         assert!(line.contains("fence=10≈0MiB"), "{line}");
-        assert!(line.contains("pstore weak=20000/live=8000≈16MiB"), "{line}");
+        assert!(!line.contains("pstore"), "{line}");
         assert!(line.contains("accounted≈"), "{line}");
         assert!(line.contains("residual≈"), "{line}");
         assert!(line.contains("fuse8="), "{line}");
@@ -2807,24 +2625,19 @@ mod tests {
         assert!(line.contains("lookup_thr busy="), "{line}");
         assert!(line.contains("ready=0"), "{line}");
 
-        // Edge format arms: spend_mix, miss_p, headers_done, zero pin_hit.
+        // Edge format arms: headers_done, zero pin_hit.
         let mut edge = s.clone();
-        edge.spend_idx = 2;
-        edge.spend_skip = 1;
         edge.spend_ranged = 3;
-        edge.load_missing_parents = 4;
         edge.load_pin_cache_body = 0;
         edge.load_pin_new = 0;
         edge.headers_done = true;
-        edge.wire_ms = 9;
         edge.strong_ms = 1;
-        edge.resolve_ms = 2;
         edge.drain_ms = 3;
         let info = format_info(&edge);
-        assert!(info.contains("spend_mix"), "{info}");
-        assert!(info.contains("miss_p=4"), "{info}");
+        assert!(!info.contains("spend_mix"), "{info}");
+        assert!(!info.contains("miss_p="), "{info}");
         assert!(info.contains("headers_done"), "{info}");
-        assert!(info.contains("wire_ms=9"), "{info}");
+        assert!(!info.contains("wire_ms="), "{info}");
         assert!(info.contains("getdata=7"), "{info}");
         assert!(info.contains("pin_hit%=0"), "{info}");
 

@@ -14,7 +14,6 @@ pub type SpendEdges = U64Map<Vec<crate::SpendEdge>>;
 pub struct ConfirmLoadStats {
     pub blocks: u32,
     pub utxo_parents: u32,
-    pub creates_registered: u32,
     /// Unique parent create fks pinned this call (after dedup).
     pub parent_unique: u32,
     /// Of `parent_unique`: filled without store denserels IO (same-batch / in-flight / adopt).
@@ -23,26 +22,10 @@ pub struct ConfirmLoadStats {
     pub pin_new: u32,
     /// FIFO hit path resolve.
     pub pin_body_ns: u64,
-    /// pin_new meta/outs resolve (excludes spent timer).
-    pub pin_new_meta_ns: u64,
-    /// Same-batch create edges (identity known in-batch).
-    pub parent_cache_hits: u32,
-    /// Stamped create_fk on input, parent **not** in this batch (external fk).
-    pub edge_fk: u32,
     /// Body txs full-decoded (phase 1).
     pub body_tx_reads: u32,
-    /// Parent outs loaded from store (sparse pin).
-    pub full_tx_reads: u32,
-    /// Unstamped non-coinbase edges (should not occur on healthy v10 Class A).
-    pub missing_parents: u32,
-    /// Phase wall times (ns).
-    pub header_ns: u64,
-    pub body_decode_ns: u64,
     pub thin_ns: u64,
     pub parent_pin_ns: u64,
-    pub cache_put_ns: u64,
-    pub edge_same_batch: u32,
-    pub edge_coinbase: u32,
 }
 
 impl Query {

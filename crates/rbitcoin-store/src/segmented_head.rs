@@ -42,45 +42,6 @@ const FLAG_SEALED: u32 = 1;
 /// Product default head width (2²⁵ slots × 4 B = 128 MiB per segment).
 pub const SEGMENT_HEAD_BITS: u32 = MAINNET_BITS;
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct HeadLookupStats {
-    pub open_probes: u64,
-    pub sealed_fuse_checks: u64,
-    pub sealed_fuse_skips: u64,
-    pub sealed_head_probes: u64,
-    pub rolls: u64,
-    pub seals: u64,
-}
-
-static LOOKUP_OPEN: AtomicU64 = AtomicU64::new(0);
-static LOOKUP_FUSE_CHK: AtomicU64 = AtomicU64::new(0);
-static LOOKUP_FUSE_SKIP: AtomicU64 = AtomicU64::new(0);
-static LOOKUP_SEALED_PROBE: AtomicU64 = AtomicU64::new(0);
-static ROLLS: AtomicU64 = AtomicU64::new(0);
-static SEALS: AtomicU64 = AtomicU64::new(0);
-
-pub fn sample_lookup_stats() -> HeadLookupStats {
-    HeadLookupStats {
-        open_probes: LOOKUP_OPEN.swap(0, Ordering::Relaxed),
-        sealed_fuse_checks: LOOKUP_FUSE_CHK.swap(0, Ordering::Relaxed),
-        sealed_fuse_skips: LOOKUP_FUSE_SKIP.swap(0, Ordering::Relaxed),
-        sealed_head_probes: LOOKUP_SEALED_PROBE.swap(0, Ordering::Relaxed),
-        rolls: ROLLS.swap(0, Ordering::Relaxed),
-        seals: SEALS.swap(0, Ordering::Relaxed),
-    }
-}
-
-pub fn snapshot_lookup_stats() -> HeadLookupStats {
-    HeadLookupStats {
-        open_probes: LOOKUP_OPEN.load(Ordering::Relaxed),
-        sealed_fuse_checks: LOOKUP_FUSE_CHK.load(Ordering::Relaxed),
-        sealed_fuse_skips: LOOKUP_FUSE_SKIP.load(Ordering::Relaxed),
-        sealed_head_probes: LOOKUP_SEALED_PROBE.load(Ordering::Relaxed),
-        rolls: ROLLS.load(Ordering::Relaxed),
-        seals: SEALS.load(Ordering::Relaxed),
-    }
-}
-
 struct Segment {
     first_fk: u64,
     count: AtomicU64,
@@ -729,7 +690,6 @@ impl SegmentedTxHead {
                 if pass_keys.is_empty() {
                     continue;
                 }
-                LOOKUP_OPEN.fetch_add(pass_keys.len() as u64, Ordering::Relaxed);
                 let rel_lists = head.probe_fks_batch_ctx(&pass_keys, ctx)?;
                 for (orig_i, rels) in pass_i.into_iter().zip(rel_lists) {
                     for r in rels.into_iter().rev() {
@@ -762,13 +722,10 @@ impl SegmentedTxHead {
                 if !key_on(i) {
                     continue;
                 }
-                LOOKUP_FUSE_CHK.fetch_add(1, Ordering::Relaxed);
                 let fuse_key = fuse_key_from_mixed(m);
                 if !fuse.contains(fuse_key) {
-                    LOOKUP_FUSE_SKIP.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                LOOKUP_SEALED_PROBE.fetch_add(1, Ordering::Relaxed);
                 pass_i.push(i);
                 pass_keys.push(*m);
             }
@@ -872,7 +829,6 @@ impl SegmentedTxHead {
             new_list.push(seg);
             *guard = Arc::new(new_list);
         }
-        ROLLS.fetch_add(1, Ordering::Relaxed);
 
         rbitcoin_log::info!(
             "store: tx.head roll open file_id={file_id} first_fk={first_fk} bits={} slots={}",
@@ -959,7 +915,6 @@ impl SegmentedTxHead {
         self.persist_meta_locked()?;
         let base = segment_head_path(&self.dir, p.file_id);
         let _ = std::fs::remove_file(&base);
-        SEALS.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -1437,43 +1392,6 @@ mod tests {
         m[0..8].copy_from_slice(&i.to_le_bytes());
         m[8] = 0xA5;
         m
-    }
-
-    #[test]
-    fn lookup_stats_sample_and_snapshot_surface() {
-        // Clear then snapshot zeros; sample swaps to zero again.
-        let _ = sample_lookup_stats();
-        let snap0 = snapshot_lookup_stats();
-        assert_eq!(snap0.open_probes, 0);
-        assert_eq!(snap0.sealed_fuse_checks, 0);
-        assert_eq!(snap0.sealed_fuse_skips, 0);
-        assert_eq!(snap0.sealed_head_probes, 0);
-        assert_eq!(snap0.rolls, 0);
-        assert_eq!(snap0.seals, 0);
-        let s = sample_lookup_stats();
-        assert_eq!(s.open_probes, 0);
-        // After create/insert, counters may tick; just ensure API is callable.
-        let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
-        let h = SegmentedTxHead::create(&dir, layout).unwrap();
-        let mut one = [(mixed(1), Fk(1))];
-        h.insert_many(&mut one).unwrap();
-        let _ = h.probe_candidates(&mixed(1)).unwrap();
-        let snap = snapshot_lookup_stats();
-        // At least one of the probe counters should be non-zero after probe.
-        let any = snap.open_probes
-            + snap.sealed_fuse_checks
-            + snap.sealed_fuse_skips
-            + snap.sealed_head_probes
-            + snap.rolls
-            + snap.seals;
-        let _ = any;
-        let sampled = sample_lookup_stats();
-        let snap_after = snapshot_lookup_stats();
-        // sample zeros atomics; snapshot after sample is zero.
-        assert_eq!(snap_after.open_probes, 0);
-        let _ = sampled;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

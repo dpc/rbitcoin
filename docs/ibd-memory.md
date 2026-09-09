@@ -126,7 +126,7 @@ grep 'tip: perf' mainnet.log
 | `conf loadq=` / `scriptq` / `writeq` | Real queue contents (loadq cap **14**) + pipeline-wide `parents=` + feed ready/inflight |
 | `txhead` | Segmented `tx.head.*` (open head + sealed heads/fuses; logical sizes) |
 | `sh` | SH catalog runs / tip heads |
-| `heap … iflight= pstore= recent= h2h= fence= fuse8= mphf_g= open_keys= class_c_l2= accounted= residual=` | Approx process heap: BQ + load-ahead CreatePins (`iflight=`) + **pstore/recent meters stay 0** (no process pin store, no RecentCreates ring) + `height_by_hash` + height fence (`Arc` snapshot for leftover TipOnly — not a 15 MiB memcpy/wave) + confirm wire + **sealed `tx.head` fuse8 fingerprints** + FdOnly BDZ `g` heap (`mphf_g=`, 0 after open) + open-segment fuse-key Vec + Class C L2 images; residual = anon − accounted |
+| `heap … iflight= h2h= fence= fuse8= mphf_g= open_keys= class_c_l2= accounted= residual=` | Approx process heap: BQ + load-ahead CreatePins (`iflight=`) + `height_by_hash` + height fence (`Arc` snapshot for leftover TipOnly — not a 15 MiB memcpy/wave) + confirm wire + **sealed `tx.head` fuse8 fingerprints** + FdOnly BDZ `g` heap (`mphf_g=`, 0 after open) + open-segment fuse-key Vec + Class C L2 images; residual = anon − accounted |
 
 ## Residual heap audit (872k / ~1.42 B creates)
 

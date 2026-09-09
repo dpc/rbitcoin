@@ -308,13 +308,13 @@ pub(super) fn class_c_commit(
     Ok(out)
 }
 
-/// Returns `(spend_ann_ns, tip_gc_ns)` measured with local `Instant`s.
+/// Returns spend-annotate wall ns measured with a local `Instant`.
 ///
 /// Pure-write annotate from structural abs+meta jobs (no pin `get_spender_abs`).
 pub(super) fn post_commit(
     query: &Query,
     annotate: &[crate::block::SpendAnnotateJob],
-) -> Result<(u64, u64), ConsensusError> {
+) -> Result<u64, ConsensusError> {
     let t_spent = Instant::now();
     if query.spend_index_enabled() && !annotate.is_empty() {
         let mut abs_edges: Vec<(u64, rbitcoin_primitives::Fk, u32, rbitcoin_primitives::Fk)> =
@@ -346,11 +346,7 @@ pub(super) fn post_commit(
     }
     let spend_ann_ns = t_spent.elapsed().as_nanos() as u64;
     confirm_phase_stats::UTXO_APPLY_NS.fetch_add(spend_ann_ns, Ordering::Relaxed);
-
-    // Header-cache GC is load-owned (polls store tip each pack). Write does
-    // not lock ConfirmParentCache.
-    let tip_gc_ns = 0u64;
-    Ok((spend_ann_ns, tip_gc_ns))
+    Ok(spend_ann_ns)
 }
 
 pub(super) fn check_bip34(block: &Block, height: u32) -> Result<(), ConsensusError> {

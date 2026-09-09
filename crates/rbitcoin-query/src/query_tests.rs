@@ -275,32 +275,20 @@ fn sampler_stats() {
         &ConfirmLoadStats {
             blocks: 1,
             utxo_parents: 2,
-            creates_registered: 3,
             parent_unique: 4,
             pin_cache_body: 5,
             pin_new: 6,
             pin_body_ns: 8,
-            pin_new_meta_ns: 9,
-            parent_cache_hits: 10,
-            full_tx_reads: 11,
             body_tx_reads: 12,
-            missing_parents: 13,
-            header_ns: 14,
-            body_decode_ns: 15,
             thin_ns: 16,
             parent_pin_ns: 17,
-            cache_put_ns: 18,
-            edge_same_batch: 19,
-            edge_fk: 20,
-            edge_coinbase: 21,
-            ..Default::default()
         },
         100,
     );
     let s = confirm_load_stats::sample_and_reset();
     assert!(s.ns >= 100);
     assert!(s.blocks >= 1);
-    assert!(s.edge_coinbase >= 21);
+    assert!(s.body_tx >= 12);
 
     let _ = archive_phase_stats::sample_and_reset();
     archive_phase_stats::note_resolve_counts(1, 2, 3, 4, 5, 6);

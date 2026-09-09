@@ -115,11 +115,7 @@ pub use scripthash_slabs::{
     slab_class_for_packed_len, SH_MEGAKEY_MIN_FKS,
 };
 pub use scripthash_sorted_head::{SortedHead, SortedHeadFilter, SH_SORTED_RECS_PER_PAGE};
-pub use segmented_head::{
-    sample_lookup_stats as sample_head_lookup_stats,
-    snapshot_lookup_stats as snapshot_head_lookup_stats, HeadLookupStats, SegmentedTxHead,
-    SEGMENT_HEAD_BITS,
-};
+pub use segmented_head::{SegmentedTxHead, SEGMENT_HEAD_BITS};
 pub use sorted_run::{
     commit_run_to_catalog, crc32, detach_run, free_gib_label, host_mem_available_bytes,
     list_materialize_claims, list_runs, lookup_key, next_run_path, open_run, read_run_body,

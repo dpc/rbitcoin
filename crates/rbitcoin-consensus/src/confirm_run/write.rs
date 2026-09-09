@@ -237,7 +237,7 @@ pub fn confirm_write_phase(
                 .fetch_add(class_c_join_ns, Ordering::Relaxed);
         }
 
-        let (spend_ann_ns, tip_gc_ns) = post_commit(query, &annotate)?;
+        let spend_ann_ns = post_commit(query, &annotate)?;
         Ok((
             out,
             n_blocks,
@@ -245,7 +245,6 @@ pub fn confirm_write_phase(
             struct_ph,
             class_c_ns,
             spend_ann_ns,
-            tip_gc_ns,
         ))
     })();
 
@@ -255,7 +254,7 @@ pub fn confirm_write_phase(
     if drain_join_ns > 0 {
         confirm_phase_stats::WRITE_DRAIN_JOIN_NS.fetch_add(drain_join_ns, Ordering::Relaxed);
     }
-    let (out, n_blocks, structural_ns, struct_ph, class_c_ns, spend_ann_ns, tip_gc_ns) = overlap?;
+    let (out, n_blocks, structural_ns, struct_ph, class_c_ns, spend_ann_ns) = overlap?;
     drain_res.map_err(ConsensusError::from)?;
     if let Some(fk) = drain_max_fk {
         query.note_head_drain_fk(fk);
@@ -291,7 +290,6 @@ pub fn confirm_write_phase(
         bip68_ns: struct_ph.bip68_ns,
         class_c_ns,
         spend_ann_ns,
-        tip_gc_ns,
         tweak_ns,
     });
     Ok(out)

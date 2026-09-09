@@ -1334,7 +1334,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     .expect("coinbase-only assemble");
     assert_eq!(creates.len(), 1, "one create fk per tx, not per vout");
     assert_eq!(creates.get(&tids[0]), Some(&Fk(1)));
-    let (in_n, _bns, batch_n, _sns, same_n, ..) =
+    let (in_n, batch_n, same_n, ..) =
         confirm_phase_stats::sample_assemble_prevout_detail_and_reset();
     assert_eq!(in_n, 0, "coinbase has no prevouts");
     assert_eq!(batch_n, 0);

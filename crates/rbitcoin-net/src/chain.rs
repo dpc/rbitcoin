@@ -2379,8 +2379,6 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
 /// Sample meters after tip accept and emit INFO `tip: accept …` (SH breakdown).
 fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_strip_ns: u64) {
     let (
-        _recon,
-        _wire,
         connect_ns,
         script_ns,
         _class_c_ns,
@@ -2389,13 +2387,8 @@ fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_s
         tip_ns,
         spend_ns,
         _blks,
-        _resolve,
         load_ns,
-        _unpin,
-        _cache_tip,
         _spend_ranged,
-        _spend_idx,
-        _spend_skip,
         structural_ns,
         _struct_spent,
         _struct_create_h,
