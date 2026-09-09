@@ -246,10 +246,6 @@ impl<T: Sync> OwnedWave<T> {
         self.wave.has_unclaimed()
     }
 
-    pub(crate) fn wait_complete(&self) {
-        self.wave.wait_done();
-    }
-
     pub(crate) fn finish(self) -> Result<(), ConsensusError> {
         self.wave.wait_done();
         match self

@@ -11,11 +11,6 @@ use rbitcoin_log::{info, warn};
 use rbitcoin_primitives::Height;
 use std::collections::HashMap;
 
-#[cfg(test)]
-use crate::chain::AcceptOutcome;
-#[cfg(test)]
-use crate::most_work::{select_most_work, SelectOutcome, WorkCandidate};
-
 /// Classification of tip+1 `unexpected previous header` (BadPrev).
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,16 +112,6 @@ impl IbdReorgState {
         self.explore_need.retain(|x| *x != h);
     }
 
-    #[cfg(test)]
-    pub fn get_held(&self, hash: &BlockHash) -> Option<Block> {
-        self.held_bodies.get(hash).cloned()
-    }
-
-    #[cfg(test)]
-    pub fn set_awaiting(&mut self, held_tip: Block, need: Vec<BlockHash>) {
-        self.awaiting = Some(AwaitingBodies { held_tip, need });
-    }
-
     pub fn clear_awaiting(&mut self) {
         self.awaiting = None;
     }
@@ -171,17 +156,6 @@ impl IbdReorgState {
         &self.explore_need
     }
 
-    /// True while registered explore hashes still lack **held** bodies.
-    ///
-    /// Tip+1+ extensions live in BQ, not held — production apply uses
-    /// load_reorg_body availability, not this flag. Kept for unit preconditions.
-    #[cfg(test)]
-    pub fn explore_need_pending(&self) -> bool {
-        self.explore_need
-            .iter()
-            .any(|h| !self.held_bodies.contains_key(h))
-    }
-
     pub fn clear_explore(&mut self) {
         self.explore_need.clear();
         self.explore_tips.clear();
@@ -212,160 +186,6 @@ impl IbdReorgState {
         }
         out
     }
-}
-
-/// Build a `WorkCandidate` for a contiguous body path whose first block's prev
-/// is on the best chain. Returns `None` if parent not on chain or path empty.
-#[cfg(test)]
-pub fn candidate_from_blocks(
-    hub: &ChainHub,
-    blocks: &[Block],
-) -> Result<Option<WorkCandidate>, NetError> {
-    if blocks.is_empty() {
-        return Ok(None);
-    }
-    for w in blocks.windows(2) {
-        if w[1].header.prev_blockhash != w[0].block_hash() {
-            return Err(NetError::Protocol("branch not linked"));
-        }
-    }
-    let fork_prev = blocks[0].header.prev_blockhash;
-    let Some(lca_h) = hub
-        .query
-        .height_of_hash(&fork_prev.to_byte_array())
-        .map_err(|e| NetError::Consensus(e.to_string()))?
-    else {
-        return Ok(None);
-    };
-    let path_work = sum_work(blocks.iter().map(|b| b.header.work()));
-    let apply_path: Vec<[u8; 32]> = blocks
-        .iter()
-        .map(|b| b.block_hash().to_byte_array())
-        .collect();
-    let tip = *apply_path.last().unwrap();
-    Ok(Some(WorkCandidate {
-        tip,
-        apply_path,
-        path_work,
-        lca_hash: fork_prev.to_byte_array(),
-        lca_height: lca_h.0,
-    }))
-}
-
-/// Rank candidates vs current tip path work from a shared LCA; skip invalid.
-#[cfg(test)]
-pub fn rank_candidates(
-    hub: &ChainHub,
-    candidates: &[WorkCandidate],
-    invalid: &InvalidHashSet,
-) -> Result<SelectOutcome, NetError> {
-    if candidates.is_empty() {
-        return Ok(SelectOutcome::IgnoreWeaker);
-    }
-    let lca_h = candidates[0].lca_height;
-    let tip_h = hub.tip_height().unwrap_or(0);
-    let mut our = Vec::new();
-    if tip_h > lca_h {
-        for h in (lca_h + 1)..=tip_h {
-            let hdr = hub
-                .query
-                .wire_header_at_height(Height(h))
-                .map_err(|e| NetError::Consensus(e.to_string()))?;
-            our.push(hdr.work());
-        }
-    }
-    let best_work = sum_work(our.into_iter());
-    Ok(select_most_work(best_work, candidates, &|h| {
-        invalid.contains(h)
-    }))
-}
-
-/// Apply a fully gathered branch via `accept_branch`. On success returns new tip
-/// height. On connect failure marks the failing path invalid and restores tip
-/// (via `accept_branch` contract).
-#[cfg(test)]
-pub fn apply_reorg_branch(
-    hub: &ChainHub,
-    blocks: &[Block],
-    reorg: &mut IbdReorgState,
-) -> Result<AcceptOutcome, NetError> {
-    if !candidate_header_work_better(hub, blocks)? {
-        return Ok(AcceptOutcome::IgnoredWeaker);
-    }
-    match hub.accept_branch(blocks) {
-        Ok(o @ AcceptOutcome::Accepted { height }) => {
-            info!(
-                "ibd: most-work reorg accepted tip_h={height} blocks={}",
-                blocks.len()
-            );
-            Ok(o)
-        }
-        Ok(o) => Ok(o),
-        Err(e) => {
-            if let Some(h) = e.failing_block_hash() {
-                reorg.invalid.mark(h);
-            }
-            warn!("ibd: most-work reorg connect failed (failing hash marked invalid): {e}");
-            Err(e)
-        }
-    }
-}
-
-/// Try candidates in most-work order: first successful apply wins; failed paths
-/// are invalid-marked and **re-ranked** so a remaining valid heavier N can win.
-#[cfg(test)]
-pub fn try_apply_best_candidate(
-    hub: &ChainHub,
-    bodies: &HashMap<BlockHash, Block>,
-    candidate_tips: &[BlockHash],
-    reorg: &mut IbdReorgState,
-) -> Result<Option<AcceptOutcome>, NetError> {
-    let mut built: Vec<(WorkCandidate, Vec<Block>)> = Vec::new();
-    for &tip in candidate_tips {
-        if reorg.invalid.contains(tip.to_byte_array()) {
-            continue;
-        }
-        let Some(blocks) = gather_path_to_best_parent(hub, bodies, tip) else {
-            continue;
-        };
-        if let Some(c) = candidate_from_blocks(hub, &blocks)? {
-            if !c.apply_path.iter().any(|h| reorg.invalid.contains(*h)) {
-                built.push((c, blocks));
-            }
-        }
-    }
-    if built.is_empty() {
-        return Ok(None);
-    }
-    for _ in 0..built.len().saturating_add(1) {
-        let cands: Vec<WorkCandidate> = built
-            .iter()
-            .filter(|(c, _)| {
-                !reorg.invalid.contains(c.tip)
-                    && !c.apply_path.iter().any(|h| reorg.invalid.contains(*h))
-            })
-            .map(|(c, _)| c.clone())
-            .collect();
-        if cands.is_empty() {
-            return Ok(None);
-        }
-        match rank_candidates(hub, &cands, &reorg.invalid)? {
-            SelectOutcome::IgnoreWeaker => return Ok(None),
-            SelectOutcome::Switch { candidate_tip, .. } => {
-                let Some((_, blocks)) = built.iter().find(|(c, _)| c.tip == candidate_tip) else {
-                    continue;
-                };
-                match apply_reorg_branch(hub, blocks, reorg) {
-                    Ok(o @ AcceptOutcome::Accepted { .. }) => return Ok(Some(o)),
-                    Ok(_) => {
-                        // IgnoredWeaker / AlreadyHave: keep the hash selectable.
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-    }
-    Ok(None)
 }
 
 /// Cap on prev-walks from a header-horizon candidate. Early IBD can have
@@ -421,35 +241,6 @@ fn header_hashes_to_best_ancestor_n(
     }
     rev.reverse();
     Ok(rev)
-}
-
-/// Walk from `tip` via pending bodies until parent is on best chain.
-///
-/// Parent-on-chain uses **`has_block` only** — never `height_of_hash` on side
-/// headers (that full-scans confirmed[] for orphans and pegged one core on
-/// mainnet BadPrev/explore gather).
-#[cfg(test)]
-fn gather_path_to_best_parent(
-    hub: &ChainHub,
-    bodies: &HashMap<BlockHash, Block>,
-    tip: BlockHash,
-) -> Option<Vec<Block>> {
-    let mut rev = Vec::new();
-    let mut cur = tip;
-    for _ in 0..10_000 {
-        if hub.has_block(&cur) {
-            return None;
-        }
-        let b = bodies.get(&cur)?;
-        let prev = b.header.prev_blockhash;
-        rev.push(b.clone());
-        if hub.has_block(&prev) || prev.to_byte_array() == [0u8; 32] {
-            rev.reverse();
-            return Some(rev);
-        }
-        cur = prev;
-    }
-    None
 }
 
 pub(crate) fn parent_hash_of(
@@ -883,27 +674,6 @@ pub(crate) fn apply_header_rewind(
     Ok(true)
 }
 
-/// True if candidate tip work (header) is strictly better than our tip path
-/// from the same LCA (proactive headers-driven trigger).
-#[cfg(test)]
-pub fn candidate_header_work_better(hub: &ChainHub, blocks: &[Block]) -> Result<bool, NetError> {
-    let Some(c) = candidate_from_blocks(hub, blocks)? else {
-        return Ok(false);
-    };
-    let tip_h = hub.tip_height().unwrap_or(0);
-    let mut our = Vec::new();
-    if tip_h > c.lca_height {
-        for h in (c.lca_height + 1)..=tip_h {
-            let hdr = hub
-                .query
-                .wire_header_at_height(Height(h))
-                .map_err(|e| NetError::Consensus(e.to_string()))?;
-            our.push(hdr.work());
-        }
-    }
-    Ok(work_better(c.path_work, sum_work(our.into_iter())))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,52 +756,6 @@ mod tests {
         block
     }
 
-    fn mine_extra(prev: BlockHash, time: u32, height: u32, extra: Vec<Transaction>) -> Block {
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
-        let header = Header {
-            version: Version::from_consensus(4),
-            prev_blockhash: prev,
-            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-            time,
-            bits,
-            nonce: 0,
-        };
-        let mut txdata = vec![coinbase(height)];
-        txdata.extend(extra);
-        let mut block = Block { header, txdata };
-        block.header.merkle_root = block.compute_merkle_root().unwrap();
-        let target = Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            block.header.nonce = nonce;
-            if block.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        block
-    }
-
-    /// Test helper: win-at-fork + optional extension via shipped apply path.
-    fn apply_sibling_winning_path(
-        hub: &ChainHub,
-        winning_at_fork: Block,
-        extension: &[Block],
-        reorg: &mut IbdReorgState,
-    ) -> Result<AcceptOutcome, NetError> {
-        let mut bodies = HashMap::new();
-        let tip = extension
-            .last()
-            .map(|b| b.block_hash())
-            .unwrap_or_else(|| winning_at_fork.block_hash());
-        bodies.insert(winning_at_fork.block_hash(), winning_at_fork);
-        for b in extension {
-            bodies.insert(b.block_hash(), b.clone());
-        }
-        match try_apply_best_candidate(hub, &bodies, &[tip], reorg)? {
-            Some(o) => Ok(o),
-            None => Ok(AcceptOutcome::IgnoredWeaker),
-        }
-    }
-
     #[test]
     fn classify_corrupt_vs_competing() {
         let (dir, hub) = tmp_hub();
@@ -1080,10 +804,6 @@ mod tests {
             BadPrevClass::CorruptWire { wire_prev } => assert_eq!(wire_prev, tip),
             other => panic!("expected CorruptWire for tip==prev, got {other:?}"),
         }
-        // Unlinked branch → protocol error from candidate_from_blocks.
-        let a = mine(gen, 1_500_000_300, 1);
-        let b = mine(gen, 1_500_000_400, 1); // not child of a
-        assert!(candidate_from_blocks(&hub, &[a, b]).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1121,311 +841,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Mainnet-class sibling: tip on loser; reorg onto win + extension.
-    #[test]
-    fn sibling_fork_reorg_onto_winning_path() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        let lose = mine(gen, 1_500_001_000, 1);
-        let mut win = mine(gen, 1_500_001_001, 1);
-        if win.block_hash() == lose.block_hash() {
-            let target = Target::from_compact(win.header.bits);
-            for nonce in 0..u32::MAX {
-                win.header.nonce = nonce;
-                if win.header.validate_pow(target).is_ok() && win.block_hash() != lose.block_hash()
-                {
-                    break;
-                }
-            }
-        }
-        hub.accept_block(lose.clone()).unwrap();
-        assert_eq!(hub.tip_hash().unwrap(), lose.block_hash());
-
-        // Winning path: win @1 + ext @2 (more work than single lose tip).
-        let ext = mine(win.block_hash(), 1_500_001_100, 2);
-        let mut reorg = IbdReorgState::new();
-        let out =
-            apply_sibling_winning_path(&hub, win.clone(), &[ext.clone()], &mut reorg).unwrap();
-        assert!(matches!(out, AcceptOutcome::Accepted { height: 2 }));
-        assert_eq!(hub.tip_hash().unwrap(), ext.block_hash());
-        assert_eq!(hub.tip_height(), Some(2));
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// Exploration gather: tip on loser, held bodies for win+ext, apply via
-    /// try_apply_best_candidate without a BadPrev reject event.
-    #[test]
-    fn exploration_bodies_reorg_without_badprev() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        let lose = mine(gen, 1_500_003_000, 1);
-        let mut win = mine(gen, 1_500_003_001, 1);
-        if win.block_hash() == lose.block_hash() {
-            let target = Target::from_compact(win.header.bits);
-            for nonce in 0..u32::MAX {
-                win.header.nonce = nonce;
-                if win.header.validate_pow(target).is_ok() && win.block_hash() != lose.block_hash()
-                {
-                    break;
-                }
-            }
-        }
-        hub.accept_block(lose.clone()).unwrap();
-        hub.ensure_header(&win.header).unwrap();
-        let ext = mine(win.block_hash(), 1_500_003_100, 2);
-        hub.ensure_header(&ext.header).unwrap();
-
-        let mut bodies = HashMap::new();
-        bodies.insert(win.block_hash(), win.clone());
-        bodies.insert(ext.block_hash(), ext.clone());
-        let mut reorg = IbdReorgState::new();
-        reorg.register_explore([win.block_hash(), ext.block_hash()], Some(ext.block_hash()));
-        // Simulate densify filled held bodies.
-        reorg.hold_body(win.clone());
-        reorg.hold_body(ext.clone());
-        assert!(!reorg.explore_need_pending());
-
-        let out = try_apply_best_candidate(&hub, &bodies, &[ext.block_hash()], &mut reorg)
-            .unwrap()
-            .expect("exploration path must reorg tip");
-        assert!(matches!(out, AcceptOutcome::Accepted { height: 2 }));
-        assert_eq!(hub.tip_hash().unwrap(), ext.block_hash());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// Heavier invalid M then valid heavier N (or stay L).
-    #[test]
-    fn invalid_heavy_then_alternate_or_stay() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        // L: heights 1..=3
-        let mut tip = gen;
-        let t = 1_500_002_000u32;
-        for h in 1..=3u32 {
-            let b = mine(tip, t + h * 600, h);
-            tip = b.block_hash();
-            hub.accept_block(b).unwrap();
-        }
-        let l_tip = hub.tip_hash().unwrap();
-        assert_eq!(hub.tip_height(), Some(3));
-
-        // M: longer path from gen with bad block mid-path (4 blocks, last-1 bad).
-        let mut m_blocks = Vec::new();
-        let mut p = gen;
-        for (i, h) in (1..=5u32).enumerate() {
-            let b = if i == 2 {
-                let bad_tx = Transaction {
-                    version: TxVersion::ONE,
-                    lock_time: LockTime::ZERO,
-                    input: vec![TxIn {
-                        previous_output: OutPoint {
-                            txid: bitcoin::Txid::from_byte_array([0xee; 32]),
-                            vout: 0,
-                        },
-                        script_sig: ScriptBuf::new(),
-                        sequence: Sequence::MAX,
-                        witness: Witness::new(),
-                    }],
-                    output: vec![TxOut {
-                        value: Amount::from_sat(1),
-                        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-                    }],
-                };
-                mine_extra(p, 1_500_010_000 + i as u32 * 600, h, vec![bad_tx])
-            } else {
-                mine(p, 1_500_010_000 + i as u32 * 600, h)
-            };
-            p = b.block_hash();
-            m_blocks.push(b);
-        }
-        let mut reorg = IbdReorgState::new();
-        let err = apply_reorg_branch(&hub, &m_blocks, &mut reorg).unwrap_err();
-        assert!(matches!(
-            err,
-            NetError::Consensus(_) | NetError::ConnectFailed { .. }
-        ));
-        assert_eq!(
-            hub.tip_hash().unwrap(),
-            l_tip,
-            "tip stays L after invalid M"
-        );
-        assert!(
-            reorg
-                .invalid
-                .contains(m_blocks[2].block_hash().to_byte_array()),
-            "only the failing mid-branch block is invalid-marked"
-        );
-        assert!(
-            !reorg
-                .invalid
-                .contains(m_blocks[0].block_hash().to_byte_array()),
-            "valid ancestors of the failing block must stay selectable"
-        );
-
-        // N: valid path length 4 from gen (work > L's 3).
-        let mut n_blocks = Vec::new();
-        let mut p = gen;
-        for (i, h) in (1..=4u32).enumerate() {
-            let b = mine(p, 1_500_020_000 + i as u32 * 600, h);
-            p = b.block_hash();
-            n_blocks.push(b);
-        }
-        assert!(candidate_header_work_better(&hub, &n_blocks).unwrap());
-        let out = apply_reorg_branch(&hub, &n_blocks, &mut reorg).unwrap();
-        assert!(matches!(out, AcceptOutcome::Accepted { height: 4 }));
-        assert_eq!(hub.tip_hash().unwrap(), n_blocks[3].block_hash());
-
-        // Re-apply M still marked → apply_reorg marks again; selector skip path:
-        let mut bodies = HashMap::new();
-        for b in &m_blocks {
-            bodies.insert(b.block_hash(), b.clone());
-        }
-        for b in &n_blocks {
-            bodies.insert(b.block_hash(), b.clone());
-        }
-        // M tip still invalid → try_apply should not move off N to M.
-        let pre = hub.tip_hash().unwrap();
-        let _ = try_apply_best_candidate(
-            &hub,
-            &bodies,
-            &[m_blocks.last().unwrap().block_hash()],
-            &mut reorg,
-        )
-        .unwrap();
-        assert_eq!(hub.tip_hash().unwrap(), pre);
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn rank_skips_invalid_and_weaker() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        let b1 = mine(gen, 1_500_030_000, 1);
-        hub.accept_block(b1.clone()).unwrap();
-        // Candidate weaker: empty after tip (single block equal height side).
-        let mut side = mine(gen, 1_500_030_001, 1);
-        if side.block_hash() == b1.block_hash() {
-            let target = Target::from_compact(side.header.bits);
-            for nonce in 0..u32::MAX {
-                side.header.nonce = nonce;
-                if side.header.validate_pow(target).is_ok() && side.block_hash() != b1.block_hash()
-                {
-                    break;
-                }
-            }
-        }
-        let c = candidate_from_blocks(&hub, &[side.clone()])
-            .unwrap()
-            .unwrap();
-        let inv = InvalidHashSet::new();
-        let out = rank_candidates(&hub, &[c], &inv).unwrap();
-        // Equal-work sibling at same height → not strictly better.
-        assert_eq!(out, SelectOutcome::IgnoreWeaker);
-        assert_eq!(
-            rank_candidates(&hub, &[], &inv).unwrap(),
-            SelectOutcome::IgnoreWeaker
-        );
-        assert!(candidate_from_blocks(&hub, &[]).unwrap().is_none());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// Single try_apply call: heavy invalid M is marked then remaining valid N wins.
-    #[test]
-    fn try_apply_reranks_after_invalid_heavy_in_one_call() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        // L tip height 2.
-        let mut tip = gen;
-        for h in 1..=2u32 {
-            let b = mine(tip, 1_500_050_000 + h * 600, h);
-            tip = b.block_hash();
-            hub.accept_block(b).unwrap();
-        }
-        let l_tip = hub.tip_hash().unwrap();
-
-        // M: length 4 with bad mid block (heavier headers, invalid).
-        let mut m_blocks = Vec::new();
-        let mut p = gen;
-        for (i, h) in (1..=4u32).enumerate() {
-            let b = if i == 1 {
-                let bad_tx = Transaction {
-                    version: TxVersion::ONE,
-                    lock_time: LockTime::ZERO,
-                    input: vec![TxIn {
-                        previous_output: OutPoint {
-                            txid: bitcoin::Txid::from_byte_array([0xee; 32]),
-                            vout: 0,
-                        },
-                        script_sig: ScriptBuf::new(),
-                        sequence: Sequence::MAX,
-                        witness: Witness::new(),
-                    }],
-                    output: vec![TxOut {
-                        value: Amount::from_sat(1),
-                        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-                    }],
-                };
-                mine_extra(p, 1_500_051_000 + i as u32 * 600, h, vec![bad_tx])
-            } else {
-                mine(p, 1_500_051_000 + i as u32 * 600, h)
-            };
-            p = b.block_hash();
-            m_blocks.push(b);
-        }
-        // N: valid length 3 (heavier than L, lighter than M headers).
-        let mut n_blocks = Vec::new();
-        let mut p = gen;
-        for (i, h) in (1..=3u32).enumerate() {
-            let b = mine(p, 1_500_052_000 + i as u32 * 600, h);
-            p = b.block_hash();
-            n_blocks.push(b);
-        }
-        let mut bodies = HashMap::new();
-        for b in m_blocks.iter().chain(n_blocks.iter()) {
-            bodies.insert(b.block_hash(), b.clone());
-        }
-        let mut reorg = IbdReorgState::new();
-        let out = try_apply_best_candidate(
-            &hub,
-            &bodies,
-            &[
-                m_blocks.last().unwrap().block_hash(),
-                n_blocks.last().unwrap().block_hash(),
-            ],
-            &mut reorg,
-        )
-        .unwrap()
-        .expect("N must win after M invalid in one try_apply call");
-        assert!(matches!(out, AcceptOutcome::Accepted { height: 3 }));
-        assert_eq!(hub.tip_hash().unwrap(), n_blocks[2].block_hash());
-        assert_ne!(hub.tip_hash().unwrap(), l_tip);
-        assert!(
-            reorg
-                .invalid
-                .contains(m_blocks[1].block_hash().to_byte_array()),
-            "only the failing mid-branch block is invalid-marked"
-        );
-        assert!(
-            !reorg
-                .invalid
-                .contains(m_blocks[0].block_hash().to_byte_array()),
-            "valid ancestors of the failing block must stay selectable"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     #[test]
     fn reorg_state_held_awaiting_need_getdata() {
         let mut st = IbdReorgState::new();
         assert!(st.need_getdata().is_empty());
         assert!(st.awaiting().is_none());
-        // Synthetic blocks for hold (hash distinct via tip identity).
         let gen = BlockHash::from_byte_array([0x11; 32]);
         let bits = CompactTarget::from_consensus(0x207f_ffff);
         let held = mine(gen, 1_300_000_000, 1);
@@ -1442,24 +862,19 @@ mod tests {
             }
         }
         let need = need_h.block_hash();
-        st.set_awaiting(held.clone(), vec![need]);
+        st.register_explore([need], None);
         assert_eq!(st.need_getdata(), vec![need]);
         st.hold_body(need_h);
         assert!(st.need_getdata().is_empty(), "held satisfies need");
-        // Proactive exploration need merges into need_getdata.
         let explore = mine(gen, 1_300_000_050, 1);
         let eh = explore.block_hash();
         st.register_explore([eh], Some(eh));
-        assert!(st.explore_need_pending());
         assert_eq!(st.need_getdata(), vec![eh]);
         st.hold_body(explore);
-        assert!(!st.explore_need_pending());
         assert!(st.need_getdata().is_empty());
-        assert!(st.get_held(&need).is_some());
         st.clear_awaiting();
         assert!(st.awaiting().is_none());
         assert!(st.need_getdata().is_empty());
-        // Eviction path when over HELD_CAP (fresh map so only these keys count).
         let mut st_cap = IbdReorgState::new();
         let mut held_keys = Vec::new();
         let mut prev = gen;
@@ -1469,9 +884,12 @@ mod tests {
             held_keys.push(b.block_hash());
             st_cap.hold_body(b);
         }
+        for k in &held_keys {
+            st_cap.register_explore([*k], None);
+        }
         let still = held_keys
             .iter()
-            .filter(|k| st_cap.get_held(k).is_some())
+            .filter(|k| !st_cap.need_getdata().contains(k))
             .count();
         assert_eq!(
             still,
@@ -1479,70 +897,6 @@ mod tests {
             "held map must stay exactly HELD_CAP after overflow inserts"
         );
         let _ = held;
-    }
-
-    /// Journey: try_apply_best_candidate success + invalid skip + empty.
-    #[test]
-    fn try_apply_selector_journey_success_invalid_skip_and_empty() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        let lose = mine(gen, 1_500_040_000, 1);
-        hub.accept_block(lose.clone()).unwrap();
-        assert_eq!(hub.tip_height(), Some(1));
-
-        let mut win = Vec::new();
-        let mut p = gen;
-        for (i, h) in (1..=3u32).enumerate() {
-            let b = mine(p, 1_500_041_000 + i as u32 * 700, h);
-            p = b.block_hash();
-            win.push(b);
-        }
-        let mut bodies = HashMap::new();
-        for b in &win {
-            bodies.insert(b.block_hash(), b.clone());
-        }
-        bodies.insert(lose.block_hash(), lose.clone());
-
-        let mut reorg = IbdReorgState::new();
-        assert!(try_apply_best_candidate(&hub, &bodies, &[], &mut reorg)
-            .unwrap()
-            .is_none());
-        let missing = BlockHash::from_byte_array([0xcd; 32]);
-        assert!(
-            try_apply_best_candidate(&hub, &bodies, &[missing], &mut reorg)
-                .unwrap()
-                .is_none()
-        );
-
-        reorg.invalid.mark(win[2].block_hash().to_byte_array());
-        assert!(
-            try_apply_best_candidate(&hub, &bodies, &[win[2].block_hash()], &mut reorg)
-                .unwrap()
-                .is_none()
-        );
-
-        reorg = IbdReorgState::new();
-        let out = try_apply_best_candidate(&hub, &bodies, &[win[2].block_hash()], &mut reorg)
-            .unwrap()
-            .expect("must apply winning path");
-        assert!(matches!(out, AcceptOutcome::Accepted { height: 3 }));
-        assert_eq!(hub.tip_hash().unwrap(), win[2].block_hash());
-
-        reorg.invalid.mark(win[0].block_hash().to_byte_array());
-        let sib = apply_sibling_winning_path(&hub, win[0].clone(), &[], &mut reorg).unwrap();
-        assert!(matches!(sib, AcceptOutcome::IgnoredWeaker));
-
-        let mut reorg2 = IbdReorgState::new();
-        let side = mine(gen, 1_500_042_000, 1);
-        let weak = apply_reorg_branch(&hub, &[side], &mut reorg2).unwrap();
-        assert!(matches!(weak, AcceptOutcome::IgnoredWeaker));
-        assert!(
-            reorg2.invalid.is_empty(),
-            "IgnoredWeaker must not blacklist the weaker fork"
-        );
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn distinct_sib(mut b: Block, avoid: BlockHash) -> Block {
@@ -1655,15 +1009,10 @@ mod tests {
         reorg.hold_body(w1.clone());
         reorg.hold_body(w2.clone());
         reorg.hold_body(w3.clone());
-        let mut bodies = HashMap::new();
-        bodies.insert(w1.block_hash(), w1.clone());
-        bodies.insert(w2.block_hash(), w2.clone());
-        bodies.insert(w3.block_hash(), w3.clone());
-        let out = try_apply_best_candidate(&hub, &bodies, &[w3.block_hash()], &mut reorg)
-            .unwrap()
-            .expect("connecting prefix must reorg without BadPrev");
-        assert!(matches!(out, AcceptOutcome::Accepted { height: 3 }));
-        assert_eq!(hub.tip_hash().unwrap(), w3.block_hash());
+        assert!(
+            reorg.need_getdata().is_empty(),
+            "held connecting prefix satisfies explore need"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

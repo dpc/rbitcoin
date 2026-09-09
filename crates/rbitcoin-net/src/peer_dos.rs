@@ -74,14 +74,6 @@ impl PeerRateLimiter {
         self.bytes = next_bytes;
         true
     }
-
-    /// Test helper: force window counters near the limit.
-    #[cfg(test)]
-    pub fn force_near_limit(&mut self) {
-        self.window_start = Instant::now();
-        self.msgs = self.max_msgs;
-        self.bytes = 0;
-    }
 }
 
 #[cfg(test)]

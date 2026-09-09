@@ -8,16 +8,6 @@ use rbitcoin_query::{ChainView, Query, QueryError, ScriptHashUtxo, ShJoinSlot};
 use rbitcoin_store::script_hash;
 
 /// Confirmed SH UTXOs plus mempool funding, minus mempool spends (Electrum rules).
-pub fn scripthash_utxos_with_mempool(
-    query: &Query,
-    mempool: Option<&MempoolHub>,
-    sh: &[u8; 32],
-) -> Result<Vec<ScriptHashUtxo>, QueryError> {
-    let mut slot = None;
-    scripthash_utxos_with_mempool_slot(query, mempool, sh, &mut slot)
-}
-
-/// [`scripthash_utxos_with_mempool`] using a connection-local join slot.
 pub fn scripthash_utxos_with_mempool_slot(
     query: &Query,
     mempool: Option<&MempoolHub>,
@@ -94,16 +84,6 @@ pub struct MempoolShStats {
     pub spent_txo_sum: i64,
 }
 
-pub fn scripthash_mempool_stats(
-    query: &Query,
-    mp: &MempoolHub,
-    sh: &[u8; 32],
-) -> Result<MempoolShStats, QueryError> {
-    let mut slot = None;
-    scripthash_mempool_stats_slot(query, mp, sh, &mut slot)
-}
-
-/// [`scripthash_mempool_stats`] using a join slot (confirmed UTXO walk).
 pub fn scripthash_mempool_stats_slot(
     query: &Query,
     mp: &MempoolHub,

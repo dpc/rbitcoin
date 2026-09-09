@@ -531,7 +531,7 @@ fn bad_prev_gathers_winner_via_bq_by_hash() {
 
 /// Mainnet-shaped multi-hop explore: win held (same-height), ext only in BQ.
 /// `try_complete_awaiting_reorg` → `try_apply_exploration` must still reorg
-/// (must not gate on held-only explore_need_pending).
+/// (must not gate on held-only explore need).
 #[test]
 fn exploration_apply_win_held_ext_only_in_bq() {
     use super::try_complete_awaiting_reorg;
@@ -647,10 +647,10 @@ fn exploration_apply_win_held_ext_only_in_bq() {
     st.reorg.hold_body(win.clone());
     st.reorg
         .register_explore([win.block_hash(), ext.block_hash()], Some(ext.block_hash()));
-    // Held-only pending still true (ext not held) — apply must not care.
+    // Ext is registered explore and not held — apply must not care.
     assert!(
-        st.reorg.explore_need_pending(),
-        "precondition: ext not held so held-only pending is true"
+        st.reorg.need_getdata().contains(&ext.block_hash()),
+        "precondition: ext not held so explore need_getdata is live"
     );
 
     assert!(
@@ -1282,7 +1282,6 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
     // Zombie: pending flag without BQ wire at the new tip+1.
     st.body.mark_pending(w1.block_hash());
     assert!(st.body.is_pending(&w1.block_hash()));
-    assert!(st.reorg.get_held(&w1.block_hash()).is_none());
     assert!(!hub.query.block_queue_has_height(1));
     assert!(
         st.body.skip_download(&hub, &w1.block_hash()),

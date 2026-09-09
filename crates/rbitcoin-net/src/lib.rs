@@ -24,74 +24,50 @@ mod tx_relay;
 mod v2;
 mod versionbits_warn;
 
-pub use asmap::{interpret, ip16_for_lookup, sanity_check, AsMap, TWO_PREFIX_ASMAP};
+pub use asmap::{AsMap, TWO_PREFIX_ASMAP};
 pub use block_diff::{
     basic_auth_b64, build_jsonrpc_http_request, check_diff_env, compare_cmpct_reorg_one,
     compare_csv_age_one, compare_fork_n_one, compare_fork_one, compare_mempool_one, compare_one,
     compare_script_one, compare_script_verify_one, compare_spend_one, diff_regtest_params,
-    genesis_diff_tip, is_core_connectivity_skip, is_core_mempool_policy_skip, mine_diff_pad,
-    mine_diff_stem, parse_submitblock_json, parse_testmempoolaccept_json,
-    prepare_csv_age_candidate, prepare_height1_candidate, prepare_script_candidate,
-    prepare_spend_candidate, rewind_oracle_until, setup_side_block, split_http_body,
-    store_reorg_apply, store_reorg_corrupt_is_finding, store_reorg_recycle_hub, store_reorg_step,
-    submit_pad_to_oracle, submit_side_to_oracle, verdict_from_accept, verdict_from_core_reply,
-    wait_for_file, BlockOracle, CompareOne, DiffPad, DiffTip, DiffVerdict, OracleReply,
-    StoreReorgOp, BLOCK_STRUCT_CTRL, DIFF_MATURE_PAD_HEIGHT, DIFF_REORG_N, DIFF_TEST_PAD_HEIGHT,
+    genesis_diff_tip, mine_diff_pad, mine_diff_stem, parse_submitblock_json,
+    parse_testmempoolaccept_json, rewind_oracle_until, split_http_body, store_reorg_apply,
+    store_reorg_corrupt_is_finding, store_reorg_recycle_hub, store_reorg_step,
+    submit_pad_to_oracle, wait_for_file, BlockOracle, CompareOne, DiffPad, DiffTip, OracleReply,
+    StoreReorgOp, DIFF_MATURE_PAD_HEIGHT, DIFF_REORG_N, DIFF_TEST_PAD_HEIGHT,
 };
 pub use cache::BlockCache;
-pub use chain::{
-    accept_block_header_nodos_log, headers_download_timeout_secs, headers_timeout_disconnect_log,
-    headers_timeout_noban_log, ignoring_low_work_chain_log, initial_getheaders_log, log_update_tip,
-    synchronizing_blockheaders_log, AcceptOutcome, ChainHub, ChainTipInfo, TipEvent,
-    IBD_FEEFILTER_SAT_KVB,
-};
-pub use codec::{MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ, MAX_PROTOCOL_MESSAGE_LENGTH};
+pub use chain::{AcceptOutcome, ChainHub, ChainTipInfo, TipEvent};
 pub use compact::{
-    classify_v2_cmpct_peer, cmpct_hsi_regtest_connectable, cmpct_missing_empty_mempool,
-    cmpct_missing_for_case, decode_cmpct_hsi, encode_cmpctblock_v2, encode_getheaders_empty_v2,
-    encode_ping_v2, encode_pong_v2, encode_sendcmpct_hb_v2, encode_tx_v2, encode_verack_v2,
-    prefilled_indexes_ok, prepare_cmpct_fuzz_case, prepare_cmpct_fuzz_hsi, try_reconstruct,
-    CmpctFuzzCase, CmpctPeerFrame,
+    classify_v2_cmpct_peer, cmpct_missing_for_case, encode_cmpctblock_v2,
+    encode_getheaders_empty_v2, encode_ping_v2, encode_pong_v2, encode_sendcmpct_hb_v2,
+    encode_tx_v2, encode_verack_v2, prepare_cmpct_fuzz_case, prepare_cmpct_fuzz_hsi, CmpctFuzzCase,
+    CmpctPeerFrame,
 };
 pub use error::NetError;
-pub use eviction::{eviction_netgroup, select_inbound_eviction, InboundEvictCandidate};
 pub use ibd::{
-    format_tip_perf_sizes, ibd, ibd_cancellable, read_proc_rss, IbdConfig, ProcRss, TipPerfSizes,
+    format_tip_perf_sizes, read_proc_rss, IbdConfig, ProcRss, TipPerfSizes,
     DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER, DEFAULT_IBD_WINDOW,
 };
-pub use most_work::{
-    first_best_ancestor, lca_on_best_chain, path_hashes_from_ancestor, select_most_work, sum_work,
-    sum_work_for_hashes, work_better, InvalidHashSet, SelectOutcome, WorkCandidate,
-};
-pub use netgroup::{netgroup, select_diverse};
+pub use most_work::sum_work;
+pub use netgroup::netgroup;
 pub use peer::{flush_tx_invs, force_announce_txid, local_service_flags, V2PlainSession};
-pub use peer_dos::{
-    inbound_semaphore, PeerRateLimiter, DEFAULT_MAX_BYTES_PER_SEC, DEFAULT_MAX_INBOUND,
-    DEFAULT_MAX_MSGS_PER_SEC, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE,
-};
+pub use peer_dos::DEFAULT_MAX_INBOUND;
 pub use peers::{
     parse_peer_addr, pick_stale_follow_evict, DialRequest, LivePeer, PeerConnType, PeerHub,
-    PeerInfo, PendingSendCmpct, PingAction,
+    PeerInfo, PingAction,
 };
 pub use rbitcoin_mempool::AcceptError;
-pub use rbitcoin_mempool::MempoolGraphStats;
+pub(crate) use rbitcoin_mempool::MempoolGraphStats;
 pub use reactor::BlockingRegion;
 pub use seeds::{
-    default_port, dns_seed_query_host, dns_seeds, fixed_seed_hosts, pick_seed_results,
-    required_seed_services, resolve_all_seeds, resolve_dns_seeds, resolve_fixed_seeds,
-    seed_lookup_names, AddrMan, PeerEntry, PeerFlags,
+    default_port, dns_seeds, fixed_seed_hosts, resolve_all_seeds, resolve_dns_seeds,
+    resolve_fixed_seeds, AddrMan, PeerEntry, PeerFlags,
 };
 pub use serve_perf::{format_serve_perf, sample_reset_serve_perf, ServePerfSample};
-pub use service::{magic_for, magic_for_params, NetConfig, P2PHandle, P2PNode};
-pub use tx_relay::{
-    ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample, QueryUtxoProvider,
-};
-pub use v2::{
-    encode_v2_contents, parse_v2_regtest, parse_v2_regtest_named, write_v2_contents, WireBytes,
-};
-pub use versionbits_warn::{
-    active_unknown_bits, unknown_rules_warning, warn_period_threshold, warning_strings,
-};
+pub use service::{NetConfig, P2PHandle, P2PNode};
+pub use tx_relay::{ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample};
+pub use v2::{parse_v2_regtest, parse_v2_regtest_named, WireBytes};
+pub use versionbits_warn::warning_strings;
 
 /// Default number of **live download peers** during IBD (`IbdConfig::target_peers`
 /// and node `--max-outbound` default).

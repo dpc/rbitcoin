@@ -7,7 +7,7 @@
 
 mod api_log;
 
-pub use api_log::{api_call, api_log_enabled, close_api_log, compact_params, init_api_log};
+pub use api_log::{api_call, close_api_log, init_api_log};
 
 use std::fmt;
 use std::io::{self, Write};
@@ -106,18 +106,6 @@ pub fn init_off() {
     MAX_LEVEL.store(0, Ordering::Relaxed);
 }
 
-/// Current max level, or `None` if logging is off.
-pub fn max_level() -> Option<Level> {
-    match MAX_LEVEL.load(Ordering::Relaxed) {
-        0 => None,
-        1 => Some(Level::Error),
-        2 => Some(Level::Warn),
-        3 => Some(Level::Info),
-        4 => Some(Level::Debug),
-        _ => Some(Level::Trace),
-    }
-}
-
 /// Whether `level` would be emitted under the current max.
 pub fn enabled(level: Level) -> bool {
     (level as u8) <= MAX_LEVEL.load(Ordering::Relaxed)
@@ -150,7 +138,7 @@ pub fn init_from_env() -> bool {
 }
 
 /// Extract a [`Level`] from env-style specs (`debug`, `info,rbitcoin=trace`, …).
-pub fn parse_level_spec(spec: &str) -> Option<Level> {
+pub(crate) fn parse_level_spec(spec: &str) -> Option<Level> {
     let mut found = None;
     for part in spec.split([',', ';']) {
         let part = part.trim();
@@ -166,7 +154,7 @@ pub fn parse_level_spec(spec: &str) -> Option<Level> {
 }
 
 /// Format UTC timestamp `YYYY-MM-DDTHH:MM:SS.mmmZ`.
-pub fn format_timestamp(now: SystemTime) -> String {
+pub(crate) fn format_timestamp(now: SystemTime) -> String {
     let dur = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = dur.as_secs();
     let millis = dur.subsec_millis();
@@ -326,10 +314,8 @@ mod tests {
         assert!(enabled(Level::Error));
         assert!(enabled(Level::Warn));
         assert!(!enabled(Level::Info));
-        assert_eq!(max_level(), Some(Level::Warn));
         init_off();
         assert!(!enabled(Level::Error));
-        assert_eq!(max_level(), None);
         init(Level::Info); // restore default for other tests in process
     }
 
@@ -414,14 +400,15 @@ mod tests {
     }
 
     #[test]
-    fn max_level_maps_all_stored_values() {
+    fn enabled_maps_all_stored_values() {
         let _g = lock_log_init();
         init(Level::Error);
-        assert_eq!(max_level(), Some(Level::Error));
+        assert!(enabled(Level::Error));
+        assert!(!enabled(Level::Warn));
         init(Level::Debug);
-        assert_eq!(max_level(), Some(Level::Debug));
+        assert!(enabled(Level::Debug));
+        assert!(!enabled(Level::Trace));
         init(Level::Trace);
-        assert_eq!(max_level(), Some(Level::Trace));
         assert!(enabled(Level::Trace));
         init(Level::Info);
     }
@@ -435,10 +422,11 @@ mod tests {
         std::env::remove_var("RUST_LOG");
         std::env::set_var("RBITCOIN_LOG", "debug");
         assert!(init_from_env());
-        assert_eq!(max_level(), Some(Level::Debug));
+        assert!(enabled(Level::Debug));
+        assert!(!enabled(Level::Trace));
         std::env::set_var("RBITCOIN_LOG", "off");
         assert!(init_from_env());
-        assert_eq!(max_level(), None);
+        assert!(!enabled(Level::Error));
         std::env::set_var("RBITCOIN_LOG", "none");
         assert!(init_from_env());
         std::env::set_var("RBITCOIN_LOG", "0");
@@ -449,7 +437,8 @@ mod tests {
         // RUST_LOG fallback.
         std::env::set_var("RUST_LOG", "warn");
         assert!(init_from_env());
-        assert_eq!(max_level(), Some(Level::Warn));
+        assert!(enabled(Level::Warn));
+        assert!(!enabled(Level::Info));
         std::env::remove_var("RBITCOIN_LOG");
         std::env::remove_var("RUST_LOG");
         assert!(!init_from_env());
@@ -461,9 +450,9 @@ mod tests {
             Some(v) => std::env::set_var("RUST_LOG", v),
             None => std::env::remove_var("RUST_LOG"),
         }
-        // max_level maps Warn branch explicitly.
         init(Level::Warn);
-        assert_eq!(max_level(), Some(Level::Warn));
+        assert!(enabled(Level::Warn));
+        assert!(!enabled(Level::Info));
         // Bold style path (non-TTY → plain write arm still executed).
         init(Level::Error);
         log_at_style(Level::Error, Style::Bold, format_args!("bold-err"));

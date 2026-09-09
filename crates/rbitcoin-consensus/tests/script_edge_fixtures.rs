@@ -6,7 +6,7 @@
 use bitcoin::consensus::deserialize;
 use bitcoin::script::ScriptBuf;
 use bitcoin::{Amount, Block, OutPoint, TxOut};
-use rbitcoin_consensus::{verify_scripts_pool, ScriptCheckJob, ScriptVerifyFlags};
+use rbitcoin_consensus::verify_tx_scripts_detached_forks;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -216,12 +216,8 @@ fn block_90719_codeseparator_tapscript_verifies() {
     };
     assert_eq!(tx.input[0].previous_output, expected_prev);
 
-    let job = ScriptCheckJob::new(
-        vec![prevout],
-        tx,
-        ScriptVerifyFlags::buried(true, true, true, true, true),
-    );
-    verify_scripts_pool(&[job]).expect("BIP342 CODESEPARATOR tapscript must verify");
+    verify_tx_scripts_detached_forks(vec![prevout], tx, true, true, true, true, true)
+        .expect("BIP342 CODESEPARATOR tapscript must verify");
 }
 
 // ── mainnet 290329: P2SH FindAndDelete ───────────────────────────────────────
@@ -258,10 +254,6 @@ fn mainnet_290329_p2sh_multisig_with_embedded_sig_accepts() {
         },
     ];
 
-    let job = ScriptCheckJob::new(
-        prevouts,
-        tx.clone(),
-        ScriptVerifyFlags::buried(true, true, false, true, true),
-    );
-    verify_scripts_pool(&[job]).expect("P2SH CHECKMULTISIG with FindAndDelete");
+    verify_tx_scripts_detached_forks(prevouts, tx.clone(), true, true, false, true, true)
+        .expect("P2SH CHECKMULTISIG with FindAndDelete");
 }

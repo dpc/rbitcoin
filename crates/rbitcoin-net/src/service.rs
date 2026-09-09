@@ -15,7 +15,6 @@ use bitcoin::p2p::Magic;
 use bitcoin::Block;
 use bitcoin::BlockHash;
 use rbitcoin_consensus::{signet_magic, ChainParams, Milestone};
-use rbitcoin_primitives::Network as RNetwork;
 use rbitcoin_query::Query;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -582,16 +581,6 @@ async fn run_outbound_session_with_abort(
     run_prepared_outbound(prepared).await
 }
 
-/// Map our Network enum to bitcoin Magic.
-pub fn magic_for(network: RNetwork) -> Magic {
-    Magic::from(match network {
-        RNetwork::Mainnet => bitcoin::Network::Bitcoin,
-        RNetwork::Testnet => bitcoin::Network::Testnet,
-        RNetwork::Signet => bitcoin::Network::Signet,
-        RNetwork::Regtest => bitcoin::Network::Regtest,
-    })
-}
-
 /// Resolve P2P message magic, including BIP325 custom-Signet derivation.
 pub fn magic_for_params(params: &ChainParams) -> Magic {
     match params.signet_challenge.as_ref() {
@@ -607,18 +596,18 @@ mod tests {
     #[test]
     fn magic_for_all_networks_and_regtest_config() {
         assert_eq!(
-            magic_for(RNetwork::Mainnet),
+            magic_for_params(&ChainParams::mainnet()),
             Magic::from(bitcoin::Network::Bitcoin)
         );
         assert_eq!(
-            magic_for(RNetwork::Testnet),
+            magic_for_params(&ChainParams::testnet()),
             Magic::from(bitcoin::Network::Testnet)
         );
         assert_eq!(
-            magic_for(RNetwork::Signet),
+            magic_for_params(&ChainParams::signet()),
             Magic::from(bitcoin::Network::Signet)
         );
-        assert_eq!(magic_for(RNetwork::Regtest), Magic::REGTEST);
+        assert_eq!(magic_for_params(&ChainParams::regtest()), Magic::REGTEST);
         let cfg = NetConfig::for_regtest(None);
         assert_eq!(cfg.magic, Magic::REGTEST);
         assert!(cfg.listen.is_none());

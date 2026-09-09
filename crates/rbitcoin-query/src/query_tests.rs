@@ -271,24 +271,6 @@ fn sampler_stats() {
     // last-writer overwrite checks and accumulate lower-bounds over exact
     // equality on counters other tests may also bump.
     let _ = confirm_load_stats::sample_and_reset();
-    confirm_load_stats::note(
-        &ConfirmLoadStats {
-            blocks: 1,
-            utxo_parents: 2,
-            parent_unique: 4,
-            pin_cache_body: 5,
-            pin_new: 6,
-            pin_body_ns: 8,
-            body_tx_reads: 12,
-            thin_ns: 16,
-            parent_pin_ns: 17,
-        },
-        100,
-    );
-    let s = confirm_load_stats::sample_and_reset();
-    assert!(s.ns >= 100);
-    assert!(s.blocks >= 1);
-    assert!(s.body_tx >= 12);
 
     let _ = archive_phase_stats::sample_and_reset();
     archive_phase_stats::note_resolve_counts(1, 2, 3, 4, 5, 6);
@@ -344,7 +326,7 @@ fn disconnect_tip_logs_each_block_at_least_info() {
     let logs = rbitcoin_log::take_logs();
     rbitcoin_log::capture_logs(false);
     assert_eq!(q.tip_height(), Some(Height(0)));
-    let line = format_disconnect_tip_line(1, &hash1, 1);
+    let line = crate::connect::format_disconnect_tip_line(1, &hash1, 1);
     assert!(
         line.contains("height=1"),
         "disconnect line must name height: {line}"

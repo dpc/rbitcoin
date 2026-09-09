@@ -13,9 +13,10 @@ use bitcoin::{
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 
+use crate::block::apply_witness_commitment;
 use crate::{
-    accept_and_connect_block, apply_witness_commitment, bip34_height_script, block_has_witness,
-    block_subsidy, ChainParams, Milestone,
+    accept_and_connect_block, bip34_height_script, block_has_witness, block_subsidy, ChainParams,
+    Milestone,
 };
 
 pub const REGTEST_POW_BITS: u32 = 0x207f_ffff;
