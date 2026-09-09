@@ -331,6 +331,7 @@ struct AdmitSpec {
     park_orphans: bool,
     fee_delta: i64,
     time_prepare_lock: bool,
+    min_relay: Option<u64>,
 }
 
 /// Shared mempool + relay gate used by peer sessions and tip confirm.
@@ -1142,7 +1143,14 @@ impl MempoolHub {
         let t_prep = Instant::now();
         let prep = {
             let g = self.lock_read();
-            g.prepare_admit(tx, utxo, tip, spec.fee_delta, spec.park_orphans)
+            g.prepare_admit(
+                tx,
+                utxo,
+                tip,
+                spec.fee_delta,
+                spec.park_orphans,
+                spec.min_relay,
+            )
         };
         if spec.time_prepare_lock {
             *lock_us = lock_us.saturating_add(t_prep.elapsed().as_micros() as u64);
@@ -1152,10 +1160,10 @@ impl MempoolHub {
                 stages.utxo_us = stages.utxo_us.saturating_add(p.utxo_us);
                 p
             }
-            Err(AcceptError::Orphaned(_)) if spec.park_orphans => {
+            Err(AcceptError::Orphaned { missing, .. }) if spec.park_orphans => {
                 let t_lock = Instant::now();
                 let mut g = self.lock_write();
-                let e = g.park_orphan(tx);
+                let e = g.park_orphan(tx, missing);
                 *lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
                 return Err(e);
             }
@@ -1188,24 +1196,32 @@ impl MempoolHub {
         let mut lock_us = 0u64;
         let delta = self.fee_delta(&tx.compute_txid());
         let spec = AdmitSpec {
-            park_orphans: true,
+            park_orphans: false,
             fee_delta: delta,
             time_prepare_lock: false,
+            min_relay: None,
         };
         let prep = match self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
             Err(e) => {
-                {
-                    let mut g = self.lock_write();
-                    g.note_accept_failure(tx, &e);
-                }
-                if matches!(&e, AcceptError::Orphaned(_)) {
-                    if let Some(r) = self.admit_1p1c(tx, utxo) {
+                if let AcceptError::Orphaned { missing, .. } = &e {
+                    if let Some(r) = self.admit_1p1c(tx, utxo, missing) {
                         let us = t0.elapsed().as_micros() as u64;
                         self.meter_accept_stages(lock_us, stages);
                         self.meter_accept_wall(us, true);
                         return Ok(r);
                     }
+                    let parked = {
+                        let mut g = self.lock_write();
+                        g.park_orphan(tx, missing.clone())
+                    };
+                    let us = t0.elapsed().as_micros() as u64;
+                    self.meter_accept_stages(lock_us, stages);
+                    return self.finish_accept_err(us, parked);
+                }
+                if rbitcoin_mempool::ActiveMempool::records_accept_failure(tx, &e) {
+                    let mut g = self.lock_write();
+                    g.note_accept_failure(tx, &e);
                 }
                 let us = t0.elapsed().as_micros() as u64;
                 self.meter_accept_stages(lock_us, stages);
@@ -1264,22 +1280,89 @@ impl MempoolHub {
         &self,
         child: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
+        missing: &std::collections::BTreeSet<Txid>,
     ) -> Option<AcceptResult> {
-        let pkg = {
+        let parent = {
             let g = self.lock_read();
-            g.try_one_parent_package(child, utxo)?
+            g.try_one_parent_package(child, missing, utxo)?
         };
-        {
+        let mut stages = rbitcoin_mempool::AcceptStageUs::default();
+        let mut lock_us = 0u64;
+        let spec_p = AdmitSpec {
+            park_orphans: false,
+            fee_delta: 0,
+            time_prepare_lock: false,
+            min_relay: Some(0),
+        };
+        let prep_p = self
+            .admit_staged(&parent, utxo, spec_p, &mut stages, &mut lock_us)
+            .ok()?;
+        let prevouts_p = prep_p.prevouts.clone();
+        let parent_res = {
             let mut g = self.lock_write();
-            g.set_skip_min_relay(true);
-        }
-        let res = self.accept_package(&pkg);
-        {
+            g.commit_after_script(&parent, prep_p).ok()?
+        };
+        let spec_c = AdmitSpec {
+            park_orphans: false,
+            fee_delta: self.fee_delta(&child.compute_txid()),
+            time_prepare_lock: false,
+            min_relay: None,
+        };
+        let prep_c = match self.admit_staged(child, utxo, spec_c, &mut stages, &mut lock_us) {
+            Ok(p) => p,
+            Err(_) => {
+                let mut g = self.lock_write();
+                let _ = g.remove_txid(&parent_res.txid);
+                self.unindex_txid(&parent_res.txid);
+                return None;
+            }
+        };
+        let prevouts_c = prep_c.prevouts.clone();
+        let child_res = {
             let mut g = self.lock_write();
-            g.set_skip_min_relay(false);
+            g.commit_after_script(child, prep_c)
+        };
+        match child_res {
+            Ok(r) => {
+                self.publish_admitted(&parent, &parent_res, &prevouts_p, utxo);
+                self.publish_admitted(child, &r, &prevouts_c, utxo);
+                Some(r)
+            }
+            Err(_) => {
+                let mut g = self.lock_write();
+                let _ = g.remove_txid(&parent_res.txid);
+                self.unindex_txid(&parent_res.txid);
+                None
+            }
         }
-        let results = res.ok()?;
-        results.into_iter().find(|r| r.txid == child.compute_txid())
+    }
+
+    fn publish_admitted(
+        &self,
+        tx: &Transaction,
+        r: &AcceptResult,
+        prevouts: &[TxOut],
+        utxo: &impl rbitcoin_mempool::UtxoProvider,
+    ) {
+        let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
+        let w = tx.compute_wtxid();
+        self.insert_relay_maps(r.txid, w, seq);
+        self.reorg_servable.lock().unwrap().remove(&w);
+        self.note_fee_flow_admit(r.weight, r.fee_sat);
+        self.push_recent(tx, r);
+        self.index_txid(r.txid, tx, prevouts);
+        let shs = self
+            .sh_index
+            .lock()
+            .unwrap()
+            .by_tx
+            .get(&r.txid)
+            .cloned()
+            .unwrap_or_default();
+        self.publish_announce(r, shs);
+        self.note_template_update();
+        self.promote_orphans_staged(r.txid, utxo);
+        let _ = self.expire_stale();
     }
 
     fn promote_orphans_staged(&self, parent: Txid, utxo: &impl rbitcoin_mempool::UtxoProvider) {
@@ -1333,6 +1416,7 @@ impl MempoolHub {
             park_orphans: false,
             fee_delta: delta,
             time_prepare_lock: false,
+            min_relay: None,
         };
         let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -1474,7 +1558,7 @@ impl MempoolHub {
         let hard = !matches!(
             e,
             AcceptError::Duplicate(_)
-                | AcceptError::Orphaned(_)
+                | AcceptError::Orphaned { .. }
                 | AcceptError::Policy("mempool full")
         );
         if hard {
@@ -1501,6 +1585,7 @@ impl MempoolHub {
                 park_orphans: true,
                 fee_delta: delta,
                 time_prepare_lock: true,
+                min_relay: None,
             };
             let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
                 Ok(p) => p,
@@ -1573,7 +1658,7 @@ impl MempoolHub {
                 let hard = !matches!(
                     e,
                     AcceptError::Duplicate(_)
-                        | AcceptError::Orphaned(_)
+                        | AcceptError::Orphaned { .. }
                         | AcceptError::Policy("mempool full")
                 );
                 if hard {
@@ -1705,7 +1790,10 @@ impl MempoolHub {
 
     /// Unique missing parents not already held and not asked within TTL.
     pub fn take_parent_getdata(&self, missing: &[Txid]) -> Vec<Txid> {
-        let now = Instant::now();
+        self.take_parent_getdata_at(missing, Instant::now())
+    }
+
+    pub(crate) fn take_parent_getdata_at(&self, missing: &[Txid], now: Instant) -> Vec<Txid> {
         let mut asked = self.parent_asked.lock().unwrap();
         asked.retain(|_, t| now.saturating_duration_since(*t) < PARENT_GETDATA_TTL);
         let mut out = Vec::new();
@@ -1756,6 +1844,7 @@ impl MempoolHub {
             park_orphans: true,
             fee_delta: 0,
             time_prepare_lock: false,
+            min_relay: None,
         };
         let prep = self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us)?;
         let prevouts = prep.prevouts.clone();
@@ -3001,13 +3090,13 @@ mod tests {
         assert!(
             matches!(
                 err,
-                AcceptError::MissingPrevout(_) | AcceptError::Orphaned(_)
+                AcceptError::MissingPrevout(_) | AcceptError::Orphaned { .. }
             ),
             "dry-run missing parent: {err}"
         );
         assert_eq!(hub.orphan_count(), 0);
         let err = hub.accept_tx(&tx).unwrap_err();
-        assert!(matches!(err, AcceptError::Orphaned(_)), "{err}");
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err}");
         assert_eq!(hub.orphan_count(), 1);
         assert!(hub.fee_histogram().is_empty());
         assert!(hub.estimate_fee_btc_per_kb(2) < 0.0 || hub.estimate_fee_btc_per_kb(2) >= 0.0);
@@ -3055,7 +3144,10 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         };
-        assert!(matches!(hub.accept_tx(&tx), Err(AcceptError::Orphaned(_))));
+        assert!(matches!(
+            hub.accept_tx(&tx),
+            Err(AcceptError::Orphaned { .. })
+        ));
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let nonce = 1u64;
         let keys = ShortId::calculate_siphash_keys(&genesis.header, nonce);
@@ -3065,6 +3157,92 @@ mod tests {
             .expect("read lock");
         assert_eq!(got.len(), 1, "orphan must fill compact short-id");
         assert_eq!(got[0].compute_txid(), tx.compute_txid());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
+    fn hub_one_parent_one_child_admits() {
+        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let (_tip, _tip_time, cbs) = rbitcoin_consensus::pad_empty_from(
+            &q,
+            &params,
+            genesis.block_hash(),
+            genesis.header.time,
+            1,
+            102,
+            1,
+        );
+        let q = Arc::new(q);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let mp = tmp();
+        let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        hub.set_min_relay_sat_kvb(50_000);
+        let parent = spend_true(cbs[0], 200, spk.clone());
+        let parent_id = parent.compute_txid();
+        assert!(
+            matches!(
+                hub.accept_tx(&parent),
+                Err(AcceptError::Policy("min relay fee"))
+            ),
+            "parent alone below min-relay"
+        );
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: parent_id,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: spk,
+            }],
+        };
+        hub.accept_tx(&child)
+            .expect("hub 1p1c must admit parent+child");
+        assert!(hub.contains(&parent_id));
+        assert!(hub.contains(&child.compute_txid()));
+        assert_eq!(hub.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&mp);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
+    fn take_parent_getdata_dedupes_caps_and_expires() {
+        let dir = tmp();
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+        let mut missing = Vec::new();
+        for i in 0u8..20 {
+            missing.push(Txid::from_byte_array([i + 1; 32]));
+        }
+        let t0 = Instant::now();
+        let first = hub.take_parent_getdata_at(&missing, t0);
+        assert_eq!(first.len(), MAX_PARENTS_PER_PARK);
+        let rest = hub.take_parent_getdata_at(&missing, t0);
+        assert_eq!(rest.len(), 4, "cap leftover still asked once");
+        let again = hub.take_parent_getdata_at(&missing, t0);
+        assert!(again.is_empty(), "already-asked must not re-ask");
+        let later = hub.take_parent_getdata_at(&missing, t0 + PARENT_GETDATA_TTL);
+        assert_eq!(later.len(), MAX_PARENTS_PER_PARK, "TTL expiry re-asks");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
@@ -3285,7 +3463,7 @@ mod tests {
         assert!(
             matches!(
                 r,
-                Err(AcceptError::Orphaned(_)) | Err(AcceptError::MissingPrevout(_))
+                Err(AcceptError::Orphaned { .. }) | Err(AcceptError::MissingPrevout(_))
             ),
             "async accept off reactor: {r:?}"
         );

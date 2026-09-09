@@ -2951,7 +2951,7 @@ enum TxAcceptLog {
 fn tx_accept_log(e: &rbitcoin_mempool::AcceptError) -> TxAcceptLog {
     match e {
         rbitcoin_mempool::AcceptError::Duplicate(_) => TxAcceptLog::Silent,
-        rbitcoin_mempool::AcceptError::Orphaned(_) => TxAcceptLog::Park,
+        rbitcoin_mempool::AcceptError::Orphaned { .. } => TxAcceptLog::Park,
         _ => TxAcceptLog::Reject,
     }
 }

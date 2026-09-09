@@ -853,7 +853,7 @@ fn mempool_ours_consensus(
             | AcceptError::PackageEmpty
             | AcceptError::PackageNotTopo
             | AcceptError::RbfInsufficient
-            | AcceptError::Orphaned(_)
+            | AcceptError::Orphaned { .. }
             | AcceptError::Duplicate(_),
         ) => Ok(DiffVerdict::Skip),
         Err(AcceptError::Durable(_)) => Err("harness"),

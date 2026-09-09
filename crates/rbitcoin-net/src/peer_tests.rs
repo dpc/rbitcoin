@@ -3148,7 +3148,10 @@ fn tx_accept_log_parks_orphans_silences_duplicates() {
         TxAcceptLog::Silent
     );
     assert_eq!(
-        tx_accept_log(&rbitcoin_mempool::AcceptError::Orphaned(txid)),
+        tx_accept_log(&rbitcoin_mempool::AcceptError::Orphaned {
+            txid,
+            missing: Default::default(),
+        }),
         TxAcceptLog::Park
     );
     assert_eq!(
