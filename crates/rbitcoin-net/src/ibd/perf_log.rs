@@ -2117,6 +2117,88 @@ mod tests {
     }
 
     #[test]
+    fn format_lines_omit_never_written_inventory_tokens() {
+        let mut s = IbdPerfSample::default();
+        s.phase_blks = 8;
+        s.load_ms = 30;
+        s.connect_ms = 8;
+        s.script_ms = 20;
+        s.write.class_a_ms = 12;
+        s.write.ensure_ms = 3;
+        s.write.class_c_ms = 4;
+        s.recon_ms = 99;
+        s.wire_ms = 88;
+        s.resolve_ms = 77;
+        s.recon_ns = 10_000_000;
+        s.wire_ns = 9_000_000;
+        s.resolve_ns = 8_000_000;
+        s.load_parent_tx_reads = 12;
+        s.load_creates = 50;
+        s.load_missing_parents = 3;
+        s.load_cache_put_ms = 2;
+        s.load_hdr_ms = 5;
+        s.load_decode_ms = 6;
+        s.load_edge_same = 10;
+        s.load_edge_fk = 5;
+        s.load_edge_cb = 1;
+        s.load_cold_idx_ms = 400;
+        s.load_cold_idx_n = 2;
+        s.load_cold_decode_ms = 10;
+        s.load_pin_new_meta_ms = 14;
+        s.write.recent_pub_ms = 6;
+        s.write.recent_pub_ns = 6_000_000;
+        s.write.cache_tip_ms = 5;
+        s.write.cache_tip_ns = 5_000_000;
+        s.spend_idx = 2;
+        s.spend_skip = 1;
+        s.ann_pread = 4;
+        s.asm_prev_batch_ms = 2000;
+        s.asm_prev_same_ms = 50;
+        s.asm_prev_cold_ms = 250;
+        s.asm_prev_fk_ms = 10;
+        s.owned.pstore_weak = 20_000;
+        s.owned.pstore_live = 8_000;
+        s.owned.pstore_bytes = 16 * 1024 * 1024;
+        s.owned.recent_heights = 12;
+        s.owned.recent_keys = 400;
+        let info = format_info(&s);
+        let dbg = format_debug(&s);
+        let sizes = format_sizes(&s);
+        assert!(info.starts_with("ibd: perf "), "{info}");
+        assert!(info.contains("load="), "{info}");
+        assert!(info.contains("script="), "{info}");
+        assert!(info.contains("write="), "{info}");
+        assert!(info.contains("class_a="), "{info}");
+        assert!(dbg.contains("us/blk load="), "{dbg}");
+        assert!(dbg.contains("script="), "{dbg}");
+        assert!(dbg.contains("write="), "{dbg}");
+        for line in [&info, &dbg] {
+            assert!(!line.contains("recon_ms="), "{line}");
+            assert!(!line.contains("recon_us="), "{line}");
+            assert!(!line.contains("wire_ms="), "{line}");
+            assert!(!line.contains("wire_us="), "{line}");
+            assert!(!line.contains("resolve_ms="), "{line}");
+            assert!(!line.contains("resolve_us="), "{line}");
+            assert!(!line.contains("parent_io="), "{line}");
+            assert!(!line.contains("recent_pub="), "{line}");
+            assert!(!line.contains("unpin"), "{line}");
+            assert!(!line.contains("miss_p="), "{line}");
+            assert!(!line.contains("cold_idx="), "{line}");
+            assert!(!line.contains("cold_dec="), "{line}");
+            assert!(!line.contains("edges same="), "{line}");
+            assert!(!line.contains("tip_gc="), "{line}");
+            assert!(!line.contains("spend_mix"), "{line}");
+            assert!(!line.contains(" pread="), "{line}");
+        }
+        assert!(!dbg.contains("creates="), "{dbg}");
+        assert!(!sizes.contains("pstore"), "{sizes}");
+        assert!(
+            !sizes.contains("recent="),
+            "always-zero recent= occupancy: {sizes}"
+        );
+    }
+
+    #[test]
     fn format_info_has_stable_tokens() {
         let mut s = IbdPerfSample::default();
         s.inflight = 3;
