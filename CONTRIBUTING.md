@@ -205,6 +205,22 @@ That is **not** the operator binary (`nix build .#rbitcoin-musl`). Details:
     Full rules and extract policy: [`docs/code-shape.md`](./docs/code-shape.md).
     Named 0.6.0 extracts (**Q-61**) are Completed; residual peels:
     [`docs/quality.md`](./docs/quality.md) **R-10**.
+11. **Crate visibility is the production graph.** `pub` and crate-root
+    `pub use` exist only for names another crate actually imports, or for
+    a **documented** public library API (we do not have one). Unused `pub`
+    is forbidden: drop to `pub(crate)` or delete; workspace `-D warnings`
+    then reports truly dead items — delete those too (`#[allow(dead_code)]`
+    is not a fix). If we ever ship an out-of-tree library surface, write
+    the allowlist in the owner crate rustdoc and then unused `pub` on
+    **that** surface is intentional. `#[cfg(test)]` on production items
+    is a smell: tests drive the shipped function (principle 8), not a
+    second test-only wrapper or `*_for_test` backdoor. A tiny
+    `#[cfg(test)]` observer of a production counter is allowed only when
+    the contract is otherwise unobservable. Fuzz-only `pub` is the same
+    smell — prefer the in-crate `pub(crate)` graph or the published
+    **binary** surface (`rbitcoin-node` / CLI) even if the harness pays
+    a little extra setup, rather than exporting helpers solely for
+    `fuzz/`.
 
 ## Workflow
 
@@ -259,7 +275,10 @@ IO; they do not package zips. GitHub Releases:
 
 - [ ] Behavior covered by a high-level scenario (or justified narrow test)
 - [ ] No new silent dead branches
-- [ ] Public API preferred over `#[cfg(test)]` white-box access
+- [ ] No unused crate-root `pub` / `pub use` (principle 11). Tests drive
+      shipped functions, not `#[cfg(test)]` wrappers or `*_for_test`
+      backdoors. Fuzz does not grow `pub` without considering the binary
+      surface.
 - [ ] Store changes respect Class A/B/C and allocate-then-publish
 - [ ] Experimental / milestone honesty preserved in user-facing docs when relevant
 - [ ] No restating `//` comments. Remaining line comments name an invariant,

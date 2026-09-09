@@ -161,10 +161,12 @@ Dependencies are not attributed to us.
 
 1. Cover code with **high-level functional/integration scenarios** (this file).
 2. Prefer expanding the harness over adding private unit tests.
-3. If a branch is unreachable, **delete it** or add a public fault injector /
-   config path so a scenario can hit it.
+3. If a branch is unreachable, **delete it** or hit it through a **shipped**
+   config / error / CLI path. Do not add a `pub` or `*_for_test` injector
+   so a unit can see it ([`CONTRIBUTING.md`](./CONTRIBUTING.md) principle 11).
 4. True unit tests only when a branch cannot be reached through any higher API
-   without absurd cost — document the reason in the test file.
+   without absurd cost — document the reason in the test file. Drive the
+   shipped function, not a `#[cfg(test)]` wrapper around it.
 
 ### Closing a red region
 
@@ -257,7 +259,13 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 Nightly (not a required PR check) `fuzz.yml` runs **16** cargo-fuzz jobs plus
 in-tree extras (`store_reorg`, later `script_kernel_differential` /
-`p2p_sequence_differential`):
+`p2p_sequence_differential`). `fuzz/` is not a default workspace member.
+Treat crate-root `pub` that exists only so a fuzz target can call it as
+the same smell as a test-only export: prefer `pub(crate)` plus an in-crate
+harness, or the published `rbitcoin-node` / CLI binary, even if that costs
+a little setup time, rather than growing helpers solely for fuzz. Allowlist
+what must stay `pub` for a target; do not treat `fuzz/` as a second public
+API.
 
 | Target | What | Oracle |
 |--------|------|--------|

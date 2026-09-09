@@ -26,6 +26,9 @@ before 1.0).
   (`AddressHead`, packed decode aliases, SH remap/slab Vec codecs, sorted-run
   catalog helpers, …). Tests use the remaining production insert/probe/decode
   paths; rustc `dead_code` then deleted the unused wrappers.
+- **Visibility policy:** unused crate-root `pub` is forbidden (no out-of-tree
+  library API today). `#[cfg(test)]` on production items is a smell; fuzz-only
+  exports are the same smell. Owner: CONTRIBUTING principle 11.
 - **Workspace version 0.6.99:** in-tree toward 0.7.0.
   Published GitHub Releases remain 0.6.0; `v0.6.x` is the patch branch.
 - **`ibd: perf` / `ibd: sizes` drop never-written meters:** DEBUG no longer

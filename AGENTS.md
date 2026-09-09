@@ -242,7 +242,10 @@ repo text ([`CONTRIBUTING.md`](CONTRIBUTING.md) principle 8);
 [`TESTING.md`](TESTING.md) owns budgets, no `*_for_test` backdoors, and no
 production-scale default fixtures. Do not waste RAM or CPU; a spend of one
 to save the other is a named trade ([`CONTRIBUTING.md`](CONTRIBUTING.md)
-principle 9).
+principle 9). Crate `pub` is the cross-crate graph only — unused `pub` is
+forbidden; `#[cfg(test)]` on production items is a smell; fuzz-only
+exports are the same smell ([`CONTRIBUTING.md`](CONTRIBUTING.md)
+principle 11).
 
-Do not leave dead code. Do not silence dead-code / `#[cfg(test)]` warnings
-without a bulletproof justification — delete the code.
+Do not leave dead code. Do not silence dead-code warnings — delete the
+code. Do not wrap unused production APIs in `#[cfg(test)]` to keep them.
