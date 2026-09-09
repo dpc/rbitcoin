@@ -7,8 +7,11 @@ use crate::store::Mempool;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::{OutPoint, Transaction, TxOut, Txid};
 use rbitcoin_consensus::policy::{self, PolicyResult};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::time::Instant;
+
+const EXTRA_COMPACT_CAP: usize = 100;
+const RECENT_INVALID_CAP: usize = 4_096;
 
 /// Stage wall times (µs) for one accept attempt (or sum across package/orphan promote).
 ///
@@ -127,7 +130,10 @@ pub enum AcceptError {
     Policy(&'static str),
     MissingPrevout(OutPoint),
     /// Tx parked in the orphanage waiting on missing parent(s). Not a hard reject.
-    Orphaned(Txid),
+    Orphaned {
+        txid: Txid,
+        missing: BTreeSet<Txid>,
+    },
     Duplicate(Txid),
     ClusterTooLarge {
         count: usize,
@@ -161,7 +167,7 @@ impl std::fmt::Display for AcceptError {
         match self {
             AcceptError::Policy(s) => write!(f, "policy: {s}"),
             AcceptError::MissingPrevout(op) => write!(f, "missing prevout {op}"),
-            AcceptError::Orphaned(t) => write!(f, "orphaned {t}"),
+            AcceptError::Orphaned { txid, .. } => write!(f, "orphaned {txid}"),
             AcceptError::Duplicate(t) => write!(f, "duplicate {t}"),
             AcceptError::ClusterTooLarge { .. } => f.write_str("too-large-cluster"),
             AcceptError::PackageTooLarge { count, weight } => {
@@ -183,6 +189,13 @@ impl std::fmt::Display for AcceptError {
 }
 
 impl std::error::Error for AcceptError {}
+
+/// Side effects of a recordable accept failure (recent-invalid / extra-compact).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptFailureRecord {
+    Invalid(Txid),
+    Extra,
+}
 
 impl From<MempoolError> for AcceptError {
     fn from(e: MempoolError) -> Self {
@@ -249,6 +262,21 @@ pub fn check_mempool_structural(
 /// Always uses the shared `rbtc-scripts` detached path (same family as IBD
 /// confirm) so the caller stack — peer session or tokio — never runs the
 /// interpreter.
+fn tx_has_witness(tx: &Transaction) -> bool {
+    tx.input.iter().any(|i| !i.witness.is_empty())
+}
+
+fn first_missing_outpoint(
+    tx: &Transaction,
+    missing: &BTreeSet<Txid>,
+    extra: impl Fn(&OutPoint) -> bool,
+) -> Option<OutPoint> {
+    tx.input
+        .iter()
+        .map(|inp| inp.previous_output)
+        .find(|op| missing.contains(&op.txid) && extra(op))
+}
+
 fn verify_tx_scripts(tx: &Transaction, prevouts: Vec<TxOut>) -> Result<(), AcceptError> {
     if prevouts.len() != tx.input.len() {
         return Err(AcceptError::Script("prevout count mismatch".into()));
@@ -301,6 +329,10 @@ pub struct ActiveMempool {
     cluster_size_kvb_overlay: Option<u32>,
     /// Core `-minrelaytxfee` in sat/kvB (default Libre 100).
     min_relay_sat_kvb: u64,
+    /// Txids recently rejected as invalid (not policy-reconsiderable).
+    recent_invalid: HashSet<Txid>,
+    /// Recent rejects / RBF replacements for compact fill and 1p1c.
+    extra_compact: VecDeque<(Txid, Transaction)>,
 }
 
 impl ActiveMempool {
@@ -375,6 +407,8 @@ impl ActiveMempool {
             cluster_count_overlay: None,
             cluster_size_kvb_overlay: None,
             min_relay_sat_kvb: rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB,
+            recent_invalid: HashSet::new(),
+            extra_compact: VecDeque::new(),
         })
     }
 
@@ -455,11 +489,29 @@ impl ActiveMempool {
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
         self.last_accept_stages = AcceptStageUs::default();
-        let prep = match self.prepare_admit(tx, utxos, tip, 0, true) {
-            Ok(p) => p,
-            Err(AcceptError::Orphaned(_)) => return Err(self.park_orphan(tx)),
-            Err(e) => return Err(e),
-        };
+        match self.accept_tx_with(tx, utxos, tip, 0, true, None) {
+            Ok(r) => {
+                self.promote_orphans_of(r.txid, utxos, tip);
+                Ok(r)
+            }
+            Err(AcceptError::Orphaned { missing, .. }) => Err(self.park_orphan(tx, missing)),
+            Err(e) => {
+                self.note_accept_failure(tx, &e);
+                Err(e)
+            }
+        }
+    }
+
+    fn accept_tx_with(
+        &mut self,
+        tx: &Transaction,
+        utxos: &impl UtxoProvider,
+        tip: ChainTipCtx,
+        fee_delta: i64,
+        report_orphans: bool,
+        min_relay: Option<u64>,
+    ) -> Result<AcceptResult, AcceptError> {
+        let prep = self.prepare_admit(tx, utxos, tip, fee_delta, report_orphans, min_relay)?;
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
         let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
@@ -467,10 +519,11 @@ impl ActiveMempool {
             .last_accept_stages
             .script_us
             .saturating_add(t_script.elapsed().as_micros() as u64);
-        script_res?;
-        let r = self.commit_after_script(tx, prep)?;
-        self.promote_orphans_of(r.txid, utxos, tip);
-        Ok(r)
+        if let Err(e) = script_res {
+            self.note_accept_failure(tx, &e);
+            return Err(e);
+        }
+        self.commit_after_script(tx, prep)
     }
 
     fn note_conflict_and_parent(
@@ -493,6 +546,13 @@ impl ActiveMempool {
                         s.direct_conflicts.insert(c);
                     }
                 } else {
+                    let parent_tx = self
+                        .bodies
+                        .get(&creator)
+                        .ok_or(AcceptError::Durable("parent body missing".into()))?;
+                    if (op.vout as usize) >= parent_tx.output.len() {
+                        return Err(AcceptError::MissingPrevout(op));
+                    }
                     return Err(AcceptError::Policy("mempool double-spend"));
                 }
             }
@@ -517,14 +577,17 @@ impl ActiveMempool {
     }
 
     /// Graph peek + UTXO resolve (`&self`: callers may hold a read lock).
-    /// Does not park orphans; [`Self::park_orphan`] does that under write.
+    ///
+    /// `report_orphans`: missing parents become [`AcceptError::Orphaned`] (caller
+    /// may [`Self::park_orphan`]); otherwise [`AcceptError::MissingPrevout`].
     pub fn prepare_admit(
         &self,
         tx: &Transaction,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
         fee_delta: i64,
-        park_orphans: bool,
+        report_orphans: bool,
+        min_relay: Option<u64>,
     ) -> Result<PreparedAdmit, AcceptError> {
         if tx.is_coinbase() {
             return Err(AcceptError::Coinbase);
@@ -539,8 +602,10 @@ impl ActiveMempool {
             return Err(AcceptError::Policy("txn-same-nonwitness-data-in-mempool"));
         }
         // Already parked: soft re-announce of the same orphan.
-        if self.orphanage.contains(&txid) {
-            return Err(AcceptError::Orphaned(txid));
+        if report_orphans {
+            if let Some(missing) = self.orphanage.missing_of(&txid).cloned() {
+                return Err(AcceptError::Orphaned { txid, missing });
+            }
         }
 
         // Finding 011: duplicate inputs before any value sum (phantom fee).
@@ -568,10 +633,7 @@ impl ActiveMempool {
                     .ok_or(AcceptError::Durable("parent body missing".into()))?;
                 match parent_tx.output.get(op.vout as usize).cloned() {
                     Some(o) => (o, None),
-                    None => {
-                        missing_parents.insert(op.txid);
-                        continue;
-                    }
+                    None => return Err(AcceptError::MissingPrevout(op)),
                 }
             } else if let Some(coin) = utxos.get_coin(&op) {
                 // Confirmed unspent only — spent/missing create → None (finding 010).
@@ -587,10 +649,21 @@ impl ActiveMempool {
         let utxo_us = t_utxo.elapsed().as_micros() as u64;
 
         if !missing_parents.is_empty() {
-            if park_orphans {
-                return Err(AcceptError::Orphaned(txid));
+            if let Some(op) = first_missing_outpoint(tx, &missing_parents, |op| {
+                self.recent_invalid.contains(&op.txid)
+            }) {
+                return Err(AcceptError::MissingPrevout(op));
             }
-            return Err(AcceptError::MissingPrevout(tx.input[0].previous_output));
+            if report_orphans {
+                return Err(AcceptError::Orphaned {
+                    txid,
+                    missing: missing_parents,
+                });
+            }
+            return Err(AcceptError::MissingPrevout(
+                first_missing_outpoint(tx, &missing_parents, |_| true)
+                    .expect("missing_parents is built from tx.input"),
+            ));
         }
 
         check_mempool_structural(tx, &chain_coins, tip)?;
@@ -609,7 +682,8 @@ impl ActiveMempool {
         let weight = tx.weight().to_wu();
         let admit_fee = (i128::from(fee_sat).saturating_add(i128::from(fee_delta))).max(0) as u64;
 
-        match policy::check_libre_admission_at(tx, admit_fee, weight, self.min_relay_sat_kvb) {
+        let min_relay = min_relay.unwrap_or(self.min_relay_sat_kvb);
+        match policy::check_libre_admission_at(tx, admit_fee, weight, min_relay) {
             PolicyResult::Standard => {}
             PolicyResult::NonStandard(s) => return Err(AcceptError::Policy(s)),
         }
@@ -624,29 +698,23 @@ impl ActiveMempool {
         })
     }
 
-    /// Park `tx` in the orphanage (write-lock caller). Graph-only: any input
-    /// not created in-mempool is a missing parent (no chain UTXO lookup).
-    pub fn park_orphan(&mut self, tx: &Transaction) -> AcceptError {
+    /// Park `tx` waiting on `missing` parent txids (from [`prepare_admit`]).
+    pub fn park_orphan(&mut self, tx: &Transaction, missing: BTreeSet<Txid>) -> AcceptError {
         let txid = tx.compute_txid();
         if self.graph.get(&txid).is_some() {
             return AcceptError::Duplicate(txid);
         }
-        if self.orphanage.contains(&txid) {
-            return AcceptError::Orphaned(txid);
-        }
-        let mut missing = BTreeSet::new();
-        for inp in &tx.input {
-            let op = inp.previous_output;
-            if self.graph.creator(&op).is_some() {
-                continue;
-            }
-            missing.insert(op.txid);
+        if let Some(parked) = self.orphanage.missing_of(&txid).cloned() {
+            return AcceptError::Orphaned {
+                txid,
+                missing: parked,
+            };
         }
         if missing.is_empty() {
             return AcceptError::MissingPrevout(tx.input[0].previous_output);
         }
-        if self.orphanage.insert(tx.clone(), missing) {
-            AcceptError::Orphaned(txid)
+        if self.orphanage.insert(tx.clone(), missing.clone()) {
+            AcceptError::Orphaned { txid, missing }
         } else {
             AcceptError::MissingPrevout(tx.input[0].previous_output)
         }
@@ -676,7 +744,8 @@ impl ActiveMempool {
 
         let mut replaced_scripthashes: Vec<[u8; 32]> = Vec::new();
         for c in &conflict_set {
-            if let Some(old_tx) = self.bodies.get(c) {
+            if let Some(old_tx) = self.bodies.get(c).cloned() {
+                self.note_extra(&old_tx);
                 for o in &old_tx.output {
                     replaced_scripthashes
                         .push(Self::electrum_scripthash(o.script_pubkey.as_bytes()));
@@ -768,7 +837,12 @@ impl ActiveMempool {
             return Err(AcceptError::Policy("txn-same-nonwitness-data-in-mempool"));
         }
         if self.orphanage.contains(&txid) {
-            return Err(AcceptError::Orphaned(txid));
+            let missing = self
+                .orphanage
+                .missing_of(&txid)
+                .cloned()
+                .unwrap_or_default();
+            return Err(AcceptError::Orphaned { txid, missing });
         }
 
         let scan = self.scan_conflicts_and_parents(tx)?;
@@ -839,34 +913,16 @@ impl ActiveMempool {
         Ok((conflict_set, fee_sat, weight))
     }
 
-    /// Full prepare → script → commit without resetting stage timers (orphan promote).
-    fn accept_tx_inner(
-        &mut self,
-        tx: &Transaction,
-        utxos: &impl UtxoProvider,
-        tip: ChainTipCtx,
-    ) -> Result<AcceptResult, AcceptError> {
-        let prep = self.prepare_admit(tx, utxos, tip, 0, true)?;
-        let t_script = Instant::now();
-        let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
-        self.last_accept_stages.script_us = self
-            .last_accept_stages
-            .script_us
-            .saturating_add(t_script.elapsed().as_micros() as u64);
-        script_res?;
-        self.commit_after_script(tx, prep)
-    }
-
     /// Electrum scripthash = SHA256(scriptPubKey) (same as store `script_hash`).
     fn electrum_scripthash(script: &[u8]) -> [u8; 32] {
         use bitcoin::hashes::{sha256, Hash};
         *sha256::Hash::hash(script).as_byte_array()
     }
 
-    /// Re-try orphans that listed `parent` as missing (recursive via accept_tx_inner).
+    /// Re-try orphans that listed `parent` as missing (recursive via accept_tx_with).
     ///
-    /// Uses inner (not top-level accept_tx) so stage timers accumulate on the
-    /// parent admit that unlocked the orphan chain. Public for hub staged commit.
+    /// Uses `accept_tx_with` (not top-level accept_tx) so stage timers accumulate
+    /// on the parent admit that unlocked the orphan chain. Public for hub staged commit.
     pub fn promote_orphans_of(
         &mut self,
         parent: Txid,
@@ -875,7 +931,7 @@ impl ActiveMempool {
     ) {
         let children = self.orphanage.take_children_of(&parent);
         for child in children {
-            if let Ok(r) = self.accept_tx_inner(&child, utxos, tip) {
+            if let Ok(r) = self.accept_tx_with(&child, utxos, tip, 0, true, None) {
                 self.promote_orphans_of(r.txid, utxos, tip);
             }
         }
@@ -1017,8 +1073,8 @@ impl ActiveMempool {
         self.last_accept_stages = AcceptStageUs::default();
         let mut accepted: Vec<AcceptResult> = Vec::with_capacity(txs.len());
         for tx in txs {
-            // Inner + promote (not top-level accept_tx) so stages are not reset per member.
-            match self.accept_tx_inner(tx, utxos, tip) {
+            // accept_tx_with + promote (not top-level accept_tx) so stages are not reset per member.
+            match self.accept_tx_with(tx, utxos, tip, 0, true, None) {
                 Ok(r) => {
                     self.promote_orphans_of(r.txid, utxos, tip);
                     accepted.push(r);
@@ -1131,6 +1187,128 @@ impl ActiveMempool {
 
     pub fn orphan_count(&self) -> usize {
         self.orphanage.len()
+    }
+
+    pub fn extra_compact_txs(&self) -> impl Iterator<Item = &Transaction> {
+        self.extra_compact.iter().map(|(_, tx)| tx)
+    }
+
+    pub fn accept_failure_record(tx: &Transaction, e: &AcceptError) -> Option<AcceptFailureRecord> {
+        match e {
+            AcceptError::InputsDuplicate | AcceptError::Coinbase => {
+                Some(AcceptFailureRecord::Invalid(tx.compute_txid()))
+            }
+            AcceptError::Script(_) if !tx_has_witness(tx) => {
+                Some(AcceptFailureRecord::Invalid(tx.compute_txid()))
+            }
+            AcceptError::Policy("min relay fee") => Some(AcceptFailureRecord::Extra),
+            _ => None,
+        }
+    }
+
+    pub fn apply_accept_failure(&mut self, tx: &Transaction, rec: AcceptFailureRecord) {
+        match rec {
+            AcceptFailureRecord::Invalid(txid) => self.note_invalid(txid),
+            AcceptFailureRecord::Extra => self.note_extra(tx),
+        }
+    }
+
+    pub fn note_accept_failure(&mut self, tx: &Transaction, e: &AcceptError) {
+        if let Some(rec) = Self::accept_failure_record(tx, e) {
+            self.apply_accept_failure(tx, rec);
+        }
+    }
+
+    fn note_invalid(&mut self, txid: Txid) {
+        if self.recent_invalid.len() >= RECENT_INVALID_CAP {
+            self.recent_invalid.clear();
+        }
+        self.recent_invalid.insert(txid);
+    }
+
+    fn note_extra(&mut self, tx: &Transaction) {
+        let txid = tx.compute_txid();
+        self.extra_compact.retain(|(id, _)| *id != txid);
+        if self.extra_compact.len() >= EXTRA_COMPACT_CAP {
+            self.extra_compact.pop_front();
+        }
+        self.extra_compact.push_back((txid, tx.clone()));
+    }
+
+    fn extra_by_txid(&self, txid: Txid) -> Option<&Transaction> {
+        self.extra_compact
+            .iter()
+            .find(|(id, _)| *id == txid)
+            .map(|(_, tx)| tx)
+    }
+
+    /// 1p1c parent body from extra-compact. Parent inputs must be confirmed.
+    pub fn try_one_parent_package(
+        &self,
+        child: &Transaction,
+        missing: &BTreeSet<Txid>,
+        utxos: &impl UtxoProvider,
+    ) -> Option<Transaction> {
+        if missing.len() != 1 {
+            return None;
+        }
+        let pid = *missing.iter().next()?;
+        if self.recent_invalid.contains(&pid) {
+            return None;
+        }
+        let parent = self.extra_by_txid(pid)?.clone();
+        if !self.package_pays_min_relay(&parent, child, utxos) {
+            return None;
+        }
+        Some(parent)
+    }
+
+    /// Combined parent+child fee must meet min-relay. Parent inputs must be
+    /// confirmed (no unconfirmed grandparent — same limit as Core 1p1c).
+    fn package_pays_min_relay(
+        &self,
+        parent: &Transaction,
+        child: &Transaction,
+        utxos: &impl UtxoProvider,
+    ) -> bool {
+        let pid = parent.compute_txid();
+        let mut p_in = 0u64;
+        for inp in &parent.input {
+            let Some(coin) = utxos.get_coin(&inp.previous_output) else {
+                return false;
+            };
+            p_in = p_in.saturating_add(coin.txout.value.to_sat());
+        }
+        let p_out: u64 = parent.output.iter().map(|o| o.value.to_sat()).sum();
+        if p_out > p_in {
+            return false;
+        }
+        let mut c_in = 0u64;
+        for inp in &child.input {
+            let op = inp.previous_output;
+            let val = if op.txid == pid {
+                parent
+                    .output
+                    .get(op.vout as usize)
+                    .map(|o| o.value.to_sat())
+            } else {
+                utxos.get_coin(&op).map(|c| c.txout.value.to_sat())
+            };
+            let Some(v) = val else {
+                return false;
+            };
+            c_in = c_in.saturating_add(v);
+        }
+        let c_out: u64 = child.output.iter().map(|o| o.value.to_sat()).sum();
+        if c_out > c_in {
+            return false;
+        }
+        let fee = (p_in - p_out).saturating_add(c_in - c_out);
+        let weight = parent
+            .weight()
+            .to_wu()
+            .saturating_add(child.weight().to_wu());
+        policy::meets_min_relay_fee_at(fee, weight, self.min_relay_sat_kvb)
     }
 
     /// Re-accept non-coinbase txs after a reorg disconnect (best-effort).
@@ -1279,7 +1457,7 @@ mod tests {
     use bitcoin::hashes::Hash;
     use bitcoin::transaction::Version;
     use bitcoin::{Amount, ScriptBuf, Sequence, TxIn, Witness};
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_dir() -> std::path::PathBuf {
@@ -1613,7 +1791,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                AcceptError::Orphaned(_) | AcceptError::MissingPrevout(_)
+                AcceptError::Orphaned { .. } | AcceptError::MissingPrevout(_)
             ),
             "got {err}"
         );
@@ -1665,7 +1843,7 @@ mod tests {
         };
         let mp = ActiveMempool::open_or_create(&dir).unwrap();
         let err = mp
-            .prepare_admit(&tx, &utxos, TIP_OK, 0, false)
+            .prepare_admit(&tx, &utxos, TIP_OK, 0, false, None)
             .expect_err("overflowing output sum");
         assert!(
             matches!(err, AcceptError::Policy("bad-txns-txouttotal-toolarge")),
@@ -2082,7 +2260,9 @@ mod tests {
         let low_id = low.compute_txid();
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
         mp.accept_tx(&low, &utxos, TIP_OK).unwrap();
-        let prep = mp.prepare_admit(&high, &utxos, TIP_OK, 0, true).unwrap();
+        let prep = mp
+            .prepare_admit(&high, &utxos, TIP_OK, 0, true, None)
+            .unwrap();
         let r = mp.evaluate_after_script(&high, prep).expect("preview");
         assert!(r.replaced.contains(&low_id));
         assert!(mp.graph.contains(&low_id));
@@ -2096,7 +2276,9 @@ mod tests {
         let (op, _, utxos) = chain_utxo(100_000);
         let tx = spend_tx(op, 99_000);
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
-        let prep = mp.prepare_admit(&tx, &utxos, TIP_OK, 0, true).unwrap();
+        let prep = mp
+            .prepare_admit(&tx, &utxos, TIP_OK, 0, true, None)
+            .unwrap();
         mp.commit_after_script(&tx, prep)
             .expect("commit uses prep.chain_coins");
         assert!(mp.graph.contains(&tx.compute_txid()));
@@ -2114,8 +2296,10 @@ mod tests {
             1,
         );
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
-        let e = mp.park_orphan(&tx);
-        assert!(matches!(e, AcceptError::Orphaned(_)), "{e}");
+        let mut missing = BTreeSet::new();
+        missing.insert(Txid::from_byte_array([9u8; 32]));
+        let e = mp.park_orphan(&tx, missing);
+        assert!(matches!(e, AcceptError::Orphaned { .. }), "{e}");
         assert_eq!(mp.orphan_count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2327,7 +2511,10 @@ mod tests {
                 txid: Txid::from_byte_array([1; 32]),
                 vout: 0,
             }),
-            AcceptError::Orphaned(Txid::from_byte_array([4; 32])),
+            AcceptError::Orphaned {
+                txid: Txid::from_byte_array([4; 32]),
+                missing: BTreeSet::new(),
+            },
             AcceptError::Duplicate(Txid::from_byte_array([2; 32])),
             AcceptError::ClusterTooLarge {
                 count: 3,
@@ -2425,7 +2612,7 @@ mod tests {
         let missing_id = missing.compute_txid();
         assert!(matches!(
             mp.accept_tx(&missing, &empty, TIP_OK),
-            Err(AcceptError::Orphaned(_))
+            Err(AcceptError::Orphaned { .. })
         ));
         assert!(mp.orphanage.contains(&missing_id));
         assert_eq!(mp.orphan_count(), 1);
@@ -2514,7 +2701,7 @@ mod tests {
 
         assert!(matches!(
             mp.accept_tx(&child, &utxos, TIP_OK),
-            Err(AcceptError::Orphaned(_))
+            Err(AcceptError::Orphaned { .. })
         ));
         assert_eq!(mp.orphan_count(), 1);
         assert!(!mp.graph.contains(&child_id));
@@ -2527,6 +2714,198 @@ mod tests {
         );
         assert_eq!(mp.orphan_count(), 0);
         assert_eq!(mp.live_count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Known mempool parent with an out-of-range vout is a hard reject, not an
+    /// orphan that waits forever (quality Q-58).
+    #[test]
+    fn known_parent_oob_vout_does_not_park() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = spend_tx(op, 99_000);
+        mp.accept_tx(&parent, &utxos, TIP_OK).expect("parent");
+        let child = spend_tx(
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 9,
+            },
+            1_000,
+        );
+        let err = mp.accept_tx(&child, &utxos, TIP_OK).expect_err("oob vout");
+        assert!(matches!(err, AcceptError::MissingPrevout(_)), "got {err}");
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A parent rejected as invalid must not leave its children parked forever.
+    #[test]
+    fn child_of_recent_invalid_parent_does_not_park() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let mut parent = spend_tx(op, 99_000);
+        parent.input.push(parent.input[0].clone());
+        let parent_id = parent.compute_txid();
+        assert!(matches!(
+            mp.accept_tx(&parent, &utxos, TIP_OK),
+            Err(AcceptError::InputsDuplicate)
+        ));
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            1_000,
+        );
+        let err = mp
+            .accept_tx(&child, &utxos, TIP_OK)
+            .expect_err("invalid parent");
+        assert!(matches!(err, AcceptError::MissingPrevout(_)), "got {err}");
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Parent below min-relay + paying child: 1p1c policy finds the parent body.
+    #[test]
+    fn one_parent_one_child_admits_below_minrelay_parent() {
+        let dir = tmp_dir();
+        let (op, txout, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.set_min_relay_sat_kvb(50_000);
+        let parent = spend_tx(op, txout.value.to_sat() - 200);
+        let parent_id = parent.compute_txid();
+        assert!(
+            matches!(
+                mp.accept_tx(&parent, &utxos, TIP_OK),
+                Err(AcceptError::Policy("min relay fee"))
+            ),
+            "parent must fail min-relay alone"
+        );
+        assert_eq!(mp.live_count(), 0);
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            1_000,
+        );
+        let missing = BTreeSet::from([parent_id]);
+        let got = mp
+            .try_one_parent_package(&child, &missing, &utxos)
+            .expect("paying child must select the extra-compact parent");
+        assert_eq!(got.compute_txid(), parent_id);
+        assert_eq!(mp.live_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 1-sat sibling of a below-min-relay parent is not a 1p1c package.
+    #[test]
+    fn one_sat_sibling_is_not_a_one_parent_package() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.set_min_relay_sat_kvb(50_000);
+        let parent = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: op,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(49_900),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+                TxOut {
+                    value: Amount::from_sat(49_900),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+            ],
+        };
+        let parent_id = parent.compute_txid();
+        assert!(matches!(
+            mp.accept_tx(&parent, &utxos, TIP_OK),
+            Err(AcceptError::Policy("min relay fee"))
+        ));
+        let missing = BTreeSet::from([parent_id]);
+        let sib = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            49_899,
+        );
+        assert!(
+            mp.try_one_parent_package(&sib, &missing, &utxos).is_none(),
+            "1-sat sibling must not be a 1p1c package"
+        );
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 1,
+            },
+            1_000,
+        );
+        let got = mp
+            .try_one_parent_package(&child, &missing, &utxos)
+            .expect("paying child");
+        assert_eq!(got.compute_txid(), parent_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Child that also spends a confirmed coin is still 1p1c-eligible.
+    #[test]
+    fn one_parent_one_child_with_confirmed_input() {
+        let dir = tmp_dir();
+        let (op, txout, mut utxos) = chain_utxo(100_000);
+        let op2 = OutPoint {
+            txid: Txid::from_byte_array([0xac; 32]),
+            vout: 0,
+        };
+        utxos.map.insert(op2, coin(txout.clone()));
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.set_min_relay_sat_kvb(50_000);
+        let parent = spend_tx(op, txout.value.to_sat() - 200);
+        let parent_id = parent.compute_txid();
+        assert!(matches!(
+            mp.accept_tx(&parent, &utxos, TIP_OK),
+            Err(AcceptError::Policy("min relay fee"))
+        ));
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_id,
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: op2,
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let missing = BTreeSet::from([parent_id]);
+        let got = mp
+            .try_one_parent_package(&child, &missing, &utxos)
+            .expect("confirmed extra input must not block 1p1c");
+        assert_eq!(got.compute_txid(), parent_id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2548,14 +2927,11 @@ mod tests {
         let child_id = child.compute_txid();
 
         let err = mp
-            .prepare_admit(&child, &utxos, TIP_OK, 0, false)
+            .prepare_admit(&child, &utxos, TIP_OK, 0, false, None)
             .unwrap_err();
         assert!(
-            matches!(
-                err,
-                AcceptError::MissingPrevout(_) | AcceptError::Orphaned(_)
-            ),
-            "{err:?}"
+            matches!(err, AcceptError::MissingPrevout(_)),
+            "dry-run missing inputs must be MissingPrevout, got {err}"
         );
         assert_eq!(mp.orphan_count(), 0);
 
@@ -2671,7 +3047,7 @@ mod tests {
         let second = spend_tx(op, 99_000);
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
         let prep = mp
-            .prepare_admit(&second, &utxos, TIP_OK, 0, false)
+            .prepare_admit(&second, &utxos, TIP_OK, 0, false, None)
             .expect("prepare while utxo free");
         mp.accept_tx(&first, &utxos, TIP_OK).unwrap();
         let err = mp

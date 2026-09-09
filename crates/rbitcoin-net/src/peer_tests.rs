@@ -3139,6 +3139,336 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
     });
 }
 
+#[test]
+fn tx_accept_log_parks_orphans_silences_duplicates() {
+    use bitcoin::hashes::Hash;
+    let txid = bitcoin::Txid::from_byte_array([1u8; 32]);
+    assert_eq!(
+        tx_accept_log(&rbitcoin_mempool::AcceptError::Duplicate(txid)),
+        TxAcceptLog::Silent
+    );
+    let e = rbitcoin_mempool::AcceptError::Orphaned {
+        txid,
+        missing: Default::default(),
+    };
+    assert!(matches!(tx_accept_log(&e), TxAcceptLog::Park(m) if m.is_empty()));
+    assert_eq!(
+        tx_accept_log(&rbitcoin_mempool::AcceptError::Policy("min relay fee")),
+        TxAcceptLog::Reject
+    );
+}
+
+/// Parked orphans are not hard rejects: no INFO "was not accepted" and no
+/// `txrelay: reject` (Core logs missing-inputs at debug mempoolrej only).
+#[test]
+fn parked_orphan_tx_is_not_logged_as_reject() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, Network, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use tokio::runtime::Builder;
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        use bitcoin::p2p::message::RawNetworkMessage;
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        let payload = full[24..].to_vec();
+        FramedMessage {
+            magic,
+            command,
+            payload,
+        }
+    }
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (dir, q) = tmp_store("orphan-log");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        mp.set_relay_enabled(true);
+        assert!(hub.attach_mempool(mp).is_ok());
+
+        let orphan = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x11; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let mut wants_headers = false;
+        let mut wtxid = false;
+        let mut send_cmpct = false;
+        let mut cmpct_ver = 2u32;
+        let mut pending_headers = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut pending_cmpct = HashMap::new();
+        let mut from_peer = HashMap::new();
+        let mut ban = 0u32;
+        rbitcoin_log::capture_logs(true);
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Tx(orphan.clone())),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut HashSet::new(),
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert_eq!(hub.mempool().unwrap().orphan_count(), 1);
+        assert!(
+            !logs
+                .iter()
+                .any(|(_, m)| m.contains("was not accepted") || m.contains("txrelay: reject")),
+            "parked orphan must not log as reject, got {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|(l, m)| *l == rbitcoin_log::Level::Debug && m.contains("txrelay: park")),
+            "expected debug park line, got {logs:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+/// INV of an already-parked orphan must not re-GETDATA it (AlreadyHave includes
+/// the orphanage, matching Core TxDownloadManager).
+#[test]
+fn inv_of_parked_orphan_does_not_getdata() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, Network, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use tokio::runtime::Builder;
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        use bitcoin::p2p::message::RawNetworkMessage;
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        let payload = full[24..].to_vec();
+        FramedMessage {
+            magic,
+            command,
+            payload,
+        }
+    }
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (dir, q) = tmp_store("orphan-inv");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        mp.set_relay_enabled(true);
+        assert!(hub.attach_mempool(mp).is_ok());
+
+        let orphan = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x22; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let txid = orphan.compute_txid();
+        let wtxid = orphan.compute_wtxid();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut wants_headers = false;
+        let mut wtxid_relay = true;
+        let mut send_cmpct = false;
+        let mut cmpct_ver = 2u32;
+        let mut pending_headers = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut pending_cmpct = HashMap::new();
+        let mut from_peer = HashMap::new();
+        let mut ban = 0u32;
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Tx(orphan)),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid_relay,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut HashSet::new(),
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hub.mempool().unwrap().orphan_count(), 1);
+        while out_rx.try_recv().is_ok() {}
+
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Inv(vec![
+                Inventory::WitnessTransaction(txid),
+                Inventory::WTx(wtxid),
+            ])),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid_relay,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut HashSet::new(),
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out_rx.try_recv().is_err(),
+            "parked orphan INV must not GetData"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+/// After parking a child, GETDATA unique missing parent txids from this peer
+/// (Core TxDownloadManager unique_parents).
+#[test]
+fn parked_orphan_getdatas_missing_parent() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, Network, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use tokio::runtime::Builder;
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        use bitcoin::p2p::message::RawNetworkMessage;
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        let payload = full[24..].to_vec();
+        FramedMessage {
+            magic,
+            command,
+            payload,
+        }
+    }
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (dir, q) = tmp_store("orphan-parent-gd");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        mp.set_relay_enabled(true);
+        assert!(hub.attach_mempool(mp).is_ok());
+
+        let parent_txid = bitcoin::Txid::from_byte_array([0x33; 32]);
+        let orphan = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: parent_txid,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut wants_headers = false;
+        let mut wtxid_relay = false;
+        let mut send_cmpct = false;
+        let mut cmpct_ver = 2u32;
+        let mut pending_headers = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut pending_cmpct = HashMap::new();
+        let mut from_peer = HashMap::new();
+        let mut ban = 0u32;
+        handle_peer_frame_for_test(
+            frame_for(NetworkMessage::Tx(orphan)),
+            &hub,
+            &out_tx,
+            &mut wants_headers,
+            &mut wtxid_relay,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut HashSet::new(),
+            &mut ban,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hub.mempool().unwrap().orphan_count(), 1);
+        match out_rx.try_recv().expect("parent GetData").expect_msg() {
+            NetworkMessage::GetData(v) => {
+                assert!(
+                    v.contains(&Inventory::WitnessTransaction(parent_txid)),
+                    "expected parent getdata, got {v:?}"
+                );
+            }
+            other => panic!("expected GetData, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
 /// GetData serves a mempool tx only after we INV'd it, or if it re-entered
 /// from a disconnected block (`mempool_reorg.py` test_reorg_relay).
 #[test]

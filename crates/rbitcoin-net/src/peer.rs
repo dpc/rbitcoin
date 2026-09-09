@@ -25,7 +25,7 @@ use bitcoin::p2p::{Magic, ServiceFlags, PROTOCOL_VERSION};
 use bitcoin::{Block, BlockHash, Transaction};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -2941,9 +2941,44 @@ async fn on_blocktxn(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxAcceptLog<'a> {
+    Silent,
+    Park(&'a BTreeSet<bitcoin::Txid>),
+    Reject,
+}
+
+fn tx_accept_log(e: &rbitcoin_mempool::AcceptError) -> TxAcceptLog<'_> {
+    match e {
+        rbitcoin_mempool::AcceptError::Duplicate(_) => TxAcceptLog::Silent,
+        rbitcoin_mempool::AcceptError::Orphaned { missing, .. } => TxAcceptLog::Park(missing),
+        _ => TxAcceptLog::Reject,
+    }
+}
+
+fn queue_orphan_parent_getdata(
+    mp: &crate::tx_relay::MempoolHub,
+    missing: &BTreeSet<bitcoin::Txid>,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+) -> Result<(), NetError> {
+    let want = mp.take_parent_getdata(missing);
+    if want.is_empty() {
+        return Ok(());
+    }
+    mp.note_getdata_tx(want.len() as u64);
+    queue_out(
+        out_tx,
+        NetworkMessage::GetData(
+            want.into_iter()
+                .map(Inventory::WitnessTransaction)
+                .collect(),
+        ),
+    )
+}
+
 async fn on_tx(
     hub: &ChainHub,
-    _out_tx: &mpsc::UnboundedSender<PeerOut>,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
     follow: &mut PeerFollowState,
     session: Option<&crate::peers::LivePeer>,
     tx: &Transaction,
@@ -2986,15 +3021,21 @@ async fn on_tx(
                         }
                     }
                 }
-                Err(rbitcoin_mempool::AcceptError::Duplicate(_)) => {}
-                Err(e) => {
-                    let id = session.map(|s| s.id).unwrap_or(0);
-                    rbitcoin_log::info!(
-                        "{txid} (wtxid={}) from peer={id} was not accepted: {e}",
-                        tx.compute_wtxid()
-                    );
-                    rbitcoin_log::debug!("txrelay: reject {txid}: {e}");
-                }
+                Err(e) => match tx_accept_log(&e) {
+                    TxAcceptLog::Silent => {}
+                    TxAcceptLog::Park(missing) => {
+                        rbitcoin_log::debug!("txrelay: park {txid} orphans={}", mp.orphan_count());
+                        queue_orphan_parent_getdata(mp, missing, out_tx)?;
+                    }
+                    TxAcceptLog::Reject => {
+                        let id = session.map(|s| s.id).unwrap_or(0);
+                        rbitcoin_log::info!(
+                            "{txid} (wtxid={}) from peer={id} was not accepted: {e}",
+                            tx.compute_wtxid()
+                        );
+                        rbitcoin_log::debug!("txrelay: reject {txid}: {e}");
+                    }
+                },
             }
         }
     }
