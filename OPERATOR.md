@@ -31,6 +31,113 @@ Linux is always musl static. Compiling the tree as a contributor (rustup, no
 Nix, macOS/Windows): [`CONTRIBUTING.md`](./CONTRIBUTING.md). See
 [`docs/reproducible-builds.md`](./docs/reproducible-builds.md).
 
+### NixOS service
+
+The flake exports `nixosModules.default` and `nixosModules.rbitcoin`. Import
+either module into a NixOS configuration:
+
+```nix
+{
+  inputs.rbitcoin.url = "github:reardencode/rbitcoin";
+
+  outputs =
+    {
+      nixpkgs,
+      rbitcoin,
+      ...
+    }:
+    {
+      nixosConfigurations.example = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          rbitcoin.nixosModules.default
+          {
+            services.rbitcoin = {
+              enable = true;
+              dataDir = "/var/lib/rbitcoin-mainnet";
+            };
+          }
+        ];
+      };
+    };
+}
+```
+
+The service defaults to mainnet, uses the flake's static musl operator package,
+and leaves the firewall closed. It creates the configured data directory for
+the `rbitcoin` service account without changing ownership below that directory.
+Importing the module does not replace or overlay the NixOS system's `nixpkgs`.
+Use the store-native glibc build instead when wanted:
+
+```nix
+({ pkgs, ... }: {
+  services.rbitcoin.package =
+    rbitcoin.packages.${pkgs.stdenv.hostPlatform.system}.rbitcoin-glibc;
+})
+```
+
+This selects the glibc build from rbitcoin's pinned `nixpkgs`; it does not
+rebuild the package against the NixOS system's `nixpkgs`.
+
+RPC, Electrum, and Esplora listeners are disabled by default. Their module
+options bind to loopback unless changed. Enabling Electrum or Esplora also
+enables the required scripthash index. `p2p.openFirewall`,
+`electrum.openFirewall`, and `esplora.openFirewall` are separate opt-ins.
+JSON-RPC has no firewall option; expose it only through an explicitly managed
+firewall or tunnel.
+
+The daemon does not terminate TLS. Keep its application listeners on loopback
+and compose them with a proxy. This example serves Esplora and RPC over HTTPS,
+and Electrum as TLS-wrapped TCP on port 50002, using one ACME certificate:
+
+```nix
+{
+  services.rbitcoin = {
+    rpc.enable = true;
+    electrum.enable = true;
+    esplora.enable = true;
+  };
+
+  security.acme = {
+    acceptTerms = true;
+    defaults.email = "operator@example.com";
+  };
+
+  services.nginx = {
+    enable = true;
+    recommendedProxySettings = true;
+    virtualHosts."node.example.com" = {
+      enableACME = true;
+      forceSSL = true;
+      locations."/" = {
+        proxyPass = "http://127.0.0.1:3000";
+        proxyWebsockets = true;
+      };
+      locations."/rpc/".proxyPass = "http://127.0.0.1:8332/";
+    };
+    streamConfig = ''
+      server {
+        listen 50002 ssl;
+        proxy_pass 127.0.0.1:50001;
+        ssl_certificate /var/lib/acme/node.example.com/fullchain.pem;
+        ssl_certificate_key /var/lib/acme/node.example.com/key.pem;
+      }
+    '';
+  };
+
+  networking.firewall.allowedTCPPorts = [ 80 443 50002 ];
+}
+```
+
+Replace the hostname and email, then apply authentication and network policy to
+RPC for your deployment. nginx `virtualHosts` proxy HTTP; `streamConfig`
+proxies the Electrum TCP protocol.
+
+Use `coldDataDir` to place the large `inwit` store on another volume. The
+service creates the directory but does not mount or size the volume. Use
+`environment` for documented advanced `RBITCOIN_*` settings and `extraArgs`
+for daemon flags not represented by module options.
+
 **GitHub Release** (`v*.*.*` tags) is the operator snapshot: Linux musl +
 Windows CRT-static PE + Darwin aarch64 binaries + SHA256SUMS. Cut, merge,
 tag, and `vX.Y.x` / `.99` follow-up: [`docs/releases.md`](./docs/releases.md).
