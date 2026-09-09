@@ -64,8 +64,6 @@ pub struct RpcContext {
     pub chain: Option<Arc<rbitcoin_net::ChainHub>>,
     /// Shared addrman for `addpeeraddress` / seednode (optional).
     pub addrman: Option<Arc<std::sync::Mutex<rbitcoin_net::AddrMan>>>,
-    /// Path to durable peers file (with [`Self::addrman`]).
-    pub peers_path: Option<std::path::PathBuf>,
     /// Core `getrpcinfo.logpath` (`{datadir}/debug.log`).
     pub logpath: String,
     /// Core `-permitbaremultisig` (default true). `getmempoolinfo`.
@@ -170,7 +168,6 @@ pub const ERR_INVALID_PARAMETER: i64 = -8;
 pub const ERR_VERIFY_REJECTED: i64 = -26;
 pub const ERR_INVALID_PARAMS: i64 = -32602;
 pub const ERR_METHOD_NOT_FOUND: i64 = -32601;
-pub const ERR_INVALID_REQUEST: i64 = -32600;
 
 /// JSON-RPC `params`: positional array or Core named object.
 #[derive(Clone, Debug, Default)]
@@ -751,37 +748,6 @@ pub(crate) fn json_type_name(v: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
-    }
-}
-
-/// Build a JSON-RPC response object for a single request.
-pub fn handle_request(ctx: &RpcContext, body: &Value) -> Value {
-    let id = body.get("id").cloned().unwrap_or(Value::Null);
-    let method = match body.get("method").and_then(|m| m.as_str()) {
-        Some(m) => m,
-        None => {
-            return json!({
-                "result": null,
-                "error": rpc_error(ERR_INVALID_REQUEST, "Missing method"),
-                "id": id,
-            });
-        }
-    };
-    let params = match body.get("params") {
-        None | Some(Value::Null) => RpcParams::empty(),
-        Some(Value::Array(a)) => RpcParams::positional(a.clone()),
-        Some(Value::Object(m)) => RpcParams::named(m.clone()),
-        Some(_) => {
-            return json!({
-                "result": null,
-                "error": rpc_error(ERR_INVALID_PARAMS, "params must be array or object"),
-                "id": id,
-            });
-        }
-    };
-    match dispatch(ctx, method, params) {
-        Ok(result) => json!({ "result": result, "error": null, "id": id }),
-        Err(error) => json!({ "result": null, "error": error, "id": id }),
     }
 }
 

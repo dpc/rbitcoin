@@ -1,0 +1,12 @@
+id: crate-root-dropped-pub
+language: rust
+severity: error
+message: Dropped X-04 crate-root name must not be `pub use`d (CONTRIBUTING principle 11).
+note: Store keep-list compile pin is crates/rbitcoin-store/tests/public_surface.rs. This denylist is the fail-closed half.
+rule:
+  kind: use_declaration
+  regex: "(?s)\\bpub\\s+use\\b[\\s\\S]*\\b(AddressHead|SegmentedTxHead|LiveShardTable|decode_packed_tx|ScriptsPhaseHandle|NetConfig|P2PHandle|UringSession|SortedHeadWriter)\\b"
+ignores:
+  - "**/*tests*.rs"
+  - "**/tests/**"
+  - "**/benches/**"

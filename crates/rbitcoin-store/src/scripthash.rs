@@ -23,16 +23,16 @@ use crate::scripthash_layout::{
 use crate::scripthash_mphf::{self, mix_key16, MphfHead};
 use crate::scripthash_overflow::wipe_legacy_fullsize_overflow;
 use crate::scripthash_pages::{
-    sh_page_as_array, sh_page_as_array_mut, sh_page_chunk_ranges, sh_page_decode_slice_into,
-    sh_page_extent, sh_page_first_off, sh_page_init_empty, sh_page_is_last, sh_page_last_fk,
-    sh_page_next, sh_page_pack_extent_last_fks, sh_page_pack_fks, sh_page_set_extent,
-    sh_page_set_last, sh_page_set_next, sh_page_try_append, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
+    sh_page_as_array, sh_page_chunk_ranges, sh_page_decode_slice_into, sh_page_extent,
+    sh_page_first_off, sh_page_init_empty, sh_page_is_last, sh_page_last_fk, sh_page_next,
+    sh_page_pack_extent_last_fks, sh_page_pack_fks, sh_page_set_last, sh_page_set_next,
+    sh_page_try_append, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
 };
 use crate::scripthash_slabs::{
     decode_slab_payload_into, encode_slab_payload_into, slab_class_for_n_fks_with_slack,
     slab_class_for_packed_len, SH_MEGAKEY_MIN_FKS,
 };
-use crate::scripthash_sorted_head::{SortedHead, SortedHeadFilter};
+use crate::scripthash_sorted_head::SortedHead;
 use crate::sorted_run::{list_materialize_claims, list_runs};
 use bitcoin_hashes::{sha256, Hash};
 use rbitcoin_primitives::{Fk, TableKind};
@@ -479,7 +479,7 @@ fn open_sealed_sorted_ovf(dir: &Path) -> Result<Vec<SortedHead>, StoreError> {
     for id in ids {
         let p = sealed_ovf_path(dir, id);
         if file_starts_with_shsr(&p) {
-            out.push(SortedHead::open(p, SortedHeadFilter::Fuse8)?);
+            out.push(SortedHead::open(p)?);
         }
     }
     Ok(out)
@@ -1752,7 +1752,7 @@ impl ScriptHashTable {
                 "scripthash.ovf: seal path occupied by non-sorted segment",
             ));
         }
-        let sealed = SortedHead::write(&path, &recs, SortedHeadFilter::Fuse8)?;
+        let sealed = SortedHead::write(&path, &recs)?;
         self.sealed_ovf.lock().unwrap().push(sealed);
         let p = ingest_path(&self.store_dir);
         let _ = std::fs::remove_file(&p);
@@ -2623,92 +2623,6 @@ impl ScriptHashTable {
         *self.shard_alloc(shard).lock().unwrap() = state;
         Ok(bump)
     }
-}
-
-/// Shift slab/page file offsets in a packed head value by `delta`. Inline unchanged.
-pub fn remap_sh_head_value(val: &ShHeadValue, delta: u64) -> ShHeadValue {
-    match val {
-        ShHeadValue::Empty | ShHeadValue::Inline { .. } => val.clone(),
-        ShHeadValue::Slab { class, used, off } => {
-            ShHeadValue::slab(*class, *used, off.saturating_add(delta))
-        }
-        ShHeadValue::Paged {
-            first_page,
-            last_page,
-        } => ShHeadValue::paged(
-            first_page.saturating_add(delta),
-            last_page.saturating_add(delta),
-        ),
-        ShHeadValue::Extent { last_page } => ShHeadValue::extent(last_page.saturating_add(delta)),
-    }
-}
-
-/// Copy `[src_lo, src_hi)` from `src` to `dst` at `dst_lo`.
-pub fn copy_sh_body_range(
-    src: &TableFile,
-    src_lo: u64,
-    src_hi: u64,
-    dst: &TableFile,
-    dst_lo: u64,
-) -> Result<(), StoreError> {
-    if src_hi < src_lo {
-        return Err(StoreError::Corrupt("scripthash copy range inverted"));
-    }
-    let len = src_hi - src_lo;
-    let dst_end = dst_lo.saturating_add(len);
-    dst.ensure_capacity(dst_end)?;
-    if dst_end > dst.logical_len() {
-        dst.set_logical_len(dst_end)?;
-    }
-    let mut off = 0u64;
-    let mut buf = [0u8; 64 * 1024];
-    while off < len {
-        let n = ((len - off) as usize).min(buf.len());
-        src.read_at(src_lo + off, &mut buf[..n])?;
-        dst.write_at(dst_lo + off, &buf[..n])?;
-        off += n as u64;
-    }
-    Ok(())
-}
-
-/// Rewrite `next` on a copied page chain. `first_dest` is already remapped;
-/// bytes still hold local (pre-delta) `next`.
-pub fn remap_copied_page_chain(
-    body: &TableFile,
-    first_dest: u64,
-    delta: u64,
-) -> Result<(), StoreError> {
-    let mut off = first_dest;
-    while off != 0 {
-        let mut page = [0u8; SH_PAGE_SIZE];
-        body.read_at(off, &mut page)?;
-        let arr = sh_page_as_array(&page)?;
-        if sh_page_is_last(arr)? {
-            let first = sh_page_first_off(arr)?;
-            let dest_first = if first == 0 {
-                first_dest
-            } else {
-                first.saturating_add(delta)
-            };
-            let arr = sh_page_as_array_mut(&mut page)?;
-            sh_page_set_last(arr, dest_first)?;
-            if let Some((base, n)) = sh_page_extent(arr)? {
-                sh_page_set_extent(arr, base.saturating_add(delta), n)?;
-            }
-            body.write_at(off, &page)?;
-            break;
-        }
-        let local_next = sh_page_next(arr)?;
-        if local_next == 0 {
-            break;
-        }
-        let dest_next = local_next.saturating_add(delta);
-        let arr = sh_page_as_array_mut(&mut page)?;
-        sh_page_set_next(arr, dest_next)?;
-        body.write_at(off, &page)?;
-        off = dest_next;
-    }
-    Ok(())
 }
 
 /// Live-OA bulk writer for cold SH materialize.

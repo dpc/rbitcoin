@@ -281,16 +281,6 @@ impl VarTable {
         self.published_meta().1
     }
 
-    /// Inspect record bytes without copying into a `Vec`.
-    pub fn with_raw<R>(
-        &self,
-        fk: Fk,
-        f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
-    ) -> Result<R, StoreError> {
-        let (off, len) = self.record_range(fk)?;
-        self.with_bytes_at(off, len, f)
-    }
-
     /// Inspect body bytes at a known absolute range (no idx read).
     pub fn with_bytes_at<R>(
         &self,
@@ -440,12 +430,6 @@ pub(crate) fn write_prepared_bodies_one_wave(
 }
 
 impl VarTable {
-    /// Next 8-aligned body start for a following append.
-    pub fn next_aligned_start(&self) -> u64 {
-        let start = self.body.logical_len().max(FILE_HEADER_LEN as u64);
-        next_aligned_tx_start(start)
-    }
-
     /// Pre-grow body (+ idx tail) capacity so a following mega `put_batch` does not
     /// remap mid-write.
     pub fn reserve_append(&self, body_bytes: u64, n_records: u64) -> Result<(), StoreError> {
@@ -453,43 +437,6 @@ impl VarTable {
         self.body.ensure_capacity(body_need)?;
         self.idx.reserve_slots(n_records)?;
         Ok(())
-    }
-
-    /// Encode `n` records into one body blob then one write.
-    ///
-    /// Encoding runs outside any count barrier (single appender role). Publish
-    /// order: body → idx → `count` Release. Record starts are always 8-aligned
-    /// (stride idx) with the Class A page non-straddle rule.
-    pub fn put_batch_encode(
-        &self,
-        n: usize,
-        estimate_bytes: usize,
-        encode: impl FnMut(usize, &mut Vec<u8>),
-    ) -> Result<Vec<Fk>, StoreError> {
-        self.put_batch_encode_inner(n, estimate_bytes, encode)
-    }
-
-    /// Same as [`put_batch_encode`] (alignment is always on for stride idx).
-    pub fn put_batch_encode_aligned(
-        &self,
-        n: usize,
-        estimate_bytes: usize,
-        encode: impl FnMut(usize, &mut Vec<u8>),
-    ) -> Result<Vec<Fk>, StoreError> {
-        self.put_batch_encode_inner(n, estimate_bytes, encode)
-    }
-
-    fn put_batch_encode_inner(
-        &self,
-        n: usize,
-        estimate_bytes: usize,
-        encode: impl FnMut(usize, &mut Vec<u8>),
-    ) -> Result<Vec<Fk>, StoreError> {
-        let Some(prep) = self.prepare_batch_encode(n, estimate_bytes, encode)? else {
-            return Ok(Vec::new());
-        };
-        self.write_body_blob_bulk(prep.start, &prep.body_blob)?;
-        self.finish_prepared(prep)
     }
 
     /// Encode records and validate starts. Does **not** write or publish.
@@ -723,11 +670,6 @@ impl VarTable {
         self.idx.flush_async()?;
         Ok(())
     }
-
-    /// Diagnostics: number of idx segment files.
-    pub fn idx_segment_count(&self) -> usize {
-        self.idx.segment_count()
-    }
 }
 
 #[cfg(test)]
@@ -738,6 +680,19 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    fn put_batch(
+        t: &VarTable,
+        n: usize,
+        estimate_bytes: usize,
+        encode: impl FnMut(usize, &mut Vec<u8>),
+    ) -> Result<Vec<Fk>, StoreError> {
+        let Some(prep) = t.prepare_batch_encode(n, estimate_bytes, encode)? else {
+            return Ok(Vec::new());
+        };
+        t.write_body_blob_bulk(prep.start, &prep.body_blob)?;
+        t.finish_prepared(prep)
+    }
+
     #[test]
     fn put_batch_fd_append_roundtrip() {
         static N: AtomicU64 = AtomicU64::new(0);
@@ -746,11 +701,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
-        let fks = t
-            .put_batch_encode(3, 64, |i, buf| {
-                buf.extend_from_slice(&[i as u8 + 1; 16]);
-            })
-            .unwrap();
+        let fks = put_batch(&t, 3, 64, |i, buf| {
+            buf.extend_from_slice(&[i as u8 + 1; 16]);
+        })
+        .unwrap();
         assert_eq!(fks.len(), 3);
         assert_eq!(t.count(), 3);
         for (i, fk) in fks.iter().enumerate() {
@@ -784,7 +738,7 @@ mod tests {
                 barrier.wait();
                 for batch in 0..200u8 {
                     let payload = vec![batch; 128];
-                    t.put_batch_encode(4, 512, |_i, buf| {
+                    put_batch(&t, 4, 512, |_i, buf| {
                         buf.extend_from_slice(&payload);
                     })
                     .unwrap();
@@ -855,7 +809,7 @@ mod tests {
             let mut batch = 0u8;
             while stop_w.load(AtomicOrdering::Acquire) == 0 {
                 let payload = vec![batch; 64];
-                t_w.put_batch_encode(8, 512, |_i, buf| {
+                put_batch(&t_w, 8, 512, |_i, buf| {
                     buf.extend_from_slice(&payload);
                 })
                 .unwrap();
@@ -893,7 +847,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
-        t.put_batch_encode(5, 256, |i, buf| {
+        put_batch(&t, 5, 256, |i, buf| {
             buf.extend_from_slice(&vec![i as u8; 8 + i * 3]);
         })
         .unwrap();
@@ -935,7 +889,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
-        t.put_batch_encode(6, 512, |i, buf| {
+        put_batch(&t, 6, 512, |i, buf| {
             buf.extend_from_slice(&vec![0xA0 + i as u8; 32 + i * 8]);
         })
         .unwrap();
@@ -968,7 +922,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
-        t.put_batch_encode(20, 256, |i, buf| {
+        put_batch(&t, 20, 256, |i, buf| {
             buf.extend_from_slice(&vec![i as u8; 10 + (i % 5)]);
         })
         .unwrap();
@@ -1020,7 +974,7 @@ mod tests {
         let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
         for batch in 0..10u8 {
             let payload = vec![batch; 16 + batch as usize];
-            t.put_batch_encode(3, 128, |_i, buf| {
+            put_batch(&t, 3, 128, |_i, buf| {
                 buf.extend_from_slice(&payload);
             })
             .unwrap();
@@ -1060,12 +1014,20 @@ mod tests {
             let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
             // Each record ~100 B → soft 128 forces new segment often.
             for i in 0..12u8 {
-                t.put_batch_encode(1, 128, |_j, buf| {
+                put_batch(&t, 1, 128, |_j, buf| {
                     buf.extend_from_slice(&vec![i; 100]);
                 })
                 .unwrap();
             }
-            assert!(t.idx_segment_count() >= 2, "segs={}", t.idx_segment_count());
+            let nseg = std::fs::read_dir(dir.join("tx.idx"))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.len() == 6 && n.chars().all(|c| c.is_ascii_digit())
+                })
+                .count();
+            assert!(nseg >= 2, "segs={nseg}");
             for id in 1..=12u64 {
                 let raw = t.get_raw(Fk(id)).unwrap();
                 assert_eq!(raw[0], (id - 1) as u8);
@@ -1094,20 +1056,20 @@ mod tests {
         assert_eq!(t.count(), 0);
         assert!(t.body_logical_len() >= FILE_HEADER_LEN as u64);
         t.advise_body_dont_need(0, 0);
-        assert_eq!(t.put_batch_encode(0, 0, |_, _| {}).unwrap().len(), 0);
+        assert_eq!(put_batch(&t, 0, 0, |_, _| {}).unwrap().len(), 0);
         t.reserve_append(1024, 8).unwrap();
-        let fks = t
-            .put_batch_encode(3, 64, |i, buf| {
-                buf.extend_from_slice(&[i as u8; 16]);
-            })
-            .unwrap();
+        let fks = put_batch(&t, 3, 64, |i, buf| {
+            buf.extend_from_slice(&[i as u8; 16]);
+        })
+        .unwrap();
         assert_eq!(fks.len(), 3);
         assert_eq!(t.count(), 3);
         let raw = t.get_raw(fks[1]).unwrap();
         assert!(raw.len() >= 16);
         assert_eq!(raw[0], 1);
+        let (off1, len1) = t.record_range(fks[1]).unwrap();
         let via = t
-            .with_raw(fks[1], |b| {
+            .with_bytes_at(off1, len1, |b| {
                 assert!(b.len() >= 16);
                 Ok(b[0])
             })
@@ -1169,11 +1131,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
-        let fks = t
-            .put_batch_encode(2, 64, |i, buf| {
-                buf.extend_from_slice(&[(i as u8).saturating_add(0x5a); 16]);
-            })
-            .unwrap();
+        let fks = put_batch(&t, 2, 64, |i, buf| {
+            buf.extend_from_slice(&[(i as u8).saturating_add(0x5a); 16]);
+        })
+        .unwrap();
         let (off, len) = t.record_range(fks[1]).unwrap();
         let mut buf = vec![0xFFu8; (len as usize).saturating_add(32)];
         buf.clear();
@@ -1195,11 +1156,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
-        let fks = t
-            .put_batch_encode(5, 64, |i, buf| {
-                buf.extend_from_slice(&[i as u8; 16]);
-            })
-            .unwrap();
+        let fks = put_batch(&t, 5, 64, |i, buf| {
+            buf.extend_from_slice(&[i as u8; 16]);
+        })
+        .unwrap();
         assert_eq!(fks.len(), 5);
         assert_eq!(t.count(), 5);
         // No-op truncate to same count.
@@ -1218,17 +1178,26 @@ mod tests {
         // Empty body helpers.
         t.advise_body_dont_need(0, 0);
         let _ = t.body_logical_len();
-        assert!(t.idx_segment_count() >= 1);
+        let nseg = std::fs::read_dir(dir.join("tx.idx"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.len() == 6 && n.chars().all(|c| c.is_ascii_digit())
+            })
+            .count();
+        assert!(nseg >= 1);
         let ranges = t.record_range_batch(&[Fk(1), Fk(99)]).unwrap();
         assert!(ranges[0].is_some());
         assert!(ranges[1].is_none());
-        t.with_raw(Fk(1), |b| {
+        let (off, len) = t.record_range(Fk(1)).unwrap();
+        t.with_bytes_at(off, len, |b| {
             assert!(b.len() >= 16);
             Ok(())
         })
         .unwrap();
         // Empty batch.
-        let empty = t.put_batch_encode(0, 0, |_, _| {}).unwrap();
+        let empty = put_batch(&t, 0, 0, |_, _| {}).unwrap();
         assert!(empty.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

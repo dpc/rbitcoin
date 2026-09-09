@@ -209,10 +209,6 @@ impl SegmentedTxHead {
         })
     }
 
-    pub fn layout(&self) -> HeadLayout {
-        self.layout
-    }
-
     pub fn bits(&self) -> u32 {
         self.layout.bits
     }
@@ -223,10 +219,6 @@ impl SegmentedTxHead {
 
     pub fn entry_bytes(&self) -> u8 {
         4
-    }
-
-    pub fn max_keys_per_segment(&self) -> u64 {
-        self.max_keys
     }
 
     pub fn segment_count(&self) -> usize {
@@ -339,16 +331,6 @@ impl SegmentedTxHead {
         Ok((last.file_id, last.first_fk, dump))
     }
 
-    /// Open (unsealed) tail: `(first_fk, count)`. `None` if no segments or tail sealed.
-    pub fn open_tail_range(&self) -> Option<(u64, u64)> {
-        let segs = self.segments_snapshot();
-        let last = segs.last()?;
-        if last.sealed {
-            return None;
-        }
-        Some((last.first_fk, last.count.load(Ordering::Relaxed)))
-    }
-
     /// On-disk path for a segment's sealed fuse file.
     pub fn fuse_path_for_file_id(&self, file_id: u32) -> PathBuf {
         segment_fuse_path(&self.dir, file_id)
@@ -405,36 +387,6 @@ impl SegmentedTxHead {
             ));
         }
         *guard = Arc::new(new_list);
-        Ok(())
-    }
-
-    /// Replace fuse keys for the open tail (rebuild from Class A after reopen).
-    ///
-    /// Required before seal when this process did not insert every open create
-    /// (crash/restart mid-segment). `keys.len()` must equal open `count`.
-    pub fn replace_open_keys(&self, keys: Vec<u64>) -> Result<(), StoreError> {
-        let _w = self.write.lock().unwrap_or_else(|e| e.into_inner());
-        let segs = self.segments_snapshot();
-        let last = segs
-            .last()
-            .ok_or(StoreError::Corrupt("tx.head replace_open_keys: no segment"))?;
-        if last.sealed {
-            return Err(StoreError::Corrupt(
-                "tx.head replace_open_keys: tail sealed",
-            ));
-        }
-        let count = last.count.load(Ordering::Relaxed);
-        if keys.len() as u64 != count {
-            return Err(StoreError::Corrupt(
-                "tx.head replace_open_keys: key count mismatch",
-            ));
-        }
-        let pairs: Vec<(u64, u32)> = keys
-            .into_iter()
-            .enumerate()
-            .map(|(i, k)| (k, (i as u32).saturating_add(1)))
-            .collect();
-        *last.open_keys.lock().unwrap_or_else(|e| e.into_inner()) = pairs;
         Ok(())
     }
 
@@ -579,21 +531,6 @@ impl SegmentedTxHead {
     /// for that segment's page loads. Page IO uses TLS bulk_io.
     pub fn probe_candidates_batch(&self, mixed: &[[u8; 32]]) -> Result<Vec<Vec<Fk>>, StoreError> {
         self.probe_candidates_batch_wave(mixed, HeadProbeWave::All, None, &mut crate::IoCtx::none())
-    }
-
-    /// Same as [`Self::probe_candidates_batch`] but head page preads use the
-    /// **already-held** plan TLS session (no nested `with_thread_local`).
-    pub fn probe_candidates_batch_on_session(
-        &self,
-        mixed: &[[u8; 32]],
-        session: &mut crate::uring_session::UringSession,
-    ) -> Result<Vec<Vec<Fk>>, StoreError> {
-        self.probe_candidates_batch_wave(
-            mixed,
-            HeadProbeWave::All,
-            None,
-            &mut crate::IoCtx::held(session),
-        )
     }
 
     /// Wave 1: every unsealed OA (insert tail + in-flight seal).
@@ -1438,7 +1375,7 @@ mod tests {
         // 10-bit head: 1024 slots, max_keys = floor(0.8*1024)=819
         let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
-        assert_eq!(h.max_keys_per_segment(), 819);
+        assert_eq!(h.max_keys, 819);
 
         let n = 820u64; // forces a roll (max_keys=819)
         let mut entries = Vec::with_capacity(n as usize);
@@ -1616,7 +1553,7 @@ mod tests {
             assert!(h.sealed_fuse_rewrite_queue().is_empty());
             let p = h.fuse_path_for_file_id(0);
             assert!(p.to_string_lossy().contains("000000.fuse8"));
-            assert!(h.replace_open_keys(vec![1, 2, 3]).is_err());
+            assert!(h.replace_open_keys_for(open_id, vec![1, 2, 3]).is_err());
             let open_n = h
                 .segments_snapshot()
                 .last()
@@ -1624,7 +1561,7 @@ mod tests {
                 .unwrap_or(0);
             if open_n > 0 {
                 let keys: Vec<u64> = (0..open_n).map(|i| i + 1).collect();
-                h.replace_open_keys(keys).unwrap();
+                h.replace_open_keys_for(open_id, keys).unwrap();
                 assert_eq!(h.open_keys_len() as u64, open_n);
             }
             h.flush().unwrap();

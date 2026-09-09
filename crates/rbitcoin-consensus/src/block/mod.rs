@@ -826,25 +826,6 @@ pub struct ScriptVerifyFlags {
 }
 
 impl ScriptVerifyFlags {
-    /// Every flag on (Core JSON / fixture jobs that enable the full set).
-    pub const ALL: Self = Self {
-        bip65_active: true,
-        bip112_active: true,
-        bip66_active: true,
-        bip16_active: true,
-        taproot_active: true,
-        minimal_if: true,
-        nullfail: true,
-        low_s: true,
-        strictenc: true,
-        null_dummy: true,
-        minimal_data: true,
-        witness_pubkeytype: true,
-        witness_active: true,
-        discourage_upgradable_witness: true,
-        const_scriptcode: true,
-    };
-
     /// Buried-fork knobs + production standardness defaults (`from_parts`).
     pub const fn buried(
         bip65_active: bool,

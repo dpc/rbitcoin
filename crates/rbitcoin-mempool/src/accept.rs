@@ -69,28 +69,6 @@ pub struct MapUtxoProvider {
     pub map: std::collections::HashMap<OutPoint, Coin>,
 }
 
-impl MapUtxoProvider {
-    /// Insert bare outputs as non-coinbase coins at height 0 (legacy test helper).
-    pub fn from_txouts(map: std::collections::HashMap<OutPoint, TxOut>) -> Self {
-        Self {
-            map: map
-                .into_iter()
-                .map(|(op, txout)| {
-                    (
-                        op,
-                        Coin {
-                            txout,
-                            create_height: 0,
-                            create_mtp: 0,
-                            is_coinbase: false,
-                        },
-                    )
-                })
-                .collect(),
-        }
-    }
-}
-
 impl UtxoProvider for MapUtxoProvider {
     fn get_coin(&self, op: &OutPoint) -> Option<Coin> {
         self.map.get(op).cloned()

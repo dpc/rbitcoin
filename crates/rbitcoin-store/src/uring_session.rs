@@ -89,6 +89,7 @@ thread_local! {
 }
 
 /// Run `f` with TLS / `try_open` opening `kind` (does not nest a session).
+#[cfg(test)]
 pub fn with_forced_session_kind<R>(kind: SessionKind, f: impl FnOnce() -> R) -> R {
     FORCED_KIND.with(|c| {
         let prev = c.replace(Some(kind));

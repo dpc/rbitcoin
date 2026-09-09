@@ -26,9 +26,8 @@ pub use combined_stage::{body_ok_reads, reset_body_ok_reads};
 pub use combined_stage::{load_creates_once, CombinedCreate};
 pub use resolved_wire::{BlockQueueWaveIntake, ResolvedWire};
 pub use soft_densify::{
-    bq_assign_stop_bytes, soft_assign_restricted, soft_assign_stopped, soft_confirm_window_covered,
-    soft_confirm_window_n, soft_densify_band_hi, BQ_ASSIGN_STOP_BYTES, BQ_SOFT_CONFIRM_SECS,
-    BQ_SOFT_FREE_BYTES,
+    bq_assign_stop_bytes, soft_assign_restricted, soft_confirm_window_covered,
+    soft_confirm_window_n, soft_densify_band_hi, BQ_SOFT_FREE_BYTES,
 };
 pub use sp_tweaks::{ThinTweakRangeLimits, ThinTweakRow};
 pub use tx_precompute::TxPrecompute;
@@ -111,20 +110,19 @@ pub mod process_mem_stats {
 }
 
 pub use archive::{ArchiveWritePlan, CreatePin};
+pub(crate) use batch_parents::FkSet;
 pub use batch_parents::{
-    layout_covers_need, sparse_spender_rels, BatchParents, FkMap, FkSet, SharedParentPin, U32Map,
-    U64Map, U64Set, SPENDER_REL_UNKNOWN,
+    layout_covers_need, sparse_spender_rels, BatchParents, FkMap, U32Map, U64Map, U64Set,
 };
 pub use catchup::IndexMode;
 pub use chain_view::{ChainView, ChainViewKind};
-pub use confirm_load::ConfirmLoadStats;
 pub use confirm_load::SpendEdges;
-pub use connect::{format_disconnect_tip_line, spawn_sh_writebehind, ConfirmPrepared};
+pub use connect::{spawn_sh_writebehind, ConfirmPrepared};
 pub use id_map::{IdMap, OutPointHasher, OutPointSet, TxidHasher};
 pub use in_flight::InFlight;
 pub use scripthash::{
-    apply_history_filter, HistoryFilter, HistoryOrder, ScanUtxo, ScriptHashBalance,
-    ScriptHashChainStats, ScriptHashHistoryItem, ScriptHashOutpoint, ScriptHashUtxo, ShJoinSlot,
+    HistoryFilter, HistoryOrder, ScanUtxo, ScriptHashBalance, ScriptHashChainStats,
+    ScriptHashHistoryItem, ScriptHashUtxo, ShJoinSlot,
 };
 pub use stamp::{
     fill_missing_parent_ranges, stamp_external_parents, BatchParentIds, ExternalParentStamp,
@@ -277,30 +275,6 @@ pub mod confirm_load_stats {
             thin_ns: THIN_NS.swap(0, Ordering::Relaxed),
             parent_pin_ns: PARENT_PIN_NS.swap(0, Ordering::Relaxed),
         }
-    }
-
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn note(st: &crate::confirm_load::ConfirmLoadStats, ns: u64) {
-        if ns > 0 {
-            NS.fetch_add(ns, Ordering::Relaxed);
-        }
-        macro_rules! add {
-            ($field:ident, $atom:ident) => {
-                if st.$field > 0 {
-                    $atom.fetch_add(st.$field as u64, Ordering::Relaxed);
-                }
-            };
-        }
-        add!(blocks, BLOCKS);
-        add!(utxo_parents, UTXO_PARENTS);
-        add!(parent_unique, PARENT_UNIQUE);
-        add!(pin_cache_body, PIN_CACHE_BODY);
-        add!(pin_new, PIN_NEW);
-        add!(pin_body_ns, PIN_BODY_NS);
-        add!(body_tx_reads, BODY_TX_READS);
-        add!(thin_ns, THIN_NS);
-        add!(parent_pin_ns, PARENT_PIN_NS);
     }
 }
 

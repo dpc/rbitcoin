@@ -15,7 +15,7 @@ mod script_pool;
 mod signet;
 pub mod silent_payments;
 
-pub use block::ScriptCheckJob;
+pub(crate) use block::ScriptCheckJob;
 
 /// Consensus script verify for a single tx on the shared `rbtc-scripts` path.
 ///
@@ -57,15 +57,14 @@ pub fn verify_tx_scripts_detached_forks(
 }
 
 pub use block::{
-    apply_witness_commitment, bip34_height_script, bip68_active_for_tx, block_has_witness,
-    block_subsidy, check_block_wire, is_final_tx, sequence_locks_satisfied, tx_gbt_sigops,
-    validate_block_connect, validate_block_structure, validate_block_structure_hashed,
-    validate_block_structure_precomputed, validate_block_structure_with_pres, verify_scripts_pool,
-    witness_commitment_script, ScriptVerifyFlags, TxPrecompute, ValidationContext,
-    LOCKTIME_THRESHOLD,
+    bip34_height_script, bip68_active_for_tx, block_has_witness, block_subsidy, check_block_wire,
+    is_final_tx, sequence_locks_satisfied, tx_gbt_sigops, validate_block_connect,
+    validate_block_structure, witness_commitment_script, ValidationContext,
 };
-pub use clock::{current_now, wall_now, with_now, NodeClock};
-pub use convert::{block_to_apply, block_to_apply_with_txids, header_to_record};
+pub(crate) use block::{validate_block_structure_hashed, TxPrecompute};
+pub use clock::{with_now, NodeClock};
+pub use convert::header_to_record;
+pub(crate) use convert::{block_to_apply, block_to_apply_with_txids};
 pub use error::{block_reject_log_line, block_reject_reason, script_flag_paren, ConsensusError};
 pub use header::{expected_next_bits, median_time_past, validate_header};
 pub use milestone::Milestone;
@@ -73,12 +72,11 @@ pub use params::{default_milestone_height, genesis_block, ChainParams, Checkpoin
 pub use policy::PolicyResult;
 pub use regtest_pad::{
     grind_regtest_pow, mine_empty_regtest, mine_regtest_paying, pad_empty_from,
-    prepare_regtest_candidate, REGTEST_BLOCK_SPACING, REGTEST_POW_BITS,
+    prepare_regtest_candidate, REGTEST_BLOCK_SPACING,
 };
-pub use signet::{default_signet_challenge, signet_magic, validate_signet_block_solution};
+pub use signet::signet_magic;
 pub use silent_payments::{
-    backfill_sp_tweaks, backfill_sp_tweaks_cancellable, tweak_from_tx, tweaks_at_height,
-    tweaks_for_height, tweaks_from_thin_and_body, TaprootOut, TxTweak,
+    backfill_sp_tweaks_cancellable, tweak_from_tx, tweaks_for_height, TaprootOut, TxTweak,
 };
 
 use bitcoin::hashes::Hash;
@@ -529,16 +527,12 @@ pub mod confirm_phase_stats {
 /// See [`confirm_wire_run`]: lookup → load → scripts → write. IBD uses the split
 /// phases for pipeline overlap.
 pub use confirm_run::{
-    confirm_bq_resolve_wave, confirm_bq_resolve_wave_capped, confirm_bq_resolve_wave_with_ids,
-    confirm_scripts_feed_ahead, confirm_scripts_phase, confirm_scripts_phase_async,
-    confirm_wire_load_from_plan, confirm_wire_load_phase, confirm_wire_load_phase_pipelined,
-    confirm_wire_lookup_stamp, confirm_wire_run, confirm_wire_run_preverified, confirm_write_phase,
-    drive_script_waves, drive_script_waves_with, join_scripts_polling, lookup_stage_stats,
-    plan_stamp_sub_stats, scripts_stage_from_load_channel, take_wave_items_for_load, BqResolveWave,
-    BqResolveWaveStats, ConfirmLoadOutcome, ConfirmScriptOutcome, DenserelsWarmStats, LoadedBatch,
-    PlanStampOutcome, ScriptOkBatch, ScriptPreverified, ScriptsBatchMeta, ScriptsPhaseHandle,
+    confirm_bq_resolve_wave_capped, confirm_scripts_phase, confirm_wire_load_from_plan,
+    confirm_wire_load_phase, confirm_wire_load_phase_pipelined, confirm_wire_lookup_stamp,
+    confirm_wire_run, confirm_wire_run_preverified, confirm_write_phase, drive_script_waves_with,
+    lookup_stage_stats, plan_stamp_sub_stats, take_wave_items_for_load, ConfirmLoadOutcome,
+    ConfirmScriptOutcome, LoadedBatch, PlanStampOutcome, ScriptOkBatch, ScriptPreverified,
     WireLoadPipeline, BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
-    BQ_RESOLVE_WAVE_MIN_INPUTS,
 };
 
 /// Wake the IBD scripts publisher (`ibd-confirm`) after `scriptq` send or close.

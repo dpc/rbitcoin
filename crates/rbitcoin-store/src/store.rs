@@ -1535,6 +1535,7 @@ fn check_meta(dir: &Path) -> Result<u16, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::head_resolve_pick::LeftoverMissOn;
     use crate::tx_table::{InputRecord, OutputRecord, TxRecord};
 
     fn tmp() -> PathBuf {
@@ -2655,7 +2656,7 @@ mod tests {
         let hits = s.get_fk_by_txid_batch(&[miss]).unwrap();
         assert!(hits[0].1.is_none());
         let (on, cands) = crate::head_resolve_stats::take_leftover_miss().expect("classified");
-        assert_eq!(on, crate::LeftoverMissOn::Head);
+        assert_eq!(on, LeftoverMissOn::Head);
         assert_eq!(cands, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2688,7 +2689,7 @@ mod tests {
             "TipOnly must drop unconnected identity"
         );
         let (on, cands) = crate::head_resolve_stats::take_leftover_miss().expect("classified");
-        assert_eq!(on, crate::LeftoverMissOn::Fence);
+        assert_eq!(on, LeftoverMissOn::Fence);
         assert!(
             cands >= 1,
             "open-head probe must have produced the create fk"
@@ -2738,7 +2739,7 @@ mod tests {
         let hits = s.get_fk_by_txid_batch(&[b]).unwrap();
         assert!(hits[0].1.is_none(), "B is not in the head");
         let (on, n_cands) = crate::head_resolve_stats::take_leftover_miss().expect("classified");
-        assert_eq!(on, crate::LeftoverMissOn::Body);
+        assert_eq!(on, LeftoverMissOn::Body);
         assert!(n_cands >= 1, "A must be a hop cand, n_cands={n_cands}");
         assert!(
             !crate::head_resolve_stats::leftover_probe_diag_recorded(&b),

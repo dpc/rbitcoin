@@ -33,7 +33,6 @@ use crate::open_address::{self, MAX_LOAD_DEN, MAX_LOAD_NUM};
 const OCC_SCAN_BYTE_CAP: u64 = 16 * 1024 * 1024;
 const OCC_MAGIC: &[u8; 8] = b"SHOCC001";
 
-const DEFAULT_SLOTS: u64 = 64;
 const SLOTS_PER_CHUNK: u64 = 128;
 const CHUNK_CACHE_MAX: usize = 256;
 
@@ -43,19 +42,6 @@ pub(crate) const SH_HEAD_FULL: &str = "invariant: scripthash head full";
 #[cfg(test)]
 pub const SH_HEAD_SHARD_COUNT_MISMATCH: &str =
     "scripthash head shard count mismatch (reindex; expected 64-way mainnet layout)";
-
-/// Open-address slot count for `keys` unique entries at 7/8 max load (pow2).
-#[inline]
-pub fn sh_slots_for_keys(keys: u64) -> u64 {
-    if keys == 0 {
-        return DEFAULT_SLOTS;
-    }
-    let min = keys
-        .saturating_mul(MAX_LOAD_DEN)
-        .div_ceil(MAX_LOAD_NUM)
-        .max(1);
-    min.next_power_of_two().max(DEFAULT_SLOTS)
-}
 
 /// Default unique-key hint for cold live OA pre-size (mainnet ~2e9).
 ///
@@ -278,33 +264,6 @@ impl ScriptHashHead {
         head_key_from_full(full)
     }
 
-    /// Zero all slots and reset occupied (cold rematerialize after partial load).
-    ///
-    /// Chunked `write_at` so FdOnly payload views match
-    /// `occupied = 0` (not punch-hole alone).
-    pub fn reinit_empty(&self) -> Result<(), StoreError> {
-        let slots = {
-            let state = self.state.lock().unwrap();
-            state.slots
-        };
-        let body_bytes = SH_HEAD_SLOT_SIZE as u64 * slots;
-        let zero = vec![
-            0u8;
-            (1024 * 1024)
-                .min(body_bytes as usize)
-                .max(SH_HEAD_SLOT_SIZE)
-        ];
-        let mut off = 0u64;
-        while off < body_bytes {
-            let n = ((body_bytes - off) as usize).min(zero.len());
-            self.file
-                .write_at(FILE_HEADER_LEN as u64 + off, &zero[..n])?;
-            off += n as u64;
-        }
-        self.set_occupied_known(0);
-        Ok(())
-    }
-
     pub fn get(&self, full: &[u8; 32]) -> Result<Option<ShHeadValue>, StoreError> {
         Ok(self.get_with_chunk_loads(full)?.0)
     }
@@ -333,59 +292,6 @@ impl ScriptHashHead {
             slot = (slot + 1) & (slots - 1);
         }
         Ok((None, cache.chunk_loads))
-    }
-
-    /// Batch head probe for tip SH seed (one `SlotPageCache` pass, keys sorted by slot).
-    ///
-    /// Faster than N independent [`Self::get`] calls when seeding thousands of
-    /// unique scripts for `put_create_batch_append` (shared 4 KiB page cache).
-    ///
-    /// Slot + truncated key are precomputed once (sort keys are not re-hashed on
-    /// every comparison); probes walk in primary-slot order so adjacent keys share
-    /// the same 4 KiB chunk under [`SlotPageCache`].
-    pub fn get_many(&self, fulls: &[[u8; 32]]) -> Result<Vec<Option<ShHeadValue>>, StoreError> {
-        Ok(self.get_many_with_chunk_loads(fulls)?.0)
-    }
-
-    /// Like [`Self::get_many`], also returns total 4 KiB chunk `read_at` faults.
-    fn get_many_with_chunk_loads(
-        &self,
-        fulls: &[[u8; 32]],
-    ) -> Result<(Vec<Option<ShHeadValue>>, u64), StoreError> {
-        if fulls.is_empty() {
-            return Ok((Vec::new(), 0));
-        }
-        let slots = self.state.lock().unwrap().slots;
-        let mut order: Vec<(u64, usize, ShHeadKey)> = fulls
-            .iter()
-            .enumerate()
-            .map(|(i, full)| {
-                let key = Self::to_key(full);
-                let slot = Self::hash_slot(&key, slots);
-                (slot, i, key)
-            })
-            .collect();
-        order.sort_unstable_by_key(|&(slot, _, _)| slot);
-        let mut out = vec![None; fulls.len()];
-        let mut cache = SlotPageCache::new(self, slots);
-        for &(primary, i, key) in &order {
-            let mut slot = primary;
-            for _ in 0..slots {
-                let (k, v) = cache.read_slot(slot)?;
-                if is_empty_slot(&k, &v) {
-                    break;
-                }
-                if k == key {
-                    let val = unpack8_bytes(&v)?;
-                    if !val.is_empty() {
-                        out[i] = Some(val);
-                    }
-                    break;
-                }
-                slot = (slot + 1) & (slots - 1);
-            }
-        }
-        Ok((out, cache.chunk_loads))
     }
 
     pub fn insert(&self, full: &[u8; 32], value: &ShHeadValue) -> Result<(), StoreError> {
@@ -494,118 +400,6 @@ impl ScriptHashHead {
         Ok(())
     }
 
-    /// Full-key upsert without rehash (maps to 16 B head keys; remaps remainder).
-    pub fn insert_many_full_no_rehash(
-        &self,
-        entries: &[([u8; 32], ShHeadValue)],
-        allow_new: bool,
-    ) -> Result<Vec<([u8; 32], ShHeadValue)>, StoreError> {
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mapped: Vec<_> = entries
-            .iter()
-            .map(|(k, v)| (head_key_from_full(k), v.clone()))
-            .collect();
-        let rem = self.insert_many_no_rehash(&mapped, allow_new)?;
-        if rem.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::with_capacity(rem.len());
-        for (hk, hv) in rem {
-            if let Some((full, _)) = entries.iter().find(|(f, _)| head_key_from_full(f) == hk) {
-                out.push((*full, hv));
-            } else {
-                let mut full = [0u8; 32];
-                full[..SH_HEAD_KEY_LEN].copy_from_slice(&hk);
-                out.push((full, hv));
-            }
-        }
-        Ok(out)
-    }
-
-    /// Like [`insert_many`] but **never rehashes**.
-    ///
-    /// `allow_new`: when true, new keys may occupy empty slots until the first
-    /// miss, then the batch continues **update-only**. When false (sealed main
-    /// try-upsert), **only** in-place updates apply — not-present keys always
-    /// go to the returned remainder (even if free slots exist).
-    ///
-    /// Caller routes remainder to overflow. Empty remainder = full batch on this head.
-    pub fn insert_many_no_rehash(
-        &self,
-        upserts: &[(ShHeadKey, ShHeadValue)],
-        allow_new: bool,
-    ) -> Result<Vec<(ShHeadKey, ShHeadValue)>, StoreError> {
-        if upserts.is_empty() {
-            return Ok(Vec::new());
-        }
-        if allow_new && self.is_known_empty() {
-            let slots = self.state.lock().unwrap().slots;
-            let max_fit = slots
-                .saturating_mul(MAX_LOAD_NUM)
-                .checked_div(MAX_LOAD_DEN)
-                .unwrap_or(slots);
-            if (upserts.len() as u64) <= max_fit && (upserts.len() as u64) <= slots {
-                self.bulk_fill_empty(upserts)?;
-                return Ok(Vec::new());
-            }
-        }
-        if !allow_new && self.is_known_empty() {
-            return Ok(upserts.to_vec());
-        }
-
-        let mut work: Vec<(ShHeadKey, ShHeadValue, usize)> = upserts
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, (k, v))| (k, v, i))
-            .collect();
-        let slots_now = self.state.lock().unwrap().slots;
-        work.sort_unstable_by_key(|(k, _, _)| Self::hash_slot(k, slots_now));
-
-        let mut remainder: Vec<(ShHeadKey, ShHeadValue)> = Vec::new();
-        let mut allow_new = allow_new;
-        let mut i = 0usize;
-        while i < work.len() {
-            let slots = self.state.lock().unwrap().slots;
-            if i > 0 {
-                work[i..].sort_unstable_by_key(|(k, _, _)| Self::hash_slot(k, slots));
-            }
-            let mut cache = SlotPageCache::new(self, slots);
-            while i < work.len() {
-                let (key, ref val, _) = work[i];
-                let enc = pack8_bytes(val)?;
-                match cache.try_insert(&key, &enc, allow_new)? {
-                    InsertResult::Done(was_empty) => {
-                        if was_empty {
-                            let mut state = self.state.lock().unwrap();
-                            if state.occ_known {
-                                state.occupied = state.occupied.saturating_add(1);
-                            }
-                        }
-                        i += 1;
-                    }
-                    InsertResult::NeedSlot => {
-                        allow_new = false;
-                        remainder.push((key, val.clone()));
-                        i += 1;
-                    }
-                }
-            }
-            cache.flush()?;
-        }
-        {
-            let state = self.state.lock().unwrap();
-            if state.occ_known {
-                let occ = state.occupied;
-                drop(state);
-                self.persist_occ(occ);
-            }
-        }
-        Ok(remainder)
-    }
-
     /// occupied/slots when occupancy is known (`None` if unknown).
     pub fn load_ratio(&self) -> Option<f64> {
         let state = self.state.lock().unwrap();
@@ -665,113 +459,14 @@ impl ScriptHashHead {
         Ok(())
     }
 
-    fn slots_for_keys(keys: u64) -> u64 {
-        sh_slots_for_keys(keys)
-    }
-
     pub fn occupied(&self) -> u64 {
         self.state.lock().unwrap().occupied
-    }
-
-    /// Slot capacity of this head file (power of two).
-    pub fn slots(&self) -> u64 {
-        self.state.lock().unwrap().slots
     }
 
     /// True when occupancy is known and zero (safe for cold bulk-fill / install).
     pub fn is_known_empty(&self) -> bool {
         let state = self.state.lock().unwrap();
         state.occ_known && state.occupied == 0
-    }
-
-    pub fn reserve_additional(&self, additional: u64) -> Result<(), StoreError> {
-        if additional == 0 {
-            return Ok(());
-        }
-        let (occupied, slots, occ_known) = {
-            let state = self.state.lock().unwrap();
-            (state.occupied, state.slots, state.occ_known)
-        };
-        // Unknown occupancy: do not grow/rehash from a fake zero count (mainnet
-        // tables are pre-sized; warm residual fits). Probe insert handles load.
-        if !occ_known {
-            return Ok(());
-        }
-        let need = Self::slots_for_keys(occupied.saturating_add(additional));
-        if need > slots {
-            if occupied == 0 {
-                self.grow_empty_to(need)?;
-            } else {
-                return Err(StoreError::Corrupt(SH_HEAD_FULL));
-            }
-        }
-        Ok(())
-    }
-
-    /// Install a pre-built cold slot image (live in-RAM fill). Requires empty occupied.
-    pub fn install_cold_image(
-        &self,
-        table: &[u8],
-        slots: u64,
-        occupied: u64,
-    ) -> Result<(), StoreError> {
-        let slots = slots.max(2).next_power_of_two();
-        let need_bytes = (slots as usize).saturating_mul(SH_HEAD_SLOT_SIZE);
-        if table.len() != need_bytes {
-            return Err(StoreError::Corrupt(
-                "scripthash install_cold_image: table len mismatch",
-            ));
-        }
-        if !self.is_known_empty() {
-            return Err(StoreError::Corrupt(
-                "scripthash install_cold_image: not empty",
-            ));
-        }
-        let new_bytes = need_bytes as u64;
-        let need = FILE_HEADER_LEN as u64 + new_bytes;
-        self.file.ensure_capacity(need)?;
-        self.file.set_logical_len(need)?;
-        self.file.write_at(FILE_HEADER_LEN as u64, table)?;
-        {
-            let mut state = self.state.lock().unwrap();
-            state.slots = slots;
-        }
-        self.set_occupied_known(occupied);
-        Ok(())
-    }
-
-    /// Best-effort drop of head pages from page cache after cold install.
-    pub fn advise_dont_need_all(&self) {
-        let len = self.file.logical_len();
-        if len > FILE_HEADER_LEN as u64 {
-            self.file
-                .advise_dont_need(FILE_HEADER_LEN as u64, len - FILE_HEADER_LEN as u64);
-        }
-    }
-
-    /// Expand an **empty** open-address table to `new_slots` (power of two).
-    ///
-    /// Used by cold materialize so pre-size is fallocate/zero only — no slot scan.
-    fn grow_empty_to(&self, new_slots: u64) -> Result<(), StoreError> {
-        let new_slots = new_slots.max(2).next_power_of_two();
-        let (old_slots, occupied) = {
-            let state = self.state.lock().unwrap();
-            (state.slots, state.occupied)
-        };
-        if occupied != 0 {
-            return Err(StoreError::Corrupt(SH_HEAD_FULL));
-        }
-        if new_slots <= old_slots {
-            return Ok(());
-        }
-        let new_bytes = SH_HEAD_SLOT_SIZE as u64 * new_slots;
-        let need = FILE_HEADER_LEN as u64 + new_bytes;
-        self.file.ensure_capacity(need)?;
-        self.file.set_logical_len(need)?;
-        // Zero full body (new region may reuse stale bytes past old logical len).
-        self.file.zero_range(FILE_HEADER_LEN as u64, new_bytes)?;
-        self.state.lock().unwrap().slots = new_slots;
-        Ok(())
     }
 
     /// Visit every occupied non-empty head value (key is zero-padded to 32 B for API).
@@ -945,143 +640,6 @@ impl<'a> SlotPageCache<'a> {
     }
 }
 
-/// In-RAM open-address image for **one** cold-materialize shard.
-///
-/// Pre-sized to final `slots` at construction (no grow-from-tiny happy path).
-/// Stream inserts by probe; on shard exit [`Self::install_into`] writes once.
-pub struct LiveShardTable {
-    slots: u64,
-    occupied: u64,
-    table: Vec<u8>,
-    /// Unique keys inserted (same as occupied for cold empty-start).
-    keys: u64,
-}
-
-impl LiveShardTable {
-    /// Allocate a zeroed slot image for `key_budget` unique keys (final size).
-    pub fn with_key_budget(key_budget: u64) -> Self {
-        let slots = sh_slots_for_keys(key_budget);
-        let nbytes = (slots as usize).saturating_mul(SH_HEAD_SLOT_SIZE);
-        Self {
-            slots,
-            occupied: 0,
-            table: vec![0u8; nbytes],
-            keys: 0,
-        }
-    }
-
-    pub fn slots(&self) -> u64 {
-        self.slots
-    }
-
-    pub fn occupied(&self) -> u64 {
-        self.occupied
-    }
-
-    pub fn keys(&self) -> u64 {
-        self.keys
-    }
-
-    pub fn table_bytes(&self) -> usize {
-        self.table.len()
-    }
-
-    /// Occupied `(key16, value16)` records in key order (cold seal into SortedHead).
-    pub fn collect_sorted_recs(&self) -> Vec<(ShHeadKey, [u8; SH_HEAD_VALUE_LEN])> {
-        let mut recs = Vec::with_capacity(self.occupied as usize);
-        for s in 0..self.slots {
-            let off = (s as usize) * SH_HEAD_SLOT_SIZE;
-            let k: ShHeadKey = self.table[off..off + SH_HEAD_KEY_LEN].try_into().unwrap();
-            let v: [u8; SH_HEAD_VALUE_LEN] = self.table
-                [off + SH_HEAD_KEY_LEN..off + SH_HEAD_SLOT_SIZE]
-                .try_into()
-                .unwrap();
-            if !is_empty_slot(&k, &v) {
-                recs.push((k, v));
-            }
-        }
-        recs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        recs
-    }
-
-    /// Insert one head value (full Electrum scripthash). Overwrites same key16.
-    pub fn insert(&mut self, full: &[u8; 32], val: &ShHeadValue) -> Result<(), StoreError> {
-        if val.is_empty() {
-            return Ok(());
-        }
-        // Exception path only: pathological skew past pre-size.
-        if self.occupied.saturating_add(1).saturating_mul(MAX_LOAD_DEN)
-            > self.slots.saturating_mul(MAX_LOAD_NUM)
-        {
-            self.rehash_double()?;
-        }
-        let key = head_key_from_full(full);
-        let enc = pack8_bytes(val)?;
-        self.place(key, &enc)?;
-        self.keys = self.keys.saturating_add(1);
-        Ok(())
-    }
-
-    fn place(&mut self, key: ShHeadKey, enc: &[u8; SH_HEAD_VALUE_LEN]) -> Result<(), StoreError> {
-        let mut slot = open_address::primary_slot(&key, self.slots);
-        for _ in 0..self.slots {
-            let off = (slot as usize) * SH_HEAD_SLOT_SIZE;
-            let slot_key: ShHeadKey = self.table[off..off + SH_HEAD_KEY_LEN].try_into().unwrap();
-            let slot_v: [u8; SH_HEAD_VALUE_LEN] = self.table
-                [off + SH_HEAD_KEY_LEN..off + SH_HEAD_SLOT_SIZE]
-                .try_into()
-                .unwrap();
-            if is_empty_slot(&slot_key, &slot_v) {
-                self.table[off..off + SH_HEAD_KEY_LEN].copy_from_slice(&key);
-                self.table[off + SH_HEAD_KEY_LEN..off + SH_HEAD_SLOT_SIZE].copy_from_slice(enc);
-                self.occupied = self.occupied.saturating_add(1);
-                return Ok(());
-            }
-            if slot_key == key {
-                self.table[off + SH_HEAD_KEY_LEN..off + SH_HEAD_SLOT_SIZE].copy_from_slice(enc);
-                return Ok(());
-            }
-            slot = (slot + 1) & (self.slots - 1);
-        }
-        Err(StoreError::Corrupt("scripthash live shard table full"))
-    }
-
-    fn rehash_double(&mut self) -> Result<(), StoreError> {
-        let new_slots = self.slots.saturating_mul(2).max(2).next_power_of_two();
-        let mut neu = LiveShardTable {
-            slots: new_slots,
-            occupied: 0,
-            table: vec![0u8; (new_slots as usize).saturating_mul(SH_HEAD_SLOT_SIZE)],
-            keys: 0,
-        };
-        let old_slots = self.slots;
-        let old = std::mem::take(&mut self.table);
-        for s in 0..old_slots {
-            let off = (s as usize) * SH_HEAD_SLOT_SIZE;
-            let k: ShHeadKey = old[off..off + SH_HEAD_KEY_LEN].try_into().unwrap();
-            let v: [u8; SH_HEAD_VALUE_LEN] = old[off + SH_HEAD_KEY_LEN..off + SH_HEAD_SLOT_SIZE]
-                .try_into()
-                .unwrap();
-            if !is_empty_slot(&k, &v) {
-                neu.place(k, &v)?;
-            }
-        }
-        neu.keys = self.keys;
-        *self = neu;
-        Ok(())
-    }
-
-    /// Sequential write into an **empty** on-disk shard; frees this image.
-    pub fn install_into(self, head: &ScriptHashHead) -> Result<(), StoreError> {
-        if !head.is_known_empty() {
-            return Err(StoreError::Corrupt(
-                "scripthash live install: shard not empty",
-            ));
-        }
-        head.install_cold_image(&self.table, self.slots, self.occupied)
-    }
-}
-
 /// Sharded facade (64-way mainnet) over [`ScriptHashHead`].
 #[cfg(test)]
 pub struct ShardedScriptHashHead {
@@ -1123,14 +681,6 @@ impl ShardedScriptHashHead {
             shards.push(ScriptHashHead::create_with_slots(shard_path, per)?);
         }
         Ok(Self { shards })
-    }
-
-    /// Zero every shard (cold rematerialize).
-    pub fn reinit_empty(&self) -> Result<(), StoreError> {
-        for s in &self.shards {
-            s.reinit_empty()?;
-        }
-        Ok(())
     }
 
     pub fn open_for_role(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -1204,41 +754,25 @@ impl ShardedScriptHashHead {
     /// Slot count of one main shard (overflow segment geometry = this size).
     #[cfg(test)]
     pub fn slots_per_shard(&self) -> u64 {
-        self.shards.first().map(|s| s.slots()).unwrap_or(64)
+        self.shards
+            .first()
+            .map(|s| s.state.lock().unwrap().slots)
+            .unwrap_or(64)
     }
 
     /// Total OA slots across all main shards.
     #[cfg(test)]
     pub fn total_slots(&self) -> u64 {
-        self.shards.iter().map(|s| s.slots()).sum()
+        self.shards
+            .iter()
+            .map(|s| s.state.lock().unwrap().slots)
+            .sum()
     }
 
     /// Shard index for a full Electrum scripthash (same as insert routing).
     #[inline]
     pub fn shard_index(&self, full: &[u8; 32]) -> usize {
         self.shard_of(full)
-    }
-
-    /// True when every shard is **known** empty (cold bulk fill precondition).
-    ///
-    /// Large shards opened without a `.occ` sidecar return false (occupancy
-    /// unknown) so tip materialize never treats a live multi‑GiB head as empty.
-    pub fn is_empty(&self) -> bool {
-        self.shards.iter().all(|s| s.is_known_empty())
-    }
-
-    /// Install a finished [`LiveShardTable`] into `shard` (empty cold path).
-    #[cfg(test)]
-    pub fn install_live_shard(&self, shard: usize, live: LiveShardTable) -> Result<(), StoreError> {
-        if shard >= self.shards.len() {
-            return Err(StoreError::Corrupt(
-                "scripthash install_live_shard: shard out of range",
-            ));
-        }
-        if live.keys() == 0 && live.occupied() == 0 {
-            return Ok(());
-        }
-        live.install_into(&self.shards[shard])
     }
 
     /// Insert head values, applying **one shard at a time** (sorted within shard).
@@ -1323,100 +857,6 @@ mod tests {
     }
 
     #[test]
-    fn get_many_matches_serial_get() {
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-shhead-many-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(occ_sidecar_path(&path));
-        let h = ScriptHashHead::create_with_slots(&path, 4096).unwrap();
-        let mut keys = Vec::new();
-        for i in 0u32..200 {
-            let mut k = [0u8; 32];
-            k[0..4].copy_from_slice(&i.to_le_bytes());
-            k[4] = 0x5a;
-            h.insert(&k, &ShHeadValue::inline_one(Fk(u64::from(i) + 1)))
-                .unwrap();
-            keys.push(k);
-        }
-        // Mix in missing keys.
-        let mut probe = keys.clone();
-        for i in 1000u32..1100 {
-            let mut k = [0u8; 32];
-            k[0..4].copy_from_slice(&i.to_le_bytes());
-            probe.push(k);
-        }
-        let batch = h.get_many(&probe).unwrap();
-        assert_eq!(batch.len(), probe.len());
-        for (k, got) in probe.iter().zip(batch.iter()) {
-            let serial = h.get(k).unwrap();
-            assert_eq!(got, &serial, "key mismatch");
-        }
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(occ_sidecar_path(&path));
-    }
-
-    /// Batch head seed (`get_many`) vs N serial `get` — tip SH seed shape.
-    ///
-    /// Serial path creates a new `SlotPageCache` per key (old seed loop) → one
-    /// 4 KiB pread per key. Batch shares one cache and visits keys in slot order
-    /// → one pread per unique page. Asserts **chunk-load** speedup (deterministic).
-    /// Wall-time multi-round probe lives under `#[ignore]` (diagnostic only).
-    #[test]
-    fn get_many_cuts_chunk_loads_vs_serial_seed() {
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-shhead-batch-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(occ_sidecar_path(&path));
-        // 4 Ki slots → 32 × 4 KiB pages. 512 keys ⇒ unique pages ≪ N.
-        let h = ScriptHashHead::create_with_slots(&path, 1 << 12).unwrap();
-        const N: u32 = 512;
-        let mut keys = Vec::with_capacity(N as usize);
-        for i in 0..N {
-            let mut k = [0u8; 32];
-            k[0..4].copy_from_slice(&i.to_le_bytes());
-            k[8] = (i % 251) as u8;
-            h.insert(&k, &ShHeadValue::inline_one(Fk(u64::from(i) + 1)))
-                .unwrap();
-            keys.push(k);
-        }
-
-        let mut serial_loads = 0u64;
-        for k in &keys {
-            let (_, n) = h.get_with_chunk_loads(k).unwrap();
-            serial_loads = serial_loads.saturating_add(n);
-        }
-        let (batch_vals, batch_loads) = h.get_many_with_chunk_loads(&keys).unwrap();
-        assert_eq!(batch_vals.len(), keys.len());
-        for (k, got) in keys.iter().zip(batch_vals.iter()) {
-            assert_eq!(got, &h.get(k).unwrap());
-        }
-        let load_speedup = serial_loads as f64 / batch_loads.max(1) as f64;
-        eprintln!(
-            "sh head seed chunk loads: serial={serial_loads} batch={batch_loads} \
-             speedup={load_speedup:.2}× (keys={N})"
-        );
-        assert!(
-            batch_loads * 3 < serial_loads && load_speedup >= 2.0,
-            "get_many should cut 4 KiB preads by ≥2× vs serial get: \
-             batch_loads={batch_loads} serial_loads={serial_loads} speedup={load_speedup:.2}×"
-        );
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(occ_sidecar_path(&path));
-    }
-
-    #[test]
     fn open_large_without_occ_skips_scan_not_empty() {
         // Body just over OCC_SCAN_BYTE_CAP → skip full scan when .occ missing.
         let path = std::env::temp_dir().join(format!(
@@ -1454,151 +894,8 @@ mod tests {
         );
         // Lookups still work (probe, not occupancy).
         assert_eq!(h2.get(&key).unwrap().unwrap().inline_fks(), vec![Fk(1)]);
-        // Reinit seals known empty + sidecar for cold path.
-        h2.reinit_empty().unwrap();
-        assert!(h2.is_known_empty());
-        assert!(load_occ_sidecar(&path) == Some(0));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(occ_sidecar_path(&path));
-    }
-
-    /// No-rehash batch returns remainder for new keys after full; still applies
-    /// later in-place updates (update-only mode) without a get-scan.
-    #[test]
-    fn insert_many_no_rehash_remainder_keeps_updates() {
-        use crate::scripthash_layout::head_key_from_full;
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-shhead-norem-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&path);
-        // Tiny table: 8 slots. Seed via no_rehash so `insert` does not rehash to 64.
-        let h = ScriptHashHead::create_with_slots(&path, 8).unwrap();
-        let mut existing = Vec::new();
-        let mut seed = Vec::new();
-        for i in 0..6u8 {
-            let mut full = [0u8; 32];
-            full[0] = i;
-            full[1] = 0x11;
-            seed.push((
-                head_key_from_full(&full),
-                ShHeadValue::inline_one(Fk(u64::from(i) + 1)),
-            ));
-            existing.push(full);
-        }
-        assert!(h.insert_many_no_rehash(&seed, true).unwrap().is_empty());
-        assert_eq!(h.slots(), 8);
-        assert_eq!(h.occupied(), 6);
-        // Batch: update first existing key + 6 brand-new keys (more than free slots).
-        let mut batch: Vec<(crate::scripthash_layout::ShHeadKey, ShHeadValue)> = Vec::new();
-        batch.push((
-            head_key_from_full(&existing[0]),
-            ShHeadValue::slab(0, 2, 4096),
-        ));
-        for i in 0..6u8 {
-            let mut full = [0u8; 32];
-            full[0] = 0xa0 + i;
-            full[1] = 0x22;
-            batch.push((
-                head_key_from_full(&full),
-                ShHeadValue::inline_one(Fk(100 + u64::from(i))),
-            ));
-        }
-        let rem = h.insert_many_no_rehash(&batch, true).unwrap();
-        assert!(
-            !rem.is_empty(),
-            "some new keys must remainder; occupied={} slots={} rem={} batch={}",
-            h.occupied(),
-            h.slots(),
-            rem.len(),
-            batch.len(),
-        );
-        assert_eq!(h.slots(), 8, "no-rehash must not grow");
-        // Update applied on the existing key.
-        let v = h.get(&existing[0]).unwrap().unwrap();
-        match v {
-            ShHeadValue::Slab { used: 2, .. } => {}
-            other => panic!("expected 2-fk slab update, got {other:?}"),
-        }
-        // Remainder keys are not on this head.
-        for (hk, _) in &rem {
-            let mut full = [0u8; 32];
-            full[..16].copy_from_slice(hk);
-            assert!(
-                h.get(&full).unwrap().is_none(),
-                "remainder key must not be on head"
-            );
-        }
-        // Update key must not appear in remainder.
-        let upd_hk = head_key_from_full(&existing[0]);
-        assert!(!rem.iter().any(|(k, _)| k == &upd_hk));
-
-        // Update-only (allow_new=false): free slots must not take brand-new keys.
-        let mut brand = [0u8; 32];
-        brand[0] = 0xfe;
-        brand[1] = 0x99;
-        let only_new = vec![(head_key_from_full(&brand), ShHeadValue::inline_one(Fk(555)))];
-        let rem2 = h.insert_many_no_rehash(&only_new, false).unwrap();
-        assert_eq!(rem2.len(), 1, "update-only must remainder all new keys");
-        assert!(h.get(&brand).unwrap().is_none());
-        assert_eq!(h.slots(), 8);
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(occ_sidecar_path(&path));
-    }
-
-    /// Rehash, live install, clear miss, for_each, open.
-    #[test]
-    fn scripthash_head_reserve_and_bulk_errors() {
-        // Single-file head: reserve_additional cold + rehash.
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-shhead-reserve-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let h = ScriptHashHead::create_with_slots(&path, 8).unwrap();
-        h.reserve_additional(0).unwrap();
-        h.reserve_additional(200).unwrap(); // cold grow empty
-        assert!(h.slots() >= 256);
-        let _ = std::fs::remove_file(&path);
-        let h = ScriptHashHead::create_with_slots(&path, 8).unwrap();
-        let mut k = [0u8; 32];
-        k[0] = 9;
-        h.insert(&k, &ShHeadValue::inline_one(Fk(1))).unwrap();
-        assert!(matches!(
-            h.reserve_additional(50),
-            Err(StoreError::Corrupt(SH_HEAD_FULL))
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        // Sharded facade: live install + OOB.
-        let sh_path = std::env::temp_dir().join(format!(
-            "rbitcoin-shhead-sharded-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&sh_path);
-        let sh = ShardedScriptHashHead::create_sharded(&sh_path, 4, 16).unwrap();
-        assert!(sh.is_empty());
-        let mut live = LiveShardTable::with_key_budget(8);
-        let mut k0 = [0u8; 32];
-        k0[0] = 0x00;
-        live.insert(&k0, &ShHeadValue::inline_one(Fk(3))).unwrap();
-        sh.install_live_shard(0, live).unwrap();
-        assert!(!sh.is_empty());
-        assert!(matches!(
-            sh.install_live_shard(9999, LiveShardTable::with_key_budget(1)),
-            Err(StoreError::Corrupt(_))
-        ));
-        let _ = std::fs::remove_dir_all(&sh_path);
     }
 
     #[test]
@@ -1629,7 +926,6 @@ mod tests {
             }
             assert!(n < 16, "must not grow 8-slot ingest OA");
         }
-        assert_eq!(h.slots(), 8);
         let mut seen = 0u64;
         h.for_each_occupied(|_full, val| {
             assert!(!val.is_empty());
@@ -1683,7 +979,6 @@ mod tests {
         h1.insert(&k, &ShHeadValue::inline_one(Fk(9))).unwrap();
         assert!(h1.get(&k).unwrap().is_some());
         h1.clear_key(&k).unwrap();
-        h1.reinit_empty().unwrap();
         h1.flush().unwrap();
         h1.flush_async().unwrap();
         drop(h1);
@@ -1707,7 +1002,7 @@ mod tests {
         assert_eq!(h2.shard_count(), 4);
         let key0 = [0u8; 32];
         assert!(h2.get(&key0).unwrap().is_some());
-        h2.reinit_empty().unwrap();
+        assert!(h2.clear_key(&key0).unwrap());
         assert!(h2.get(&key0).unwrap().is_none());
         drop(h2);
 

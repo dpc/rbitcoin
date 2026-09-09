@@ -222,17 +222,6 @@ impl Drop for PeerBookSession {
     }
 }
 
-pub async fn ibd(
-    hub: Arc<ChainHub>,
-    magic: Magic,
-    local_addr: SocketAddr,
-    peers: &[SocketAddr],
-    cfg: IbdConfig,
-) -> Result<u32, NetError> {
-    ibd_cancellable(hub, magic, local_addr, peers, cfg, None).await
-}
-
-/// Like [`ibd`], with an optional cancel flag polled each loop turn.
 pub async fn ibd_cancellable(
     hub: Arc<ChainHub>,
     magic: Magic,

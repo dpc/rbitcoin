@@ -13,7 +13,7 @@
 use crate::error::StoreError;
 use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Magic: `RBSORT02` (v2 header with body CRC).
@@ -64,25 +64,6 @@ pub fn crc32(data: &[u8]) -> u32 {
         c = table[((c ^ u32::from(b)) & 0xFF) as usize] ^ (c >> 8);
     }
     c ^ 0xFFFF_FFFF
-}
-
-fn crc32_file_body(path: &Path, body_len: u64) -> Result<u32, StoreError> {
-    let mut f = File::open(path).map_err(|e| io_err(path, e))?;
-    f.seek(SeekFrom::Start(HEADER_LEN as u64))
-        .map_err(|e| io_err(path, e))?;
-    let table = crc32_table();
-    let mut c = 0xFFFF_FFFFu32;
-    let mut left = body_len;
-    let mut buf = [0u8; 64 * 1024];
-    while left > 0 {
-        let n = (left as usize).min(buf.len());
-        f.read_exact(&mut buf[..n]).map_err(|e| io_err(path, e))?;
-        for &b in &buf[..n] {
-            c = table[((c ^ u32::from(b)) & 0xFF) as usize] ^ (c >> 8);
-        }
-        left -= n as u64;
-    }
-    Ok(c ^ 0xFFFF_FFFF)
 }
 
 /// One immutable sorted run on disk.
@@ -299,18 +280,6 @@ pub fn write_sorted_run(
     Ok(run)
 }
 
-/// Insert an already-written `{seq:06}.run` into the parent [`MANIFEST`].
-///
-/// Pair with [`write_sorted_run_file_with_policy`] so the body write can run
-/// without holding the catalog mutex. Callers serialize this against other
-/// MANIFEST writers.
-pub fn commit_run_to_catalog(run: &SortedRunPath) -> Result<(), StoreError> {
-    let Some(dir) = run.path.parent() else {
-        return Ok(());
-    };
-    manifest_insert(dir, run)
-}
-
 /// Write run file only (no MANIFEST) with an explicit policy.
 pub fn write_sorted_run_file_with_policy(
     path: &Path,
@@ -431,7 +400,6 @@ fn advise_file_dont_need(path: &Path) {
 
 /// Open and validate a run header + body length (does not re-hash the body).
 ///
-/// Full body CRC is checked by [`verify_run_body`] / [`read_run_body`].
 pub fn open_run(path: &Path) -> Result<SortedRunPath, StoreError> {
     let mut f = File::open(path).map_err(|e| io_err(path, e))?;
     let mut hdr = [0u8; HEADER_LEN];
@@ -479,84 +447,6 @@ pub fn open_run(path: &Path) -> Result<SortedRunPath, StoreError> {
     })
 }
 
-/// Stream the body and check CRC-32 (no-op for legacy v1 with crc=0).
-pub fn verify_run_body(run: &SortedRunPath) -> Result<(), StoreError> {
-    if run.body_crc32 == 0 {
-        return Ok(());
-    }
-    let body_len = run.count.saturating_mul(u64::from(run.rec_len));
-    let got = crc32_file_body(&run.path, body_len)?;
-    if got != run.body_crc32 {
-        return Err(StoreError::Corrupt("sorted run: body CRC mismatch"));
-    }
-    Ok(())
-}
-
-/// Read all records into a contiguous buffer (count × rec_len). Verifies CRC.
-pub fn read_run_body(run: &SortedRunPath) -> Result<Vec<u8>, StoreError> {
-    let mut f = File::open(&run.path).map_err(|e| io_err(&run.path, e))?;
-    f.seek(SeekFrom::Start(HEADER_LEN as u64))
-        .map_err(|e| io_err(&run.path, e))?;
-    let mut buf = vec![0u8; (run.count as usize).saturating_mul(run.rec_len as usize)];
-    if !buf.is_empty() {
-        f.read_exact(&mut buf).map_err(|e| io_err(&run.path, e))?;
-    }
-    if run.body_crc32 != 0 {
-        let got = crc32(&buf);
-        if got != run.body_crc32 {
-            return Err(StoreError::Corrupt("sorted run: body CRC mismatch"));
-        }
-    }
-    Ok(buf)
-}
-
-/// Binary-search a sorted run for `key` (first `key_len` bytes of each record).
-///
-/// Returns the full record bytes on hit. Equal keys: first match in file order.
-/// Does **not** load the whole run into RAM (O(log n) seeks + reads).
-pub fn lookup_key(run: &SortedRunPath, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-    if key.len() < run.key_len as usize {
-        return Err(StoreError::Corrupt("sorted run: lookup key short"));
-    }
-    if run.count == 0 {
-        return Ok(None);
-    }
-    let key = &key[..run.key_len as usize];
-    let rec_len = run.rec_len as u64;
-    let mut f = File::open(&run.path).map_err(|e| io_err(&run.path, e))?;
-    let mut lo = 0u64;
-    let mut hi = run.count;
-    let mut rec = vec![0u8; run.rec_len as usize];
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let off = HEADER_LEN as u64 + mid * rec_len;
-        f.seek(SeekFrom::Start(off))
-            .map_err(|e| io_err(&run.path, e))?;
-        f.read_exact(&mut rec).map_err(|e| io_err(&run.path, e))?;
-        match rec[..run.key_len as usize].cmp(key) {
-            Ordering::Less => lo = mid + 1,
-            Ordering::Greater => hi = mid,
-            Ordering::Equal => {
-                let mut i = mid;
-                while i > 0 {
-                    let poff = HEADER_LEN as u64 + (i - 1) * rec_len;
-                    f.seek(SeekFrom::Start(poff))
-                        .map_err(|e| io_err(&run.path, e))?;
-                    let mut prev = vec![0u8; run.rec_len as usize];
-                    f.read_exact(&mut prev).map_err(|e| io_err(&run.path, e))?;
-                    if &prev[..run.key_len as usize] != key {
-                        break;
-                    }
-                    rec = prev;
-                    i -= 1;
-                }
-                return Ok(Some(rec));
-            }
-        }
-    }
-    Ok(None)
-}
-
 /// Compare two fixed records for merge / write order.
 ///
 /// SH catalogs (`key_len == rec_len == 40`) sort by scripthash then **numeric**
@@ -575,29 +465,6 @@ fn rec_key_cmp(a: &[u8], b: &[u8], key_len: usize, rec_len: u32) -> Ordering {
         let n = key_len.min(a.len()).min(b.len());
         a[..n].cmp(&b[..n])
     }
-}
-
-/// Remove one run from the catalog and delete its file (after materialize).
-pub fn remove_run(run: &SortedRunPath) -> Result<(), StoreError> {
-    detach_run(run)?;
-    let _ = fs::remove_file(&run.path);
-    Ok(())
-}
-
-/// Drop a run from the MANIFEST but **leave the file**.
-///
-/// A bare detach leaves a `.run` file that concurrent [`list_runs`] will
-/// **delete as an orphan**.
-pub fn detach_run(run: &SortedRunPath) -> Result<(), StoreError> {
-    let Some(dir) = run.path.parent() else {
-        return Ok(());
-    };
-    if let Some(seq) = run.seq() {
-        let mut mf = load_manifest(dir)?.unwrap_or_default();
-        mf.entries.retain(|e| e.seq != seq);
-        save_manifest(dir, &mf)?;
-    }
-    Ok(())
 }
 
 /// Open leftover incomplete k-way claims (`*.run.mat`) from older datadirs.
@@ -970,26 +837,10 @@ mod tests {
         let run = open_run(&path).unwrap();
         assert_eq!(run.count, 2);
         assert_ne!(run.body_crc32, 0);
-        let b = read_run_body(&run).unwrap();
-        assert_eq!(b.len(), 88);
-        assert_eq!(b[0], 1);
-        assert_eq!(b[32], 10);
-        verify_run_body(&run).unwrap();
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn body_crc_detects_corruption() {
-        let d = tmp_dir();
-        let path = d.join("000001.run");
-        let body = rec(1, 10);
-        write_sorted_run(&path, 32, 44, &body).unwrap();
-        let mut raw = fs::read(&path).unwrap();
-        raw[HEADER_LEN] ^= 0xFF;
-        fs::write(&path, &raw).unwrap();
-        let run = open_run(&path).unwrap();
-        assert!(read_run_body(&run).is_err());
-        assert!(verify_run_body(&run).is_err());
+        let raw = fs::read(&path).unwrap();
+        assert!(raw.len() >= 32 + 88);
+        assert_eq!(raw[32], 1);
+        assert_eq!(raw[32 + 32], 10);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -1012,8 +863,7 @@ mod tests {
         let run = write_sorted_run(&d.join("000001.run"), 32, 44, &rec(1, 1)).unwrap();
         let mat = d.join("000001.run.mat");
         std::fs::rename(&run.path, &mat).unwrap();
-        detach_run(&run).unwrap();
-        assert!(list_runs(&d).unwrap().is_empty());
+        assert!(!run.path.exists());
         let mats = list_materialize_claims(&d).unwrap();
         assert_eq!(mats.len(), 1);
         assert!(mats[0].path.ends_with("000001.run.mat"));
@@ -1055,10 +905,6 @@ mod tests {
         write_sorted_run(&clean.join("000099.run"), 32, 44, &rec(9, 9)).unwrap();
         let again = list_runs(&clean).unwrap();
         assert!(!again.is_empty());
-        if let Ok(r) = open_run(&clean.join("000001.run")) {
-            assert!(lookup_key(&r, &[0xff; 32]).unwrap().is_none());
-            let _ = detach_run(&r);
-        }
         let _ = fs::remove_dir_all(&d);
         let _ = fs::remove_dir_all(&clean);
     }
@@ -1080,31 +926,10 @@ mod tests {
         assert!(matches!(open_run(&bad_v1), Err(StoreError::Corrupt(_))));
         let path = d.join("000022.run");
         let run = write_sorted_run(&path, 32, 44, &rec(1, 1)).unwrap();
-        assert!(matches!(
-            lookup_key(&run, &[0u8; 8]),
-            Err(StoreError::Corrupt(_))
-        ));
         let empty_path = d.join("000023.run");
-        if let Ok(empty) = write_sorted_run(&empty_path, 32, 44, &[]) {
-            assert!(lookup_key(&empty, &[0u8; 32]).unwrap().is_none());
-            let _ = read_run_body(&empty);
-        }
+        let empty = write_sorted_run(&empty_path, 32, 44, &[]).unwrap();
+        assert_eq!(empty.count, 0);
         let _ = run;
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn lookup_key_finds_record() {
-        let d = tmp_dir();
-        let path = d.join("lk.run");
-        let mut body = Vec::new();
-        for i in [1u8, 3, 5, 7, 9] {
-            body.extend_from_slice(&rec(i, i.wrapping_mul(10)));
-        }
-        let run = write_sorted_run(&path, 32, 44, &body).unwrap();
-        let hit = lookup_key(&run, &rec(5, 0)[..32]).unwrap().unwrap();
-        assert_eq!(hit[32], 50);
-        assert!(lookup_key(&run, &rec(4, 0)[..32]).unwrap().is_none());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -1236,14 +1061,10 @@ mod tests {
         write_sorted_run(&p_empty, 32, 44, &[]).unwrap();
         let empty = open_run(&p_empty).unwrap();
         assert_eq!(empty.count, 0);
-        assert!(read_run_body(&empty).unwrap().is_empty());
-        verify_run_body(&empty).unwrap();
 
         let run = open_run(&p1).unwrap();
-        detach_run(&run).unwrap();
+        assert_eq!(run.count, 3);
         assert!(p1.exists());
-        remove_run(&run).unwrap();
-        assert!(!p1.exists());
 
         assert!(matches!(
             write_sorted_run(&d.join("bad.run"), 0, 44, &[]),
@@ -1294,15 +1115,13 @@ mod tests {
     }
 
     #[test]
-    fn commit_run_to_catalog_inserts_file_only_write() {
+    fn write_sorted_run_inserts_catalog() {
         let d = tmp_dir();
         let path = next_run_path(&d, 1);
         let mut rec = [0u8; 40];
         rec[0] = 1;
         rec[32..40].copy_from_slice(&1u64.to_le_bytes());
-        let run = write_sorted_run_file_with_policy(&path, 40, 40, &rec, RunWritePolicy::CATALOG)
-            .unwrap();
-        commit_run_to_catalog(&run).unwrap();
+        write_sorted_run(&path, 40, 40, &rec).unwrap();
         let listed = list_runs(&d).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].seq(), Some(1));

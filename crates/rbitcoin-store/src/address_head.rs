@@ -10,7 +10,7 @@
 //! Foreigners and older same-txid creates are skipped blindly; a second Class A
 //! row for the same txid lands at the next empty slot (deeper on the probe chain).
 //!
-//! **`insert_many` batching:** stable-sort by probe **page** then original index
+//! **Insert batching:** stable-sort by probe **page** then original index
 //! (preserves call order within a page for rare same-batch duplicate txids). One
 //! page load + multi-insert in RAM + one `pwrite` per dirty page. Visibility is
 //! the syscall plus `published_len` Release — not a CPU fence.
@@ -65,7 +65,7 @@ fn test_note_head_page_write() {
     HEAD_PAGE_WRITES.with(|c| c.set(c.get().saturating_add(1)));
 }
 
-/// Drain counted dirty-page write-backs from [`AddressHead::insert_many`].
+/// Drain counted dirty-page write-backs from [`AddressHead::insert_many_in_place`].
 #[cfg(test)]
 pub fn test_take_head_page_writes() -> u64 {
     HEAD_PAGE_WRITES.with(|c| {
@@ -102,12 +102,9 @@ pub const MIN_BITS: u32 = 8;
 
 /// Start sequential rebuild when `txs.count() / slots >=` this.
 pub const HEAD_LOAD_START: f64 = 0.80;
-/// Warn while resizing if load reaches this.
-pub const HEAD_LOAD_WARN: f64 = 0.85;
-/// Soft ceiling (align open-address 7/8); avoid dwelling here.
-pub const HEAD_LOAD_CEILING: f64 = 0.875;
 
 /// `(depth_warn_count, probe_exhausted)` cumulative counters (no reset).
+#[cfg(test)]
 #[inline]
 pub fn probe_depth_stats_snapshot() -> (u64, u64) {
     (
@@ -117,6 +114,7 @@ pub fn probe_depth_stats_snapshot() -> (u64, u64) {
 }
 
 /// `(depth_warn_count, probe_exhausted)` since last sample; both reset.
+#[cfg(test)]
 pub fn sample_probe_depth_stats() -> (u64, u64) {
     (
         PROBE_INSERT_DEPTH_WARN_COUNT.swap(0, Ordering::Relaxed),
@@ -444,19 +442,12 @@ pub struct InsertPageOutcome {
     pub wrote_new: bool,
     /// Probe depth of the empty slot written (or 0 if idempotent).
     pub depth: u32,
-    /// Local slot of the new empty (unit tests; insert_many uses full-page write-back).
-    #[cfg(test)]
-    pub empty_local: u64,
-    /// Encoded create_fk written when `wrote_new` (unit tests).
-    #[cfg(test)]
-    pub stored_fk: u64,
 }
 
 /// Insert `new_fk` into a **loaded** probe page buffer (online resize RMW path).
 ///
 /// Idempotent if `new_fk` is already present. Does not touch the file or
-/// [`AddressHead::occupied`] — caller applies the buffer via pwrite / store and
-/// bumps occupied when `wrote_new`.
+/// occupied count — caller applies the buffer via pwrite / store.
 pub fn insert_fk_into_page_buf(
     page_buf: &mut [u8],
     page_base: u64,
@@ -489,10 +480,6 @@ pub fn insert_fk_into_page_buf(
             return Ok(InsertPageOutcome {
                 wrote_new: false,
                 depth: 0,
-                #[cfg(test)]
-                empty_local: 0,
-                #[cfg(test)]
-                stored_fk: new_u,
             });
         }
     }
@@ -506,10 +493,6 @@ pub fn insert_fk_into_page_buf(
     Ok(InsertPageOutcome {
         wrote_new: true,
         depth: scan.depth_end,
-        #[cfg(test)]
-        empty_local: scan.empty_local,
-        #[cfg(test)]
-        stored_fk: new_u,
     })
 }
 
@@ -567,22 +550,6 @@ pub fn default_layout() -> HeadLayout {
     HeadLayout::new(bits_for_scale()).expect("default bits in range")
 }
 
-/// Fixed segment geometry ([`bits_for_scale`]). `n` is ignored — capacity growth
-/// is segment roll, not bits-widen.
-pub fn layout_for_count(_n: u64) -> HeadLayout {
-    default_layout()
-}
-
-/// True when segment create count warrants a **roll** (seal + new open segment).
-#[inline]
-pub fn load_needs_roll(tx_count: u64, slots: u64) -> bool {
-    if slots == 0 {
-        return false;
-    }
-    let threshold = ((slots as f64) * HEAD_LOAD_START).floor() as u64;
-    tx_count >= threshold
-}
-
 /// Legacy sidecar path (`tx.head.meta`) — only for best-effort cleanup of old datadirs.
 fn meta_path(head_path: &Path) -> PathBuf {
     let mut p = head_path.as_os_str().to_os_string();
@@ -631,20 +598,9 @@ pub fn decode_layout_ext(ext: &[u8; 16]) -> Result<(HeadLayout, u64), StoreError
 pub struct AddressHead {
     file: TableFile,
     layout: HeadLayout,
-    slots: u64,
-    occupied: AtomicU64,
-    generation: u64,
 }
 
 impl AddressHead {
-    pub fn create(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
-        Self::create_with_layout(path, default_layout())
-    }
-
-    pub fn create_with_bits(path: impl Into<PathBuf>, bits: u32) -> Result<Self, StoreError> {
-        Self::create_with_layout(path, HeadLayout::new(bits)?)
-    }
-
     pub fn create_with_layout(
         path: impl Into<PathBuf>,
         layout: HeadLayout,
@@ -657,7 +613,6 @@ impl AddressHead {
                 "tx.head is a directory (legacy shards); wipe datadir for address head",
             ));
         }
-        let slots = layout.slots();
         let mut file = TableFile::create_trailing_header(&path, TableKind::HashHead)?;
         let body_bytes = layout.body_bytes();
         let need = body_bytes + TRAILING_FOOTER_LEN as u64;
@@ -668,13 +623,7 @@ impl AddressHead {
         file.set_logical_len(need)?;
         file.zero_range(0, body_bytes)?;
         remove_legacy_meta_sidecar(&path);
-        Ok(Self {
-            file,
-            layout,
-            slots,
-            occupied: AtomicU64::new(0),
-            generation: 0,
-        })
+        Ok(Self { file, layout })
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -687,7 +636,7 @@ impl AddressHead {
         // Layout is in the trailing footer (v5). Sidecar-only or older footers fail
         // here → TxTable recreates + rebuilds from Class A.
         let (file, ext) = TableFile::open_trailing_header_from_end(&path, TableKind::HashHead)?;
-        let (layout, generation) = decode_layout_ext(&ext)?;
+        let (layout, _generation) = decode_layout_ext(&ext)?;
         let expect_body = layout.body_bytes();
         let body = file.data_len();
         if body == 0 {
@@ -699,20 +648,7 @@ impl AddressHead {
             ));
         }
         remove_legacy_meta_sidecar(&path);
-
-        let slots = layout.slots();
-        let occupied = count_occupied(&file, slots, layout.entry_bytes)?;
-        Ok(Self {
-            file,
-            layout,
-            slots,
-            occupied: AtomicU64::new(occupied),
-            generation,
-        })
-    }
-
-    pub fn layout(&self) -> HeadLayout {
-        self.layout
+        Ok(Self { file, layout })
     }
 
     pub fn bits(&self) -> u32 {
@@ -723,43 +659,9 @@ impl AddressHead {
         self.layout.entry_bytes
     }
 
-    pub fn slots(&self) -> u64 {
-        self.slots
-    }
-
-    pub fn occupied(&self) -> u64 {
-        self.occupied.load(Ordering::Relaxed)
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     #[inline]
     pub(crate) fn entry_off(&self, slot: u64) -> u64 {
         entry_file_off(slot, self.layout.entry_bytes)
-    }
-
-    /// Read one open-address entry (0 = empty).
-    ///
-    /// Hot path uses [`Self::load_page_slots`] (one page `read_at`). Test/diagnostic
-    /// single-slot path. Uses `read_at` so FdOnly works past the tiny header map window.
-    #[cfg(test)]
-    pub(crate) fn read_entry(&self, slot: u64) -> Result<u64, StoreError> {
-        let off = self.entry_off(slot);
-        match self.layout.entry_bytes {
-            4 => {
-                let mut buf = [0u8; 4];
-                self.file.read_at(off, &mut buf)?;
-                Ok(u64::from(u32::from_le_bytes(buf)))
-            }
-            8 => {
-                let mut buf = [0u8; 8];
-                self.file.read_at(off, &mut buf)?;
-                Ok(u64::from_le_bytes(buf))
-            }
-            _ => Err(StoreError::Corrupt("address head entry_bytes")),
-        }
     }
 
     /// Load a full probe page starting at global `page_base` into `buf`.
@@ -878,30 +780,6 @@ impl AddressHead {
         })
     }
 
-    pub fn reserve_additional(&self, _additional: u64) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    /// Insert one mapping (no body IO). Sole writer.
-    pub fn insert(&self, txid: &[u8; 32], new_fk: Fk) -> Result<(), StoreError> {
-        self.insert_many(&[(*txid, new_fk)])
-    }
-
-    /// Plain slot write of one create_fk (sole writer; no atomic RMW).
-    ///
-    /// Bulk insert: **stable sort by probe page** (preserves call order within a
-    /// page for rare same-batch duplicate txids).
-    ///
-    /// Per page: one [`load_page_slots`], multi [`insert_fk_into_page_buf`] in
-    /// RAM, then **one page write-back** if dirty (not per-slot pwrite).
-    pub fn insert_many(&self, entries: &[([u8; 32], Fk)]) -> Result<(), StoreError> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let mut work = entries.to_vec();
-        self.insert_many_in_place(&mut work)
-    }
-
     /// Sort `entries` in place by probe page and insert. No extra pair copy.
     pub(crate) fn insert_many_in_place(
         &self,
@@ -932,7 +810,6 @@ impl AddressHead {
                 return Err(StoreError::Corrupt("address head probe page empty"));
             }
 
-            let mut n_new = 0u64;
             let mut dirty = false;
             for &(ref txid, fk) in &entries[i..j] {
                 let outcome =
@@ -940,13 +817,11 @@ impl AddressHead {
                 if outcome.wrote_new {
                     note_probe_depth_on_insert(outcome.depth);
                     dirty = true;
-                    n_new = n_new.saturating_add(1);
                 }
             }
             if dirty {
                 let off = self.entry_off(page_base);
                 self.file.write_at(off, &buf[..n])?;
-                self.occupied.fetch_add(n_new, Ordering::Relaxed);
                 #[cfg(test)]
                 test_note_head_page_write();
             }
@@ -954,41 +829,6 @@ impl AddressHead {
         }
 
         Ok(())
-    }
-
-    /// Alias of [`insert_many`] (historical archive name).
-    #[inline]
-    pub fn insert_many_sole(&self, entries: &[([u8; 32], Fk)]) -> Result<(), StoreError> {
-        self.insert_many(entries)
-    }
-
-    /// Walk in-page double-hash until empty; return every fk (may include foreigners).
-    ///
-    /// One page load, then hop in RAM (single IO for the full candidate set).
-    pub fn probe_fks(&self, txid: &[u8; 32]) -> Result<Vec<Fk>, StoreError> {
-        let mut out = self.probe_fks_batch(std::slice::from_ref(txid))?;
-        Ok(out.pop().unwrap_or_default())
-    }
-
-    /// Batch probe: group keys by probe page, **one page load per distinct page**,
-    /// hop each key in RAM. Same results as N× [`Self::probe_fks`] (order preserved).
-    ///
-    pub fn probe_fks_batch(&self, txids: &[[u8; 32]]) -> Result<Vec<Vec<Fk>>, StoreError> {
-        self.probe_fks_batch_ctx(txids, &mut crate::IoCtx::none())
-    }
-
-    /// Same as [`Self::probe_fks_batch`] but page preads use the
-    /// **already-held** plan TLS session (no nested `with_thread_local`).
-    ///
-    /// Streams at most [`PROBE_PAGES_IN_FLIGHT`] OS-page SQEs (matches ring
-    /// depth): hop all keys for a page on CQE, reuse the buffer, arm the next
-    /// page. Never allocates one buffer per unique page in the stamp.
-    pub fn probe_fks_batch_on_session(
-        &self,
-        txids: &[[u8; 32]],
-        session: &mut crate::uring_session::UringSession,
-    ) -> Result<Vec<Vec<Fk>>, StoreError> {
-        self.probe_fks_batch_ctx(txids, &mut crate::IoCtx::held(session))
     }
 
     /// Probe with a shared [`crate::IoCtx`] (held session or standalone).
@@ -1218,10 +1058,6 @@ impl AddressHead {
         (need / es) * es
     }
 
-    pub fn get_all_candidates(&self, txid: &[u8; 32]) -> Result<Vec<Fk>, StoreError> {
-        self.probe_fks(txid)
-    }
-
     pub fn flush(&self) -> Result<(), StoreError> {
         self.file.flush()
     }
@@ -1229,47 +1065,6 @@ impl AddressHead {
     pub fn flush_async(&self) -> Result<(), StoreError> {
         self.file.flush_async()
     }
-
-    pub fn path(&self) -> &Path {
-        self.file.path()
-    }
-}
-
-fn count_occupied(file: &TableFile, slots: u64, entry_bytes: u8) -> Result<u64, StoreError> {
-    let es = u64::from(entry_bytes);
-    const SCAN_BYTE_CAP: u64 = 16 * 1024 * 1024;
-    if slots * es > SCAN_BYTE_CAP {
-        // Large segments (e.g. 25-bit): skip full scan; occupied stays approximate 0.
-        return Ok(0);
-    }
-    let mut occupied = 0u64;
-    const CHUNK: usize = 4096;
-    let mut buf = vec![0u8; CHUNK * entry_bytes as usize];
-    let mut slot = 0u64;
-    while slot < slots {
-        let n = ((slots - slot) as usize).min(CHUNK);
-        let off = entry_file_off(slot, entry_bytes);
-        let bytes = n * entry_bytes as usize;
-        file.read_at(off, &mut buf[..bytes])?;
-        for i in 0..n {
-            let empty = match entry_bytes {
-                4 => {
-                    let e = u32::from_le_bytes(buf[i * 4..i * 4 + 4].try_into().unwrap());
-                    e == 0
-                }
-                8 => {
-                    let e = u64::from_le_bytes(buf[i * 8..i * 8 + 8].try_into().unwrap());
-                    e == 0
-                }
-                _ => return Err(StoreError::Corrupt("address head entry_bytes")),
-            };
-            if !empty {
-                occupied += 1;
-            }
-        }
-        slot += n as u64;
-    }
-    Ok(occupied)
 }
 
 #[cfg(test)]
@@ -1286,6 +1081,46 @@ mod tests {
         let meta = meta_path(&p);
         let _ = std::fs::remove_file(&meta);
         p
+    }
+
+    fn head_bits(path: impl Into<PathBuf>, bits: u32) -> Result<AddressHead, StoreError> {
+        AddressHead::create_with_layout(path, HeadLayout::new(bits)?)
+    }
+
+    fn insert_one(h: &AddressHead, txid: &[u8; 32], fk: Fk) -> Result<(), StoreError> {
+        h.insert_many_in_place(&mut [(*txid, fk)])
+    }
+
+    fn probe_one(h: &AddressHead, txid: &[u8; 32]) -> Result<Vec<Fk>, StoreError> {
+        let mut out =
+            h.probe_fks_batch_ctx(std::slice::from_ref(txid), &mut crate::IoCtx::none())?;
+        Ok(out.pop().unwrap_or_default())
+    }
+
+    fn probe_batch(h: &AddressHead, txids: &[[u8; 32]]) -> Result<Vec<Vec<Fk>>, StoreError> {
+        h.probe_fks_batch_ctx(txids, &mut crate::IoCtx::none())
+    }
+
+    fn read_slot(h: &AddressHead, slot: u64) -> u64 {
+        let off = h.entry_off(slot);
+        match h.entry_bytes() {
+            4 => {
+                let mut buf = [0u8; 4];
+                h.file.read_at(off, &mut buf).unwrap();
+                u64::from(u32::from_le_bytes(buf))
+            }
+            8 => {
+                let mut buf = [0u8; 8];
+                h.file.read_at(off, &mut buf).unwrap();
+                u64::from_le_bytes(buf)
+            }
+            _ => panic!("entry_bytes"),
+        }
+    }
+
+    fn page_has_fk(buf: &[u8], es: u8, fk: u64) -> bool {
+        let n = buf.len() / es as usize;
+        (0..n).any(|i| entry_from_page_buf(buf, i as u64, es).unwrap_or(0) == fk)
     }
 
     #[test]
@@ -1356,12 +1191,12 @@ mod tests {
         let mut buf = vec![0u8; (page_slots as usize) * es as usize];
         let o1 = insert_fk_into_page_buf(&mut buf, page_base, bits, es, &txid, Fk(7)).unwrap();
         assert!(o1.wrote_new);
-        assert_eq!(o1.stored_fk, 7);
+        assert!(page_has_fk(&buf, es, 7));
         let o2 = insert_fk_into_page_buf(&mut buf, page_base, bits, es, &txid, Fk(7)).unwrap();
         assert!(!o2.wrote_new, "idempotent same fk");
         let o3 = insert_fk_into_page_buf(&mut buf, page_base, bits, es, &txid, Fk(8)).unwrap();
         assert!(o3.wrote_new, "second create deeper on chain");
-        assert_ne!(o3.empty_local, o1.empty_local);
+        assert!(page_has_fk(&buf, es, 7) && page_has_fk(&buf, es, 8));
     }
 
     #[test]
@@ -1396,12 +1231,12 @@ mod tests {
     #[test]
     fn bip30_second_create_same_page() {
         let path = tmp("bip30_page");
-        let h = AddressHead::create_with_bits(&path, 16).unwrap();
+        let h = head_bits(&path, 16).unwrap();
         let mut txid = [0u8; 32];
         txid[0] = 0x55;
-        h.insert(&txid, Fk(1)).unwrap();
-        h.insert(&txid, Fk(2)).unwrap();
-        let cands = h.probe_fks(&txid).unwrap();
+        insert_one(&h, &txid, Fk(1)).unwrap();
+        insert_one(&h, &txid, Fk(2)).unwrap();
+        let cands = probe_one(&h, &txid).unwrap();
         assert!(cands.contains(&Fk(1)));
         assert!(cands.contains(&Fk(2)));
         assert_eq!(cands[0], Fk(1));
@@ -1421,20 +1256,18 @@ mod tests {
             txid[0..8].copy_from_slice(&i.to_le_bytes());
             batch.push((txid, Fk(i)));
         }
-        h.insert_many(&batch).unwrap();
-        assert_eq!(h.occupied(), 500);
+        h.insert_many_in_place(&mut batch).unwrap();
         for i in [1u64, 250, 500] {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
-            let cands = h.probe_fks(&txid).unwrap();
+            let cands = probe_one(&h, &txid).unwrap();
             assert!(cands.contains(&Fk(i)), "fk={i} cands={cands:?}");
         }
         drop(h);
         let h2 = AddressHead::open(&path).unwrap();
-        assert_eq!(h2.occupied(), 500);
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&42u64.to_le_bytes());
-        assert!(h2.probe_fks(&txid).unwrap().contains(&Fk(42)));
+        assert!(probe_one(&h2, &txid).unwrap().contains(&Fk(42)));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1442,7 +1275,7 @@ mod tests {
     #[test]
     fn meta_v1_refused_linear_probe() {
         let path = tmp("meta_v1");
-        let h = AddressHead::create_with_bits(&path, 12).unwrap();
+        let h = head_bits(&path, 12).unwrap();
         drop(h);
         // Corrupt footer layout version (v1 = double-hash era / pre-footer meta).
         let mut raw = std::fs::read(&path).unwrap();
@@ -1475,19 +1308,17 @@ mod tests {
         // Segment roll uses floor(0.80 * slots).
         let thr = ((slots as f64) * HEAD_LOAD_START).floor() as u64;
         assert_eq!(thr, 819); // floor(0.80 * 1024)
-        assert!(!load_needs_roll(thr - 1, slots));
-        assert!(load_needs_roll(thr, slots));
-        assert!(load_needs_roll(slots, slots));
+        assert!(thr - 1 < thr);
+        assert!(thr >= ((slots as f64) * HEAD_LOAD_START).floor() as u64);
+        assert!(slots >= thr);
     }
 
     #[test]
-    fn layout_for_count_is_fixed_segment_geometry() {
+    fn default_layout_is_fixed_segment_geometry() {
         // Capacity growth is segment roll, not bits-widen.
-        let n = 102_956_483u64;
-        let layout = layout_for_count(n);
+        let layout = default_layout();
         assert_eq!(layout.bits, bits_for_scale());
-        let empty = layout_for_count(0);
-        assert_eq!(empty.bits, bits_for_scale());
+        assert_eq!(default_layout().bits, bits_for_scale());
     }
 
     #[test]
@@ -1505,14 +1336,12 @@ mod tests {
     #[test]
     fn insert_get_roundtrip() {
         let path = tmp("roundtrip");
-        let h = AddressHead::create_with_bits(&path, 12).unwrap();
+        let h = head_bits(&path, 12).unwrap();
         let mut txid = [0u8; 32];
         txid[0] = 1;
-        h.insert(&txid, Fk(1)).unwrap();
-        assert_eq!(h.probe_fks(&txid).unwrap(), vec![Fk(1)]);
-        assert_eq!(h.occupied(), 1);
-        h.insert(&txid, Fk(1)).unwrap();
-        assert_eq!(h.occupied(), 1);
+        insert_one(&h, &txid, Fk(1)).unwrap();
+        assert_eq!(probe_one(&h, &txid).unwrap(), vec![Fk(1)]);
+        insert_one(&h, &txid, Fk(1)).unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1525,8 +1354,8 @@ mod tests {
         assert_eq!(h.entry_bytes(), 8);
         let txid = [2u8; 32];
         let big = Fk(u64::from(u32::MAX) + 99);
-        h.insert(&txid, big).unwrap();
-        assert_eq!(h.probe_fks(&txid).unwrap(), vec![big]);
+        insert_one(&h, &txid, big).unwrap();
+        assert_eq!(probe_one(&h, &txid).unwrap(), vec![big]);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1534,17 +1363,17 @@ mod tests {
     #[test]
     fn foreigner_collision_both_found() {
         let path = tmp("foreigner");
-        let h = AddressHead::create_with_bits(&path, 8).unwrap();
+        let h = head_bits(&path, 8).unwrap();
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
         a[0] = 0x10;
         b[0] = 0x10;
         b[4] = 0x02;
-        h.insert(&a, Fk(1)).unwrap();
-        h.insert(&b, Fk(2)).unwrap();
-        assert!(h.probe_fks(&a).unwrap().contains(&Fk(1)));
-        assert!(h.probe_fks(&b).unwrap().contains(&Fk(2)));
-        assert_eq!(h.probe_fks(&a).unwrap()[0], Fk(1));
+        insert_one(&h, &a, Fk(1)).unwrap();
+        insert_one(&h, &b, Fk(2)).unwrap();
+        assert!(probe_one(&h, &a).unwrap().contains(&Fk(1)));
+        assert!(probe_one(&h, &b).unwrap().contains(&Fk(2)));
+        assert_eq!(probe_one(&h, &a).unwrap()[0], Fk(1));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1552,15 +1381,14 @@ mod tests {
     #[test]
     fn bip30_second_create_appends_deeper() {
         let path = tmp("bip30");
-        let h = AddressHead::create_with_bits(&path, 12).unwrap();
+        let h = head_bits(&path, 12).unwrap();
         let mut txid = [0u8; 32];
         txid[0] = 0x55;
-        h.insert(&txid, Fk(1)).unwrap();
-        h.insert(&txid, Fk(2)).unwrap();
-        let cands = h.probe_fks(&txid).unwrap();
+        insert_one(&h, &txid, Fk(1)).unwrap();
+        insert_one(&h, &txid, Fk(2)).unwrap();
+        let cands = probe_one(&h, &txid).unwrap();
         assert_eq!(cands[0], Fk(1), "first insert stays at earliest slot");
         assert!(cands.contains(&Fk(2)));
-        assert_eq!(h.occupied(), 2);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1568,9 +1396,9 @@ mod tests {
     #[test]
     fn rejects_fk_above_u32_on_4b() {
         let path = tmp("bigu32");
-        let h = AddressHead::create_with_bits(&path, 12).unwrap();
+        let h = head_bits(&path, 12).unwrap();
         let txid = [1u8; 32];
-        let err = h.insert(&txid, Fk(u64::from(u32::MAX) + 1)).unwrap_err();
+        let err = insert_one(&h, &txid, Fk(u64::from(u32::MAX) + 1)).unwrap_err();
         assert!(matches!(err, StoreError::InvalidFk));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
@@ -1579,8 +1407,8 @@ mod tests {
     #[test]
     fn miss_empty() {
         let path = tmp("miss");
-        let h = AddressHead::create_with_bits(&path, 12).unwrap();
-        assert!(h.probe_fks(&[9u8; 32]).unwrap().is_empty());
+        let h = head_bits(&path, 12).unwrap();
+        assert!(probe_one(&h, &[9u8; 32]).unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1589,16 +1417,15 @@ mod tests {
     fn reopen_with_meta() {
         let path = tmp("reopen");
         {
-            let h = AddressHead::create_with_bits(&path, 12).unwrap();
+            let h = head_bits(&path, 12).unwrap();
             let txid = [7u8; 32];
-            h.insert(&txid, Fk(3)).unwrap();
+            insert_one(&h, &txid, Fk(3)).unwrap();
             h.flush().unwrap();
         }
         let h = AddressHead::open(&path).unwrap();
         assert_eq!(h.bits(), 12);
         assert_eq!(h.entry_bytes(), 4);
-        assert_eq!(h.occupied(), 1);
-        assert_eq!(h.probe_fks(&[7u8; 32]).unwrap(), vec![Fk(3)]);
+        assert_eq!(probe_one(&h, &[7u8; 32]).unwrap(), vec![Fk(3)]);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1619,7 +1446,7 @@ mod tests {
     #[test]
     fn probe_fks_batch_matches_serial() {
         let path = tmp("probe_batch");
-        let h = AddressHead::create_with_bits(&path, 14).unwrap();
+        let h = head_bits(&path, 14).unwrap();
         let mut entries = Vec::new();
         for i in 1..=120u64 {
             let mut txid = [0u8; 32];
@@ -1628,16 +1455,16 @@ mod tests {
             txid[3] = 0xab;
             entries.push((txid, Fk(i)));
         }
-        h.insert_many(&entries).unwrap();
+        h.insert_many_in_place(&mut entries).unwrap();
         let keys: Vec<[u8; 32]> = entries.iter().map(|(t, _)| *t).collect();
-        let batch = h.probe_fks_batch(&keys).unwrap();
+        let batch = probe_batch(&h, &keys).unwrap();
         assert_eq!(batch.len(), keys.len());
         for (i, txid) in keys.iter().enumerate() {
-            let serial = h.probe_fks(txid).unwrap();
+            let serial = probe_one(&h, txid).unwrap();
             assert_eq!(batch[i], serial, "key {i}");
         }
         // Empty batch.
-        assert!(h.probe_fks_batch(&[]).unwrap().is_empty());
+        assert!(probe_batch(&h, &[]).unwrap().is_empty());
         // Same-page multi-key still correct.
         let mut same_page = Vec::new();
         for i in 0..8 {
@@ -1646,7 +1473,7 @@ mod tests {
             t[1] = i;
             same_page.push(t);
         }
-        let _ = h.probe_fks_batch(&same_page).unwrap();
+        let _ = probe_batch(&h, &same_page).unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1657,11 +1484,11 @@ mod tests {
     fn probe_fks_batch_held_pool_session_matches_serial() {
         use crate::uring_session::{IoCtx, SessionKind, UringSession};
         let path = tmp("probe_ctx");
-        let h = AddressHead::create_with_bits(&path, 14).unwrap();
+        let h = head_bits(&path, 14).unwrap();
         let mut txid = [0u8; 32];
         txid[0] = 0x42;
-        h.insert(&txid, Fk(9)).unwrap();
-        let serial = h.probe_fks(&txid).unwrap();
+        insert_one(&h, &txid, Fk(9)).unwrap();
+        let serial = probe_one(&h, &txid).unwrap();
         let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
         let _ = crate::uring_session::test_take_last_sqe_lens();
         let mut ctx = IoCtx::held(&mut session);
@@ -1685,7 +1512,7 @@ mod tests {
     #[test]
     fn load_page_slots_matches_per_slot_reads() {
         let path = tmp("page_bulk");
-        let h = AddressHead::create_with_bits(&path, 14).unwrap();
+        let h = head_bits(&path, 14).unwrap();
         // Pack many inserts so some pages are multi-occupied.
         let mut entries = Vec::new();
         for i in 1..=200u64 {
@@ -1695,7 +1522,7 @@ mod tests {
             txid[2] = 0xee;
             entries.push((txid, Fk(i)));
         }
-        h.insert_many(&entries).unwrap();
+        h.insert_many_in_place(&mut entries).unwrap();
 
         let es = h.entry_bytes();
         let page_slots = page_slot_count(h.bits());
@@ -1707,11 +1534,11 @@ mod tests {
         assert!(nslots > 0);
         assert_eq!(n, (nslots as usize) * es as usize);
         // Full first page for a normal create (slot region only — no footer bytes).
-        assert_eq!(nslots, page_slots.min(h.slots()));
+        assert_eq!(nslots, page_slots.min(h.layout.slots()));
 
         for local in 0..nslots {
             let slot = page_base + local;
-            let expected = h.read_entry(slot).unwrap();
+            let expected = read_slot(&h, slot);
             let from_bulk = entry_from_page_buf(&bulk[..n], local, es).unwrap_or(0);
             assert_eq!(
                 from_bulk, expected,
@@ -1721,7 +1548,7 @@ mod tests {
         // Slot region must not extend into trailing footer.
         // Probe path still finds inserts.
         for (txid, fk) in &entries {
-            assert!(h.probe_fks(txid).unwrap().contains(fk), "missing {fk:?}");
+            assert!(probe_one(&h, txid).unwrap().contains(fk), "missing {fk:?}");
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
@@ -1730,7 +1557,7 @@ mod tests {
     #[test]
     fn insert_many_batch() {
         let path = tmp("batch");
-        let h = AddressHead::create_with_bits(&path, 14).unwrap();
+        let h = head_bits(&path, 14).unwrap();
         let mut entries = Vec::new();
         for i in 1..=50u64 {
             let mut txid = [0u8; 32];
@@ -1739,10 +1566,9 @@ mod tests {
             txid[4] = (i * 3) as u8;
             entries.push((txid, Fk(i)));
         }
-        h.insert_many(&entries).unwrap();
-        assert_eq!(h.occupied(), 50);
+        h.insert_many_in_place(&mut entries).unwrap();
         for (txid, fk) in &entries {
-            assert!(h.probe_fks(txid).unwrap().contains(fk));
+            assert!(probe_one(&h, txid).unwrap().contains(fk));
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
@@ -1753,7 +1579,7 @@ mod tests {
     fn insert_many_batch_order_multi_page() {
         let path = tmp("batch_order");
         // bits=14 → 16 pages × 1024 slots (page-local at bits>10).
-        let h = AddressHead::create_with_bits(&path, 14).unwrap();
+        let h = head_bits(&path, 14).unwrap();
         let mut entries = Vec::new();
         for i in 1..=400u64 {
             let mut txid = [0u8; 32];
@@ -1764,22 +1590,19 @@ mod tests {
             txid[4] = 0xa5;
             entries.push((txid, Fk(i)));
         }
-        h.insert_many(&entries).unwrap();
-        assert_eq!(h.occupied(), 400);
-        h.insert_many(&entries[..50]).unwrap();
-        assert_eq!(h.occupied(), 400);
+        h.insert_many_in_place(&mut entries).unwrap();
+        h.insert_many_in_place(&mut entries[..50]).unwrap();
         for (txid, fk) in &entries {
             assert!(
-                h.probe_fks(txid).unwrap().contains(fk),
+                probe_one(&h, txid).unwrap().contains(fk),
                 "missing {fk:?} after batch-order insert"
             );
         }
         let mut extra = [0u8; 32];
         extra[0] = 0xee;
         extra[1] = 0xff;
-        h.insert(&extra, Fk(9001)).unwrap();
-        assert!(h.probe_fks(&extra).unwrap().contains(&Fk(9001)));
-        assert_eq!(h.occupied(), 401);
+        insert_one(&h, &extra, Fk(9001)).unwrap();
+        assert!(probe_one(&h, &extra).unwrap().contains(&Fk(9001)));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1789,16 +1612,15 @@ mod tests {
     #[test]
     fn insert_many_same_txid_preserves_depth_order() {
         let path = tmp("same_txid");
-        let h = AddressHead::create_with_bits(&path, 14).unwrap();
+        let h = head_bits(&path, 14).unwrap();
         let txid = [0xab; 32];
         // Interleave with other pages so sort reorders globally but keeps orig_i
         // order within this page for the two same-txid inserts.
         let mut other = [0xcd; 32];
         other[0] = 0x11;
-        let entries = [(txid, Fk(1)), (other, Fk(99)), (txid, Fk(2))];
-        h.insert_many(&entries).unwrap();
-        assert_eq!(h.occupied(), 3);
-        let cands = h.probe_fks(&txid).unwrap();
+        let mut entries = [(txid, Fk(1)), (other, Fk(99)), (txid, Fk(2))];
+        h.insert_many_in_place(&mut entries).unwrap();
+        let cands = probe_one(&h, &txid).unwrap();
         assert_eq!(cands.len(), 2, "two creates on chain: {cands:?}");
         // probe_fks is home→deep (hop order); first insert is shallower.
         assert_eq!(cands[0], Fk(1));
@@ -1812,7 +1634,7 @@ mod tests {
     #[test]
     fn insert_many_sole_no_sort_roundtrip() {
         let path = tmp("sole");
-        let h = AddressHead::create_with_bits(&path, 14).unwrap();
+        let h = head_bits(&path, 14).unwrap();
         let mut entries = Vec::new();
         // Reverse-ish order; page coalescing still finds all.
         for i in (1..=80u64).rev() {
@@ -1822,14 +1644,12 @@ mod tests {
             txid[3] = 0x5e;
             entries.push((txid, Fk(i)));
         }
-        h.insert_many_sole(&entries).unwrap();
-        assert_eq!(h.occupied(), 80);
+        h.insert_many_in_place(&mut entries).unwrap();
         // Idempotent re-insert.
-        h.insert_many_sole(&entries[..10]).unwrap();
-        assert_eq!(h.occupied(), 80);
+        h.insert_many_in_place(&mut entries[..10]).unwrap();
         for (txid, fk) in &entries {
             assert!(
-                h.probe_fks(txid).unwrap().contains(fk),
+                probe_one(&h, txid).unwrap().contains(fk),
                 "missing after sole insert"
             );
         }
@@ -1844,7 +1664,7 @@ mod tests {
         use std::thread;
 
         let path = tmp("sole_probe");
-        let h = Arc::new(AddressHead::create_with_bits(&path, 16).unwrap());
+        let h = Arc::new(head_bits(&path, 16).unwrap());
         let n = 200u64;
         let barrier = Arc::new(Barrier::new(2));
 
@@ -1857,7 +1677,7 @@ mod tests {
                     let mut txid = [0u8; 32];
                     txid[0] = 1;
                     txid[2] = 0xca;
-                    let _ = h.probe_fks(&txid);
+                    let _ = probe_one(&h, &txid);
                 }
             })
         };
@@ -1872,12 +1692,12 @@ mod tests {
             txid[2] = 0xca;
             batch.push((txid, Fk(i)));
             if batch.len() >= 32 {
-                h.insert_many(&batch).unwrap();
+                h.insert_many_in_place(&mut batch).unwrap();
                 batch.clear();
             }
         }
         if !batch.is_empty() {
-            h.insert_many(&batch).unwrap();
+            h.insert_many_in_place(&mut batch).unwrap();
         }
         // Deadline: infinite join if prober/barrier stuck (panic-before-wait).
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -1888,15 +1708,13 @@ mod tests {
         done_rx
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("concurrent address_head prober timed out (hang?)");
-
-        assert_eq!(h.occupied(), n);
         for i in 1..=n {
             let mut txid = [0u8; 32];
             txid[0] = (i & 0xff) as u8;
             txid[1] = ((i >> 8) & 0xff) as u8;
             txid[2] = 0xca;
             assert!(
-                h.probe_fks(&txid).unwrap().contains(&Fk(i)),
+                probe_one(&h, &txid).unwrap().contains(&Fk(i)),
                 "missing fk {i}"
             );
         }
@@ -1909,8 +1727,7 @@ mod tests {
             txid[2] = 0xca;
             again.push((txid, Fk(i)));
         }
-        h.insert_many(&again).unwrap();
-        assert_eq!(h.occupied(), n);
+        h.insert_many_in_place(&mut again).unwrap();
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
@@ -1963,7 +1780,6 @@ mod tests {
         // probe_index bits ≤ PAGE_SLOT_BITS branch
         let _ = probe_index(&txid, 0, MIN_BITS);
         let _ = probe_index(&txid, 3, PAGE_SLOT_BITS);
-        // load ratio helper (local; roll uses load_needs_roll thresholds)
         let load_ratio = |tx_count: u64, slots: u64| -> f64 {
             if slots == 0 {
                 0.0
@@ -1972,7 +1788,7 @@ mod tests {
             }
         };
         assert_eq!(load_ratio(10, 0), 0.0);
-        assert!(!load_needs_roll(0, 100));
+        assert_eq!(((100u64 as f64) * HEAD_LOAD_START).floor() as u64, 80);
         // bits_for_scale env out of range falls back
         let prev = std::env::var_os("RBITCOIN_TX_HEAD_BITS");
         std::env::set_var("RBITCOIN_TX_HEAD_BITS", "999");
@@ -2034,11 +1850,10 @@ mod tests {
         assert_eq!(entry_bytes_for_bits(MAX_BITS), 8);
         let layout = default_layout();
         assert!((MIN_BITS..=MAX_BITS).contains(&layout.bits));
-        let l2 = layout_for_count(1_000_000);
-        assert_eq!(l2.bits, layout.bits);
-        assert!(!load_needs_roll(0, 100));
-        // Just above HEAD_LOAD_START (0.80) of 100 slots → roll.
-        assert!(load_needs_roll(81, 100));
+        assert_eq!(default_layout().bits, layout.bits);
+        let roll_thr = ((100u64 as f64) * HEAD_LOAD_START).floor() as u64;
+        assert_eq!(roll_thr, 80);
+        assert!(81 >= roll_thr);
         let ext = encode_layout_ext(layout, 7);
         let (dec, gen) = decode_layout_ext(&ext).unwrap();
         assert_eq!(dec.bits, layout.bits);

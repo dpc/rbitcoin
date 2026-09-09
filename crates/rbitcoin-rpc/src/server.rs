@@ -79,7 +79,6 @@ pub async fn run_rpc(
     peers: Option<Arc<rbitcoin_net::PeerHub>>,
     chain: Option<Arc<rbitcoin_net::ChainHub>>,
     addrman: Option<Arc<std::sync::Mutex<rbitcoin_net::AddrMan>>>,
-    peers_path: Option<std::path::PathBuf>,
 ) -> Result<RpcHandle, String> {
     let (auth, cookie_path) = resolve_rpc_auth(
         &config.datadir,
@@ -112,7 +111,6 @@ pub async fn run_rpc(
         peers,
         chain,
         addrman,
-        peers_path,
         logpath: config.datadir.join("debug.log").display().to_string(),
         active: Arc::clone(&active),
         permit_bare_multisig: config.permit_bare_multisig,
@@ -446,56 +444,54 @@ fn authorized(auth: &RpcAuth, headers: &HeaderMap) -> bool {
     auth.matches(&u, &p)
 }
 
-/// Build Basic auth header value for clients.
-pub fn basic_auth_header(auth: &RpcAuth) -> String {
-    use base64::Engine;
-    let tok = base64::engine::general_purpose::STANDARD.encode(auth.cookie_line());
-    format!("Basic {tok}")
-}
-
-/// Call a method against a live server (test helper / smoke).
-pub async fn post_rpc(
-    addr: SocketAddr,
-    auth: &RpcAuth,
-    method: &str,
-    params: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let body = serde_json::json!({
-        "jsonrpc": "1.0",
-        "id": "test",
-        "method": method,
-        "params": params,
-    });
-    let body_s = body.to_string();
-    let auth_h = basic_auth_header(auth);
-    let req = format!(
-        "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {auth_h}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_s}",
-        body_s.len()
-    );
-    let mut stream = tokio::net::TcpStream::connect(addr)
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| format!("write: {e}"))?;
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("read: {e}"))?;
-    let text = String::from_utf8_lossy(&buf);
-    let body_start = text.find("\r\n\r\n").ok_or("no HTTP body")? + 4;
-    let json_body = &text[body_start..];
-    serde_json::from_str(json_body).map_err(|e| format!("json: {e} body={json_body}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rbitcoin_primitives::Network;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn basic_auth_header(auth: &RpcAuth) -> String {
+        use base64::Engine;
+        let tok = base64::engine::general_purpose::STANDARD.encode(auth.cookie_line());
+        format!("Basic {tok}")
+    }
+
+    async fn post_rpc(
+        addr: SocketAddr,
+        auth: &RpcAuth,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "test",
+            "method": method,
+            "params": params,
+        });
+        let body_s = body.to_string();
+        let auth_h = basic_auth_header(auth);
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {auth_h}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_s}",
+            body_s.len()
+        );
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| format!("write: {e}"))?;
+        let mut buf = Vec::new();
+        stream
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        let text = String::from_utf8_lossy(&buf);
+        let body_start = text.find("\r\n\r\n").ok_or("no HTTP body")? + 4;
+        let json_body = &text[body_start..];
+        serde_json::from_str(json_body).map_err(|e| format!("json: {e} body={json_body}"))
+    }
 
     #[tokio::test]
     async fn rpc_smoke_getblockcount_and_help() {
@@ -521,7 +517,7 @@ mod tests {
             permit_bare_multisig: true,
             alert_notify: None,
         };
-        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
+        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -646,7 +642,7 @@ mod tests {
             permit_bare_multisig: true,
             alert_notify: None,
         };
-        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
+        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
@@ -731,7 +727,7 @@ mod tests {
             permit_bare_multisig: true,
             alert_notify: None,
         };
-        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
+        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;

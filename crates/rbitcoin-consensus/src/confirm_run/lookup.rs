@@ -2,21 +2,6 @@
 
 use super::*;
 
-/// Pin-stage denserels mix (`pin_for_wire_batch`).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DenserelsWarmStats {
-    /// Unique external parent creates considered (stamped create_fk, not same-batch).
-    pub parents: u32,
-    /// Already covered via in-flight / same-batch / stamp-carried outs.
-    pub already: u32,
-    /// Cold denserels body loads (`txout` by stamped range). Always 0 on the
-    /// shipped pin path — range-fill is `PIN_NEW`, not this field.
-    pub cold: u32,
-    /// Same-batch plan creates (offline denserels at pin).
-    pub same_batch: u32,
-    pub work_ns: u64,
-}
-
 /// Lookup-stamped external parent material for load body denserels.
 ///
 /// **Lookup** fills this via `tx.head` / `tx.idx` / `txid.body` (never `tx.body`).
@@ -237,7 +222,7 @@ pub fn confirm_wire_load_from_plan(
     } = stamped;
 
     let ifo = pipeline.map(|p| p.in_flight);
-    let (batch_parents, spend_edges, _warm) = pin_for_wire_batch(
+    let (batch_parents, spend_edges) = pin_for_wire_batch(
         query,
         plan.as_ref(),
         &mut parent_pin,

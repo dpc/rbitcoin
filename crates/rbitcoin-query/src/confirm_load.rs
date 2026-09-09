@@ -10,24 +10,6 @@ use crate::U64Map;
 /// Spend-fk → pin-time spend edges (assemble + write).
 pub type SpendEdges = U64Map<Vec<crate::SpendEdge>>;
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ConfirmLoadStats {
-    pub blocks: u32,
-    pub utxo_parents: u32,
-    /// Unique parent create fks pinned this call (after dedup).
-    pub parent_unique: u32,
-    /// Of `parent_unique`: filled without store denserels IO (same-batch / in-flight / adopt).
-    pub pin_cache_body: u32,
-    /// Of `parent_unique`: missed same-batch / in-flight / adopt (cold denserels).
-    pub pin_new: u32,
-    /// FIFO hit path resolve.
-    pub pin_body_ns: u64,
-    /// Body txs full-decoded (phase 1).
-    pub body_tx_reads: u32,
-    pub thin_ns: u64,
-    pub parent_pin_ns: u64,
-}
-
 impl Query {
     /// Snapshot: `(ready_through, ahead, sparse_parents, bodies, header_plans)`.
     ///

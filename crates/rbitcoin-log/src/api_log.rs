@@ -35,13 +35,8 @@ pub fn close_api_log() {
     *g = None;
 }
 
-/// True after a successful [`init_api_log`] (tests / diagnostics).
-pub fn api_log_enabled() -> bool {
-    API_LOG.lock().unwrap_or_else(|e| e.into_inner()).is_some()
-}
-
 /// Truncate a params blob for the log (UTF-8 safe).
-pub fn compact_params(params: &str) -> String {
+fn compact_params(params: &str) -> String {
     if params.len() <= PARAMS_MAX {
         return params.to_string();
     }
@@ -138,7 +133,6 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         init_api_log(&path).unwrap();
-        assert!(api_log_enabled());
         api_call(
             "electrum",
             "127.0.0.1:1",

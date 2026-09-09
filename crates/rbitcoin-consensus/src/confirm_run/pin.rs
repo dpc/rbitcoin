@@ -114,9 +114,8 @@ fn fill_pins(
     batch_pin_by_id: &U64Map<&CreatePin>,
     parent_pin: &ParentPinStamp,
     in_flight: Option<&rbitcoin_query::InFlight>,
-) -> (U64Map<CreatePin>, u32) {
+) -> U64Map<CreatePin> {
     let mut plan_by_id: U64Map<CreatePin> = U64Map::default();
-    let mut n_same_batch = 0u32;
     if let Some(ifo) = in_flight {
         for (id, need) in parent_vouts {
             if plan_by_id.contains_key(id) {
@@ -134,7 +133,6 @@ fn fill_pins(
         }
         if let Some(pin) = batch_pin_by_id.get(id) {
             plan_by_id.insert(*id, std::sync::Arc::clone(pin));
-            n_same_batch = n_same_batch.saturating_add(1);
         }
     }
     let t_recent = Instant::now();
@@ -157,7 +155,7 @@ fn fill_pins(
         use std::sync::atomic::Ordering;
         confirm_load_stats::PIN_RECENT_OUTS_NS.fetch_add(recent_outs_ns, Ordering::Relaxed);
     }
-    (plan_by_id, n_same_batch)
+    plan_by_id
 }
 
 fn denserels_by_stamped_range(
@@ -256,14 +254,7 @@ pub(super) fn pin_for_wire_batch(
     metas: &[BodyMeta],
     wire_blocks: &[Arc<Block>],
     in_flight: Option<&rbitcoin_query::InFlight>,
-) -> Result<
-    (
-        rbitcoin_query::BatchParents,
-        rbitcoin_query::SpendEdges,
-        DenserelsWarmStats,
-    ),
-    ConsensusError,
-> {
+) -> Result<(rbitcoin_query::BatchParents, rbitcoin_query::SpendEdges), ConsensusError> {
     use rbitcoin_query::confirm_load_stats;
     use std::sync::atomic::Ordering;
 
@@ -295,8 +286,7 @@ pub(super) fn pin_for_wire_batch(
         }
     }
 
-    let (plan_by_id, n_same_batch) =
-        fill_pins(&parent_vouts, &batch_pin_by_id, parent_pin, in_flight);
+    let plan_by_id = fill_pins(&parent_vouts, &batch_pin_by_id, parent_pin, in_flight);
 
     let mut batch_parents = rbitcoin_query::BatchParents::with_capacity(parent_vouts.len());
     let thin_ns = t_thin.elapsed().as_nanos() as u64;
@@ -419,14 +409,7 @@ pub(super) fn pin_for_wire_batch(
         confirm_load_stats::BLOCKS.fetch_add(n_blks, Ordering::Relaxed);
     }
 
-    let warm = DenserelsWarmStats {
-        parents: parent_vouts.len().saturating_sub(n_same_batch as usize) as u32,
-        already: n_plan_pin.saturating_sub(n_same_batch as u64) as u32,
-        cold: 0,
-        same_batch: n_same_batch,
-        work_ns: pin_ns,
-    };
-    Ok((batch_parents, spend_edges, warm))
+    Ok((batch_parents, spend_edges))
 }
 
 /// Ensure spend abs for every spend edge on the write batch.

@@ -720,11 +720,6 @@ impl TxIdx {
         Ok(())
     }
 
-    /// Number of open segment files (tests / diagnostics).
-    pub fn segment_count(&self) -> usize {
-        self.segments_snapshot().len()
-    }
-
     /// Plan body_range idx IO without performing reads (plan head-resolve STAGE_IDX).
     ///
     /// `id` is 1-based Class A fk; `count`/`body_end` from [`crate::var_table::VarTable::published_meta`].
@@ -1380,7 +1375,7 @@ mod tests {
             assert_eq!(idx.slot_count(), 4);
             let s2 = [16 + 128, 16 + 128 + 16]; // far → new segment
             idx.append_starts(4, &s2).unwrap();
-            assert!(idx.segment_count() >= 2);
+            assert!(idx.segments_snapshot().len() >= 2);
             assert_eq!(idx.record_start(1).unwrap(), 16);
             assert_eq!(idx.record_start(5).unwrap(), 16 + 128);
             let (off, len) = idx.record_range_interior(4).unwrap();

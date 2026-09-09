@@ -1217,8 +1217,6 @@ mod tests {
     /// Speculative explore-need at an empty remainder is leftover — drop it.
     #[test]
     fn prune_off_path_inflight_drops_orphans_keeps_path_and_reorg() {
-        use bitcoin::block::{Header, Version};
-        use bitcoin::hashes::Hash;
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let mut st = IbdWorkState::new(vec![dummy_slot(0)], hub.tip_hash(), hub.tip_height());
@@ -1239,32 +1237,11 @@ mod tests {
         st.reorg.register_explore(std::iter::once(explore_h), None);
         st.slots[0].in_flight.insert(explore_h);
         inflight_add_peer(&mut st.inflight, explore_h, 0);
-        let await_h = h(0x33);
-        st.reorg.set_awaiting(
-            bitcoin::Block {
-                header: Header {
-                    version: Version::from_consensus(4),
-                    prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
-                    merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-                    time: 1,
-                    bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
-                    nonce: 0,
-                },
-                txdata: vec![],
-            },
-            vec![await_h],
-        );
-        st.slots[0].in_flight.insert(await_h);
-        inflight_add_peer(&mut st.inflight, await_h, 0);
-        assert_eq!(st.inflight.len(), 10);
+        assert_eq!(st.inflight.len(), 9);
 
         prune_off_path_inflight(&mut st);
 
         assert!(st.inflight.contains_key(&want), "tip+1 occupant stays");
-        assert!(
-            st.inflight.contains_key(&await_h),
-            "awaiting reorg need stays"
-        );
         assert!(
             !st.inflight.contains_key(&explore_h),
             "explore-need at empty remainder is leftover"
@@ -1274,11 +1251,7 @@ mod tests {
             assert!(!st.inflight.contains_key(&hash), "orphan {i} dropped");
             assert!(!st.slots[0].in_flight.contains(&hash));
         }
-        assert_eq!(
-            st.inflight.len(),
-            2,
-            "orphans+explore dropped; path+awaiting kept"
-        );
+        assert_eq!(st.inflight.len(), 1, "orphans+explore dropped; path kept");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1984,66 +1957,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Awaiting reorg held tip+1 is not a tip fetch hole (mids densify instead).
-    /// Covering it would soft re-get tip+1 forever while mids starve.
-    #[test]
-    fn contiguous_and_cover_skip_awaiting_held_tip() {
-        use bitcoin::block::{Header, Version};
-        use bitcoin::{CompactTarget, Target};
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let mut st = IbdWorkState::new(
-            vec![dummy_slot(0), dummy_slot(1)],
-            hub.tip_hash(),
-            hub.tip_height(),
-        );
-        let tip = hub.tip_height().unwrap_or(0);
-        let ht = tip.saturating_add(1);
-        let gen = hub.tip_hash().unwrap();
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
-        let mut held = bitcoin::Block {
-            header: Header {
-                version: Version::from_consensus(4),
-                prev_blockhash: gen,
-                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-                time: 1_300_000_200,
-                bits,
-                nonce: 0,
-            },
-            txdata: vec![],
-        };
-        let target = Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            held.header.nonce = nonce;
-            if held.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        let held_hash = held.block_hash();
-        st.record_height(held_hash, ht);
-        st.height_to_hash.insert(ht, held_hash);
-        st.body.mark_pending(held_hash);
-        st.reorg.set_awaiting(held, vec![h(0xcc)]); // mid still missing
-        assert!(st.reorg.is_awaiting_held_tip(&held_hash));
-        let holes = contiguous_tip_holes(&mut st, &hub, 8);
-        assert!(
-            holes.is_empty(),
-            "awaiting held tip+1 must not appear as tip hole; holes={holes:?}"
-        );
-        let cfg = IbdConfig::for_test();
-        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
-        let issued = cover_tip_holes(&mut st, &hub, &cfg, &alive, &[held_hash]);
-        assert_eq!(
-            issued, 0,
-            "cover must skip awaiting held tip+1 (mid densify only)"
-        );
-        assert!(
-            !st.inflight.contains_key(&held_hash),
-            "must not race getdata for held tip+1"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     /// Densify-ahead zombie pending (flag set, no matching BQ) must re-get.
     /// Regression: need_hash_at used to skip all pending before BQ check, so
     /// heights past tip-batch cover never demoted and conf froze mid-IBD.
@@ -2152,9 +2065,7 @@ mod tests {
     /// is not readiness — only `block_queue_has_hash` of the need).
     #[test]
     fn assign_reorg_need_despite_wrong_height_bq_occupant() {
-        use bitcoin::block::{Header, Version};
         use bitcoin::hashes::Hash as _;
-        use bitcoin::{CompactTarget, Target};
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let mut st = IbdWorkState::new(vec![dummy_slot(0)], None, Some(0));
@@ -2162,8 +2073,6 @@ mod tests {
         let mut cfg = IbdConfig::for_test();
         cfg.window = 16;
         cfg.per_peer = 4;
-        let gen = hub.tip_hash().unwrap();
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
         let need = h(0xab);
         let wrong_occupant = h(0xde);
         // Mid recorded at height 1; BQ height 1 holds a different hash.
@@ -2173,25 +2082,7 @@ mod tests {
             .unwrap();
         assert!(hub.query.block_queue_has_height(1));
         assert!(!hub.query.block_queue_has_hash(&need.to_byte_array()));
-        let mut held = bitcoin::Block {
-            header: Header {
-                version: Version::from_consensus(4),
-                prev_blockhash: gen,
-                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-                time: 1_300_000_300,
-                bits,
-                nonce: 0,
-            },
-            txdata: vec![],
-        };
-        let target = Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            held.header.nonce = nonce;
-            if held.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        st.reorg.set_awaiting(held, vec![need]);
+        st.reorg.register_explore([need], None);
         st.body.mark_missing(need);
         assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
         assert!(
@@ -2516,11 +2407,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Most-work reorg awaiting densify: assign issues getdata for need_getdata hashes.
+    /// Most-work reorg densify: assign issues getdata for need_getdata hashes.
     #[test]
     fn assign_issues_reorg_need_getdata() {
-        use bitcoin::block::{Header, Version};
-        use bitcoin::{CompactTarget, Target};
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let mut st = IbdWorkState::new(vec![dummy_slot(0)], None, Some(0));
@@ -2528,30 +2417,8 @@ mod tests {
         let mut cfg = IbdConfig::for_test();
         cfg.window = 16;
         cfg.per_peer = 4;
-        // Synthetic held tip+1 + need winner hash.
-        let gen = hub.tip_hash().unwrap();
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
         let need = h(0xab);
-        // Minimal held tip block for awaiting state (payload not used by assign).
-        let mut held = bitcoin::Block {
-            header: Header {
-                version: Version::from_consensus(4),
-                prev_blockhash: gen,
-                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-                time: 1_300_000_100,
-                bits,
-                nonce: 0,
-            },
-            txdata: vec![],
-        };
-        let target = Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            held.header.nonce = nonce;
-            if held.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        st.reorg.set_awaiting(held, vec![need]);
+        st.reorg.register_explore([need], None);
         st.body.mark_missing(need);
         assert_eq!(st.reorg.need_getdata(), vec![need]);
         assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);

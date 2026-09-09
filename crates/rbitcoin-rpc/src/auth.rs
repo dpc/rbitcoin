@@ -87,12 +87,6 @@ pub fn write_cookie_file(path: &Path) -> Result<RpcAuth, String> {
     Ok(auth)
 }
 
-/// Read credentials from an existing cookie file.
-pub fn read_cookie_file(path: &Path) -> Result<RpcAuth, String> {
-    let s = fs::read_to_string(path).map_err(|e| format!("cookie read: {e}"))?;
-    RpcAuth::from_cookie_line(&s).ok_or_else(|| "cookie file: expected user:password".into())
-}
-
 /// Parse HTTP `Authorization: Basic …` header value.
 pub fn parse_basic_auth(header: &str) -> Option<(String, String)> {
     let header = header.trim();
@@ -140,7 +134,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".cookie");
         let a = write_cookie_file(&path).unwrap();
-        let b = read_cookie_file(&path).unwrap();
+        let line = fs::read_to_string(&path).unwrap();
+        let b = RpcAuth::from_cookie_line(&line).unwrap();
         assert_eq!(a, b);
         assert_eq!(a.user, "__cookie__");
         assert!(!a.password.is_empty());

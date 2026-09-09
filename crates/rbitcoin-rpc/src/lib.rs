@@ -7,12 +7,9 @@ mod blockstats;
 mod methods;
 mod server;
 
-pub use auth::{parse_basic_auth, read_cookie_file, resolve_rpc_auth, write_cookie_file, RpcAuth};
-pub use methods::{
-    dispatch, handle_request, rpc_error, RpcActive, RpcContext, RpcParams, RpcRegtest,
-    SubmitBlockOutcome, ERR_INVALID_PARAMETER, ERR_INVALID_PARAMS, ERR_METHOD_NOT_FOUND, ERR_MISC,
-};
-pub use server::{basic_auth_header, post_rpc, run_rpc, RpcConfig, RpcHandle};
+pub use auth::RpcAuth;
+pub use methods::{RpcActive, RpcRegtest, SubmitBlockOutcome};
+pub use server::{run_rpc, RpcConfig, RpcHandle};
 
 /// Root HTTP path for the node RPC endpoint.
 pub fn node_rpc_path() -> &'static str {

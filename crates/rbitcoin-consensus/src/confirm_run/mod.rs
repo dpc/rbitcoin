@@ -18,7 +18,7 @@
 //! [`confirm_wire_run`] is the unified entry (tests / tip / IBD).
 //!
 //! **Scripts purity:** [`confirm_scripts_phase`] is pure
-//! [`LoadedBatch`] → [`ScriptOkBatch`]. IBD [`drive_script_waves`] publishes
+//! [`LoadedBatch`] → [`ScriptOkBatch`]. IBD [`drive_script_waves_with`] publishes
 //! multiple waves from the stage thread when steal is empty, then writes in
 //! height order. Steal workers unpark the publisher when a wave completes.
 
@@ -52,9 +52,8 @@ mod scripts;
 mod write;
 
 pub use bq_resolve::{
-    confirm_bq_resolve_wave, confirm_bq_resolve_wave_capped, confirm_bq_resolve_wave_with_ids,
-    take_wave_items_for_load, BqResolveWave, BqResolveWaveStats, BQ_RESOLVE_WAVE_MAX_BLOCKS,
-    BQ_RESOLVE_WAVE_MAX_INPUTS, BQ_RESOLVE_WAVE_MIN_INPUTS,
+    confirm_bq_resolve_wave_capped, take_wave_items_for_load, BQ_RESOLVE_WAVE_MAX_BLOCKS,
+    BQ_RESOLVE_WAVE_MAX_INPUTS,
 };
 #[cfg(test)]
 use head_drain::{submit_head_drain, HEAD_DRAIN_THREAD_NAME};
@@ -66,20 +65,13 @@ pub use lookup::plan_stamp_sub_stats;
 #[cfg(test)]
 use lookup::ConfirmArchiveKind;
 pub use lookup::{
-    confirm_wire_load_from_plan, confirm_wire_lookup_stamp, DenserelsWarmStats, ParentPinStamp,
-    PlanStampOutcome,
+    confirm_wire_load_from_plan, confirm_wire_lookup_stamp, ParentPinStamp, PlanStampOutcome,
 };
 use phases::assemble_run;
 #[cfg(test)]
 use phases::{check_bip34, expected_bits_extending, post_commit};
 use pin::{ensure_spend_abs_layouts, pin_for_wire_batch};
-#[cfg(test)]
-pub use scripts::scripts_stage_from_load_channel_with;
-pub use scripts::{
-    confirm_scripts_feed_ahead, confirm_scripts_phase, confirm_scripts_phase_async,
-    drive_script_waves, drive_script_waves_with, join_scripts_polling,
-    scripts_stage_from_load_channel, ScriptsBatchMeta, ScriptsPhaseHandle,
-};
+pub use scripts::{confirm_scripts_phase, drive_script_waves_with};
 pub use write::confirm_write_phase;
 #[cfg(test)]
 use write::{write_batch_vs_tip, write_height_needed, WriteBatchVsTip};

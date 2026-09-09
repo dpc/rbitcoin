@@ -48,19 +48,6 @@ fn short_id_for_tx(tx: &Transaction, version: u32, keys: (u64, u64)) -> ShortId 
     }
 }
 
-/// Empty-mempool missing indexes for a compact announcement.
-///
-/// `None` if prefilled indexes are malformed (Core disconnects; not a split).
-pub fn cmpct_missing_empty_mempool(hsi: &HeaderAndShortIds) -> Option<Vec<u64>> {
-    if !prefilled_indexes_ok(hsi) {
-        return None;
-    }
-    match try_reconstruct(hsi, &HashMap::new(), 2) {
-        Ok(_) => Some(Vec::new()),
-        Err(idx) => Some(idx),
-    }
-}
-
 /// Consensus-decode BIP152 `HeaderAndShortIds`.
 pub fn decode_cmpct_hsi(raw: &[u8]) -> Option<HeaderAndShortIds> {
     deserialize(raw).ok()
@@ -744,7 +731,6 @@ mod tests {
             }],
         };
         assert!(!prefilled_indexes_ok(&oob));
-        assert!(cmpct_missing_empty_mempool(&oob).is_none());
     }
 
     fn mined_h1_two_tx_hsi() -> HeaderAndShortIds {
@@ -783,17 +769,17 @@ mod tests {
     }
 
     #[test]
-    fn cmpct_missing_empty_mempool_two_tx_is_index_1() {
+    fn try_reconstruct_empty_mempool_two_tx_is_index_1() {
         let hsi = mined_h1_two_tx_hsi();
         assert!(cmpct_hsi_regtest_connectable(&hsi));
         assert_eq!(
-            cmpct_missing_empty_mempool(&hsi).as_deref(),
-            Some(&[1u64][..])
+            try_reconstruct(&hsi, &HashMap::new(), 2).unwrap_err(),
+            vec![1]
         );
         let raw = bitcoin::consensus::encode::serialize(&hsi);
         assert_eq!(
-            cmpct_missing_empty_mempool(&decode_cmpct_hsi(&raw).unwrap()).as_deref(),
-            Some(&[1u64][..])
+            try_reconstruct(&decode_cmpct_hsi(&raw).unwrap(), &HashMap::new(), 2).unwrap_err(),
+            vec![1]
         );
         encode_cmpctblock_v2(&hsi).unwrap();
     }
@@ -813,8 +799,8 @@ mod tests {
         assert_eq!(b.header.prev_blockhash, genesis.block_hash());
         assert_ne!(a.header.block_hash(), b.header.block_hash());
         assert_eq!(
-            cmpct_missing_empty_mempool(&a).as_deref(),
-            Some(&[1u64][..])
+            try_reconstruct(&a, &HashMap::new(), 2).unwrap_err(),
+            vec![1]
         );
     }
 
@@ -827,8 +813,8 @@ mod tests {
         let hsi = decode_cmpct_hsi(&raw).unwrap();
         assert!(cmpct_hsi_regtest_connectable(&hsi));
         assert_eq!(
-            cmpct_missing_empty_mempool(&hsi).as_deref(),
-            Some(&[1u64][..])
+            try_reconstruct(&hsi, &HashMap::new(), 2).unwrap_err(),
+            vec![1]
         );
     }
 
@@ -863,8 +849,8 @@ mod tests {
         assert_eq!(case.fill_txs.len(), 1);
         assert_eq!(cmpct_missing_for_case(&case).as_deref(), Some(&[][..]));
         assert_eq!(
-            cmpct_missing_empty_mempool(&case.hsi).as_deref(),
-            Some(&[1u64][..])
+            try_reconstruct(&case.hsi, &HashMap::new(), 2).unwrap_err(),
+            vec![1]
         );
     }
 

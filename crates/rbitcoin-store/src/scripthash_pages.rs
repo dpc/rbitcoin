@@ -41,8 +41,6 @@
 use crate::compact::{read_uleb128, uleb128_len, write_uleb128_into};
 use crate::error::StoreError;
 use crate::scripthash_layout::SH_ENTRY_LEN;
-#[cfg(test)]
-use crate::scripthash_slabs::encode_fk_delta_stream;
 use crate::scripthash_slabs::{decode_fk_delta_stream_into, encode_fk_delta_stream_into};
 use rbitcoin_primitives::Fk;
 
@@ -544,16 +542,6 @@ pub fn sh_page_last_fk(page: &[u8; SH_PAGE_SIZE]) -> Result<Option<Fk>, StoreErr
     Ok(sh_page_stream_tail(page)?.1)
 }
 
-/// Number of 4 KiB pages needed for `n` create entries (`0` → `0`).
-#[inline]
-pub fn sh_page_count_for_entries(n: usize) -> usize {
-    if n == 0 {
-        0
-    } else {
-        n.div_ceil(SH_PAGE_FK_CAP)
-    }
-}
-
 /// Split strictly increasing FKs into page-sized delta-stream chunks.
 ///
 /// Intermediate pages use [`SH_PAGE_STREAM_MAX`] (`ver=1`). The last chunk is
@@ -702,7 +690,10 @@ mod tests {
     fn sh_page_pack_matches_encoded_stream() {
         let fks: Vec<u64> = (1..=80).collect();
         let ents: Vec<_> = fks.iter().copied().map(Fk).collect();
-        let stream = encode_fk_delta_stream(&ents).unwrap();
+        let raw: Vec<u64> = ents.iter().map(|fk| fk.0).collect();
+        let mut stream = vec![0u8; raw.len().saturating_mul(10).max(1)];
+        let sn = encode_fk_delta_stream_into(&mut stream, &raw).unwrap();
+        stream.truncate(sn);
         let mut page = [0u8; SH_PAGE_SIZE];
         sh_page_pack_fks(&mut page, &fks, 8192).unwrap();
         assert_eq!(sh_page_n_fks(&page).unwrap() as usize, fks.len());
@@ -1002,8 +993,6 @@ mod tests {
 
     #[test]
     fn page_count_for_entries_and_pack_sets_next_before_write() {
-        assert_eq!(sh_page_count_for_entries(0), 0);
-        assert_eq!(sh_page_count_for_entries(1), 1);
         let n = SH_PAGE_STREAM_MAX + 200;
         let fks: Vec<Fk> = (1..=n as u64).map(Fk).collect();
         let chunks = sh_page_chunk_ranges(&fks).unwrap();
@@ -1116,9 +1105,5 @@ mod tests {
         sh_page_init_empty(&mut page);
         assert!(sh_page_try_append(&mut page, Fk(42)).unwrap());
         assert_eq!(sh_page_last_fk(&page).unwrap(), Some(Fk(42)));
-        assert_eq!(sh_page_count_for_entries(0), 0);
-        assert_eq!(sh_page_count_for_entries(1), 1);
-        assert_eq!(sh_page_count_for_entries(SH_PAGE_FK_CAP), 1);
-        assert_eq!(sh_page_count_for_entries(SH_PAGE_FK_CAP + 1), 2);
     }
 }

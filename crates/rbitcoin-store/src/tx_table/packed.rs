@@ -443,17 +443,6 @@ pub fn decode_input_run_prefix(
 
 /// OS page size (legacy constant; body packing is 8-byte aligned only in schema 13).
 pub const BODY_PAGE_SIZE: u64 = 4096;
-/// Deprecated (schema 12 body-txid page rule); kept for tests that name it.
-pub const TXID_PAGE_MAX_OFF: u64 = BODY_PAGE_SIZE - 32;
-
-/// Next absolute body offset for a Class A packed record (8-byte aligned).
-///
-/// Schema 13+: identity is in `txid.body`, so body no longer needs page-straddle
-/// avoidance for a leading 32-byte txid.
-#[inline]
-pub fn next_tx_body_start(cursor: u64) -> u64 {
-    cursor.saturating_add(7) & !7u64
-}
 
 /// Encode `txout.body` payload (schema **17**): thin meta || output_run.
 ///
@@ -589,21 +578,6 @@ pub(super) fn check_trailing_zero_pad(raw: &[u8], logical_end: usize) -> Result<
     Ok(())
 }
 
-/// Decode `txout.body` (meta + outputs). Inputs are empty — use [`decode_inwit_secret`].
-pub fn decode_packed_tx(
-    raw: &[u8],
-) -> Result<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>), StoreError> {
-    let (meta, _ins, outputs, _rels) = decode_packed_tx_with_spender_rels(raw)?;
-    Ok((meta, Vec::new(), outputs))
-}
-
-/// `txout` decode. The `Vec<u32>` rels are always empty (spender lives in `spent.body`).
-pub fn decode_packed_tx_with_spender_rels(
-    raw: &[u8],
-) -> Result<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>, Vec<u32>), StoreError> {
-    decode_packed_tx_with_spender_rels_secret(raw, None)
-}
-
 /// Decode `txout` with optional de-obfuscation of scriptPubKey.
 pub fn decode_packed_tx_with_spender_rels_secret(
     raw: &[u8],
@@ -642,12 +616,6 @@ pub fn scan_inwit_prevouts(raw: &[u8], in_count: u32) -> Result<Vec<(Fk, u32)>, 
         prevouts.push((create_fk, prev_index));
     }
     Ok(prevouts)
-}
-
-/// [`scan_inwit_prevouts`] plus meta from a `txout` record (meta only uses first 16 B).
-pub fn scan_packed_meta_and_prevouts(raw: &[u8]) -> Result<(TxRecord, Vec<(Fk, u32)>), StoreError> {
-    let (meta, _) = TxRecord::decode_body_meta(raw)?;
-    Ok((meta, Vec::new()))
 }
 
 /// Decode packed `txout` body (meta + outputs) plus dense relative offsets of each
@@ -803,21 +771,6 @@ pub fn decode_packed_tx_need_outs_with_spender_rels_secret(
     }
     check_trailing_zero_pad(raw, off)?;
     Ok((meta, live, sparse))
-}
-
-/// Strip durable spender annotation from outs (pin / residency content-only).
-#[inline]
-pub fn clear_output_spender_fields(outs: &mut [OutputRecord]) {
-    for o in outs {
-        o.spender_field = Fk::NULL;
-        o.multi_spender = false;
-    }
-}
-
-/// True when `raw` looks like a schema-13+ packed Class A payload (body meta).
-#[inline]
-pub fn is_packed_tx_payload(raw: &[u8]) -> bool {
-    TxRecord::decode_body_meta(raw).is_ok()
 }
 
 /// Segmented `tx.head` occupancy for IBD size logs.

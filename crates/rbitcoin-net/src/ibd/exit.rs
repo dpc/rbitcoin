@@ -380,22 +380,6 @@ mod tests {
         bitcoin::BlockHash::from_byte_array([b; 32])
     }
 
-    fn dummy_held() -> bitcoin::Block {
-        use bitcoin::block::{Header, Version};
-        use bitcoin::hashes::Hash;
-        bitcoin::Block {
-            header: Header {
-                version: Version::from_consensus(4),
-                prev_blockhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
-                merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-                time: 1,
-                bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
-                nonce: 0,
-            },
-            txdata: vec![],
-        }
-    }
-
     /// IBD → tip-follow catch-up matrix (competing headers, explore leftovers, holes).
     #[test]
     fn ibd_caught_up_transition_matrix() {
@@ -460,10 +444,10 @@ mod tests {
         await_st.max_peer_height = 100;
         await_st.max_ready_height = 100;
         await_st.headers_done = true;
-        await_st.reorg.set_awaiting(dummy_held(), vec![h(0xcc)]);
+        await_st.reorg.register_explore([h(0xcc)], None);
         assert!(
-            !ibd_caught_up(&await_st, 100),
-            "awaiting reorg gather is remainder"
+            ibd_caught_up(&await_st, 100),
+            "explore-need without path remainder must not block catch-up"
         );
 
         // tip+1 sitting in h2h (not yet ordered) is remainder.

@@ -7034,7 +7034,7 @@ fn outbound_feefilter_sats_ibd_even_when_relay_off() {
     assert!(hub.in_ibd(), "genesis tip is older than 24h");
     assert_eq!(
         outbound_feefilter_sats(&hub, None),
-        Some(crate::IBD_FEEFILTER_SAT_KVB as i64)
+        Some(crate::chain::IBD_FEEFILTER_SAT_KVB as i64)
     );
     let _ = std::fs::remove_dir_all(dir);
 }

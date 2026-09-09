@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contract: ast-grep scan is clean on lint/ast-grep/fixtures/good and
 # reports error-severity hits on fixtures/bad (detached tokio::spawn,
-# mem::forget/Box::leak, dropped thread::spawn). Does not scan crates/.
+# mem::forget/Box::leak, dropped thread::spawn, dropped crate-root pub).
+# Does not scan crates/.
 # Missing binary: fail in CI, skip locally.
 set -euo pipefail
 
@@ -65,6 +66,10 @@ assert_ok "bad fixtures report thread-spawn-dropped" \
   grep -q 'thread-spawn-dropped' <<<"$bad_json"
 assert_ok "bad fixtures include std::thread::spawn statement" \
   python3 -c 'import json,sys; d=json.load(sys.stdin); assert any(e["text"].startswith("std::thread::spawn") for e in d)' <<<"$bad_json"
+assert_ok "bad fixtures report crate-root-dropped-pub" \
+  grep -q 'crate-root-dropped-pub' <<<"$bad_json"
+assert_ok "bad fixtures include pub use AddressHead" \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); assert any("AddressHead" in e["text"] for e in d)' <<<"$bad_json"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "ast-grep.test.sh: $PASS passed, $FAIL failed"

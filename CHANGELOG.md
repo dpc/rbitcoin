@@ -22,6 +22,26 @@ before 1.0).
 
 ### Changed
 
+- **Store crate-root surface:** drop re-exports other crates never import
+  (`AddressHead`, packed decode aliases, SH remap/slab Vec codecs, sorted-run
+  catalog helpers, …). Tests use the remaining production insert/probe/decode
+  paths; rustc `dead_code` then deleted the unused wrappers.
+- **Visibility policy:** unused crate-root `pub` is forbidden (no out-of-tree
+  library API today). `#[cfg(test)]` on production items is a smell; fuzz-only
+  exports are the same smell. Owner: CONTRIBUTING principle 11.
+- **Workspace crate-root surface:** drop re-exports other crates never import
+  from query, consensus, mempool, net, rpc, electrum, esplora, node, and log.
+  Types that appear in remaining public signatures stay `pub`. Fuzz keep-list
+  on `rbitcoin_net` (ChainHub, compact v2 encode helpers, `store_reorg_*`,
+  `prepare_cmpct_fuzz_*`, …). rustc `dead_code` then deleted unused wrappers
+  (`ScriptsPhaseHandle` / feed-ahead, `select_most_work` / `WorkCandidate`,
+  `ConfirmLoadStats`, `cmpct_missing_empty_mempool`, `handle_request`,
+  `magic_for`, `max_level`, `drive_script_waves` wrapper, `NetConfig` /
+  `P2PHandle` / `handle()`, `SortedHeadWriter` / idx-only open). Tests drive
+  the remaining production entries (`drive_script_waves_with`,
+  `confirm_bq_resolve_wave_capped`, `dispatch` / `run_rpc`, `enabled`,
+  `hold_body` / `register_explore`, `SortedHead::write`/`open`). Dropped
+  crate-root names are denied by ast-grep (`crate-root-dropped-pub`).
 - **Workspace version 0.6.99:** in-tree toward 0.7.0.
   Published GitHub Releases remain 0.6.0; `v0.6.x` is the patch branch.
 - **`ibd: perf` / `ibd: sizes` drop never-written meters:** DEBUG no longer

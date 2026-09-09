@@ -160,33 +160,7 @@ fn decode_bq_block(payload: &[u8]) -> Option<Block> {
 /// Skips missing / already-complete / undecodable heights. Marks each
 /// processed height resolve-complete even when some keys miss (same-batch /
 /// in-flight remainder is load's job). Connected-only (fence) resolve.
-pub fn confirm_bq_resolve_wave(
-    query: &Query,
-    params: &ChainParams,
-    milestone: Milestone,
-    heights: &[u32],
-) -> Result<BqResolveWaveStats, ConsensusError> {
-    Ok(confirm_bq_resolve_wave_with_ids(query, params, milestone, heights)?.stats)
-}
-
-/// [`confirm_bq_resolve_wave`] returning decoded items + skeleton identity.
-pub fn confirm_bq_resolve_wave_with_ids(
-    query: &Query,
-    params: &ChainParams,
-    milestone: Milestone,
-    heights: &[u32],
-) -> Result<BqResolveWave, ConsensusError> {
-    confirm_bq_resolve_wave_capped(
-        query,
-        params,
-        milestone,
-        heights,
-        BQ_RESOLVE_WAVE_MAX_BLOCKS,
-        BQ_RESOLVE_WAVE_MAX_INPUTS,
-    )
-}
-
-/// Same as [`confirm_bq_resolve_wave_with_ids`] with emit caps (remaining loadq).
+/// `max_blocks` / `max_inputs` cap emit (remaining loadq).
 pub fn confirm_bq_resolve_wave_capped(
     query: &Query,
     params: &ChainParams,
@@ -473,8 +447,25 @@ mod tests {
         take_wave_items_for_load(q, &wave.items).unwrap();
     }
 
+    fn resolve_wave(
+        q: &Query,
+        params: &ChainParams,
+        milestone: Milestone,
+        heights: &[u32],
+    ) -> BqResolveWave {
+        confirm_bq_resolve_wave_capped(
+            q,
+            params,
+            milestone,
+            heights,
+            BQ_RESOLVE_WAVE_MAX_BLOCKS,
+            BQ_RESOLVE_WAVE_MAX_INPUTS,
+        )
+        .unwrap()
+    }
+
     fn resolve_and_take(q: &Query, params: &ChainParams, heights: &[u32]) -> BqResolveWaveStats {
-        let wave = confirm_bq_resolve_wave_with_ids(q, params, Milestone::NONE, heights).unwrap();
+        let wave = resolve_wave(q, params, Milestone::NONE, heights);
         take_emitted(q, &wave);
         wave.stats
     }
@@ -650,7 +641,7 @@ mod tests {
             .unwrap();
         q.block_queue_enqueue(2, b2.block_hash().to_byte_array(), 2, &serialize(&b2))
             .unwrap();
-        let wave = confirm_bq_resolve_wave_with_ids(&q, &params, Milestone::NONE, &[1, 2]).unwrap();
+        let wave = resolve_wave(&q, &params, Milestone::NONE, &[1, 2]);
         assert_eq!(wave.items.len(), 2);
         assert_eq!(
             wave.stats.keys, 1,
@@ -687,7 +678,7 @@ mod tests {
         q.block_queue_enqueue(2, b2.block_hash().to_byte_array(), 2, &serialize(&b2))
             .unwrap();
 
-        let wave = confirm_bq_resolve_wave_with_ids(&q, &params, Milestone::NONE, &[1, 2]).unwrap();
+        let wave = resolve_wave(&q, &params, Milestone::NONE, &[1, 2]);
         let st = wave.stats;
         assert_eq!(st.heights, 2);
         assert_eq!(wave.items.len(), 2);
@@ -739,8 +730,7 @@ mod tests {
         let expect_txid = TxPrecompute::from_tx(&b1.txdata[1]).txid;
         q.block_queue_enqueue(1, b1.block_hash().to_byte_array(), 1, &serialize(&b1))
             .unwrap();
-        let wave =
-            confirm_bq_resolve_wave_with_ids(&q, &params, Milestone { height: 100 }, &[1]).unwrap();
+        let wave = resolve_wave(&q, &params, Milestone { height: 100 }, &[1]);
         assert_eq!(wave.items.len(), 1);
         let spend_pre = &wave.items[0].2.pres[1];
         assert_eq!(spend_pre.txid, expect_txid);
@@ -767,8 +757,7 @@ mod tests {
             prev = b.block_hash();
             heights.push(h);
         }
-        let wave =
-            confirm_bq_resolve_wave_with_ids(&q, &params, Milestone::NONE, &heights).unwrap();
+        let wave = resolve_wave(&q, &params, Milestone::NONE, &heights);
         assert_eq!(
             wave.stats.heights, 9,
             "lookup wave must outgrow the old 8-height cap (soft 64000 inputs / hard 1080 blocks)"
@@ -880,7 +869,7 @@ mod tests {
         // win = 0.2 * 60 = 12; ready=8 > 6 → hold the 1-block tail
         let _ = q.block_queue_update_soft_pressure(Some(0.2));
         let _ = rbitcoin_store::take_raw_clone_n();
-        let st = confirm_bq_resolve_wave(&q, &params, Milestone::NONE, &[8]).unwrap();
+        let st = resolve_wave(&q, &params, Milestone::NONE, &[8]).stats;
         assert_eq!(st.heights, 0, "fat BQ must not mint a 1-block layer");
         assert_eq!(
             st.decode_ns, 0,
@@ -984,7 +973,7 @@ mod tests {
         }
         let _ = q.block_queue_update_soft_pressure(Some(3.0));
         let _ = rbitcoin_store::take_raw_clone_n();
-        let st = confirm_bq_resolve_wave(&q, &params, Milestone::NONE, &[15]).unwrap();
+        let st = resolve_wave(&q, &params, Milestone::NONE, &[15]).stats;
         assert_eq!(
             st.heights, 0,
             "a far 1-block layer must hold under 8000 inputs while more remain"
@@ -1024,11 +1013,11 @@ mod tests {
             .unwrap();
         q.block_queue_enqueue(2, b2.block_hash().to_byte_array(), 2, &serialize(&b2))
             .unwrap();
-        let w1 = confirm_bq_resolve_wave_with_ids(&q, &params, Milestone::NONE, &[1]).unwrap();
+        let w1 = resolve_wave(&q, &params, Milestone::NONE, &[1]);
         assert!(w1.stats.hits >= 1);
         assert!(w1.parent_ids.get(&g_cb.to_byte_array()).is_some());
         take_emitted(&q, &w1);
-        let w2 = confirm_bq_resolve_wave_with_ids(&q, &params, Milestone::NONE, &[2]).unwrap();
+        let w2 = resolve_wave(&q, &params, Milestone::NONE, &[2]);
         assert!(
             w2.stats.keys >= 1 && w2.stats.hits >= 1,
             "second wave still TipOnlys the archived genesis parent (no live_union skip)"
@@ -1056,7 +1045,7 @@ mod tests {
         );
         q.block_queue_enqueue(1, b1.block_hash().to_byte_array(), 1, &serialize(&b1))
             .unwrap();
-        let wave = confirm_bq_resolve_wave_with_ids(&q, &params, Milestone::NONE, &[1]).unwrap();
+        let wave = resolve_wave(&q, &params, Milestone::NONE, &[1]);
         assert!(wave.stats.hits >= 1);
         let g = g_cb.to_byte_array();
         assert!(
@@ -1150,7 +1139,7 @@ mod tests {
         q.disconnect_tip().unwrap();
         assert_eq!(q.tip_height().map(|h| h.0), Some(0));
 
-        let wave = confirm_bq_resolve_wave_with_ids(&q, &params, Milestone::NONE, &[2]).unwrap();
+        let wave = resolve_wave(&q, &params, Milestone::NONE, &[2]);
         assert_eq!(wave.stats.heights, 1);
         take_emitted(&q, &wave);
         assert!(
@@ -1444,8 +1433,7 @@ mod tests {
             heights.push(h);
         }
         let df_before = q.drain_and_fence_hi();
-        let wave =
-            confirm_bq_resolve_wave_with_ids(&q, &params, Milestone::NONE, &heights).unwrap();
+        let wave = resolve_wave(&q, &params, Milestone::NONE, &heights);
         assert_eq!(wave.items.len(), 4);
         assert_eq!(
             wave.drain_fence_hi, df_before,

@@ -299,9 +299,10 @@ mod tests {
 
     #[test]
     fn block_queue_soft_free_bytes_and_confirm_window() {
+        use crate::soft_densify::BQ_SOFT_CONFIRM_SECS;
         use crate::{
             soft_assign_restricted, soft_confirm_window_covered, soft_confirm_window_n,
-            soft_densify_band_hi, BQ_SOFT_CONFIRM_SECS, BQ_SOFT_FREE_BYTES,
+            soft_densify_band_hi, BQ_SOFT_FREE_BYTES,
         };
         // 5 blk/s × 60s → window 300.
         assert_eq!(soft_confirm_window_n(Some(5.0)), 300);

@@ -209,34 +209,6 @@ fn empty_loaded_batch() -> super::LoadedBatch {
     }
 }
 
-/// One-batch feed-ahead path (no lookahead) still succeeds on the real entry.
-#[test]
-fn scripts_feed_ahead_single_batch() {
-    use super::confirm_scripts_feed_ahead;
-    let outs = confirm_scripts_feed_ahead([empty_loaded_batch()]).expect("single");
-    assert_eq!(outs.len(), 1);
-    assert!(outs[0].batch.is_empty());
-}
-
-/// `confirm_scripts_phase_async` publishes on the caller (no coordinator
-/// thread, no steal worker).
-#[test]
-fn scripts_phase_does_not_run_on_steal_worker() {
-    use super::confirm_scripts_phase_async;
-    let (ok, name) = confirm_scripts_phase_async(empty_loaded_batch())
-        .join_with_phase_thread()
-        .expect("empty phase");
-    assert!(ok.batch.is_empty());
-    assert!(
-        !name.starts_with("rbtc-script-coord-"),
-        "coordinator threads are gone, got {name:?}"
-    );
-    assert!(
-        !name.starts_with("rbtc-scripts-"),
-        "scripts phase ran on steal worker {name:?}"
-    );
-}
-
 fn linux_thread_comms() -> Vec<String> {
     let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
         return Vec::new();
@@ -249,11 +221,11 @@ fn linux_thread_comms() -> Vec<String> {
     .collect()
 }
 
-/// IBD `drive_script_waves` writes in input order and never starts
+/// IBD `drive_script_waves_with` writes in input order and never starts
 /// `rbtc-script-coord-*` threads.
 #[test]
 fn drive_script_waves_ordered_without_coordinator_threads() {
-    use super::drive_script_waves;
+    use super::scripts::drive_script_waves_with;
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -264,8 +236,9 @@ fn drive_script_waves_ordered_without_coordinator_threads() {
     let stage = thread::Builder::new()
         .name("ibd-confirm".into())
         .spawn(move || {
-            drive_script_waves(
+            drive_script_waves_with(
                 &rx,
+                |_, _| {},
                 |ok, meta| {
                     heights_w.lock().unwrap().push(meta.first_h);
                     assert!(ok.batch.is_empty());
@@ -371,7 +344,7 @@ fn bad_p2pkh_job() -> crate::block::ScriptCheckJob {
 /// One-job inline fail keeps the batch height/hash; a later batch still writes.
 #[test]
 fn drive_script_waves_start_fail_keeps_meta_and_continues() {
-    use super::drive_script_waves;
+    use super::scripts::drive_script_waves_with;
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -382,8 +355,9 @@ fn drive_script_waves_start_fail_keeps_meta_and_continues() {
     let oks_w = Arc::clone(&oks);
     let errs_w = Arc::clone(&errs);
     let stage = thread::spawn(move || {
-        drive_script_waves(
+        drive_script_waves_with(
             &rx,
+            |_, _| {},
             |ok, meta| {
                 oks_w.lock().unwrap().push(meta.first_h);
                 assert!(ok.batch.prepared.len() == 1);
@@ -427,153 +401,6 @@ fn script_jobs_shrink_after_take() {
     let batch = loaded_at(7, [7u8; 32], jobs, false);
     let ok = confirm_scripts_phase(batch).expect("skip scripts");
     assert_eq!(ok.batch.prepared[0].jobs.capacity(), 0);
-}
-
-/// Two ready batches: both verify on the real async path; write order preserved.
-///
-/// Uses [`confirm_scripts_feed_ahead`] (same submit/join helper production
-/// scripts OS thread uses via [`confirm_scripts_phase_async`]).
-#[test]
-fn scripts_feed_ahead_two_batches_ordered() {
-    use super::{confirm_scripts_feed_ahead, confirm_scripts_phase_async};
-    // Async handles: start both before joining either (overlap submit).
-    let h0 = confirm_scripts_phase_async(empty_loaded_batch());
-    let h1 = confirm_scripts_phase_async(empty_loaded_batch());
-    let o0 = h0.join().expect("batch0");
-    let o1 = h1.join().expect("batch1");
-    assert!(o0.batch.is_empty());
-    assert!(o1.batch.is_empty());
-
-    // Ordered helper: two batches both ok, returned in input order.
-    let outs = confirm_scripts_feed_ahead([empty_loaded_batch(), empty_loaded_batch()])
-        .expect("feed-ahead two");
-    assert_eq!(outs.len(), 2);
-    assert!(outs[0].batch.is_empty());
-    assert!(outs[1].batch.is_empty());
-}
-
-/// Empty iterator is a no-op (pipeline edge).
-#[test]
-fn scripts_feed_ahead_zero_batches() {
-    use super::confirm_scripts_feed_ahead;
-    let outs = confirm_scripts_feed_ahead(std::iter::empty()).expect("empty");
-    assert!(outs.is_empty());
-}
-
-/// Depth-1 feed-ahead + no 200 µs-poll after lookahead, **without** a
-/// process-global HOLD in [`super::confirm_scripts_phase`].
-///
-/// A sibling `confirm_scripts_phase` running while A is held must finish
-/// immediately (the old `HOLD_FIRST` hook stalled every phase in the crate).
-#[test]
-fn scripts_stage_depth1_feeds_ahead_without_holding_siblings() {
-    use super::{
-        confirm_scripts_phase, join_scripts_polling, scripts_stage_from_load_channel_with,
-        ConfirmScriptOutcome, ScriptsBatchMeta, ScriptsPhaseHandle,
-    };
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc;
-    use std::sync::{Arc, Condvar, Mutex};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    let submits = Arc::new(AtomicU64::new(0));
-    let gate = Arc::new((Mutex::new(false), Condvar::new()));
-    let outcomes: Arc<Mutex<Vec<ConfirmScriptOutcome>>> = Arc::new(Mutex::new(Vec::new()));
-    let (mat_tx, mat_rx) = mpsc::sync_channel::<(super::LoadedBatch, u64)>(1);
-
-    let submits_s = Arc::clone(&submits);
-    let gate_s = Arc::clone(&gate);
-    let outcomes_w = Arc::clone(&outcomes);
-    let stage = thread::spawn(move || {
-        scripts_stage_from_load_channel_with(
-            &mat_rx,
-            |batch, mat_ns| {
-                let meta = ScriptsBatchMeta::from_batch(&batch, mat_ns);
-                let n = submits_s.fetch_add(1, Ordering::SeqCst) + 1;
-                let gate = Arc::clone(&gate_s);
-                let handle = ScriptsPhaseHandle::spawn_fn(move || {
-                    if n == 1 {
-                        let (lock, cv) = &*gate;
-                        let mut go = lock.lock().unwrap();
-                        let deadline = Instant::now() + Duration::from_secs(2);
-                        while !*go {
-                            let left = deadline.saturating_duration_since(Instant::now());
-                            if left.is_zero() {
-                                break;
-                            }
-                            let (g, w) = cv.wait_timeout(go, left).unwrap();
-                            go = g;
-                            if w.timed_out() {
-                                break;
-                            }
-                        }
-                    }
-                    confirm_scripts_phase(batch)
-                });
-                (handle, meta)
-            },
-            |ok, _meta: ScriptsBatchMeta| {
-                outcomes_w.lock().unwrap().push(ok);
-                true
-            },
-            |_e, _meta| false,
-            || false,
-        );
-    });
-
-    mat_tx.send((empty_loaded_batch(), 0)).expect("send A");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while submits.load(Ordering::SeqCst) < 1 {
-        assert!(Instant::now() < deadline, "A never submitted");
-        thread::sleep(Duration::from_millis(1));
-    }
-
-    let sibling = thread::spawn(|| {
-        let t0 = Instant::now();
-        confirm_scripts_phase(empty_loaded_batch()).expect("sibling phase");
-        t0.elapsed()
-    });
-    let sibling_dt = sibling.join().expect("sibling");
-    assert!(
-        sibling_dt < Duration::from_millis(200),
-        "confirm_scripts_phase must not honor another test's hold ({sibling_dt:?})"
-    );
-
-    mat_tx
-        .send((empty_loaded_batch(), 0))
-        .expect("send B while A held");
-    while submits.load(Ordering::SeqCst) < 2 {
-        assert!(
-            Instant::now() < deadline,
-            "B not submitted before A finished (feed-ahead dead under depth-1)"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
-
-    {
-        let (lock, cv) = &*gate;
-        *lock.lock().unwrap() = true;
-        cv.notify_all();
-    }
-    drop(mat_tx);
-    stage.join().expect("stage thread");
-    let outs = outcomes.lock().unwrap();
-    assert_eq!(outs.len(), 2, "both batches script-ok");
-    assert!(outs[0].batch.is_empty());
-    assert!(outs[1].batch.is_empty());
-
-    let mut polls = 0u32;
-    let handle = ScriptsPhaseHandle::spawn_fn(|| confirm_scripts_phase(empty_loaded_batch()));
-    join_scripts_polling(&handle, Duration::from_micros(200), || {
-        polls += 1;
-        false
-    })
-    .expect("join after lookahead");
-    assert_eq!(
-        polls, 1,
-        "join must recv_blocking after first false, not 200µs-poll (polls={polls})"
-    );
 }
 
 #[test]
@@ -1186,7 +1013,7 @@ fn pin_and_ensure_journey() {
     );
     let mut stamp = ParentPinStamp::take_from_plan(&mut plan);
     fill_edges_from_packed(&mut plan);
-    let (parents, _, _) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
+    let (parents, _) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
         .expect("pin via stamped range");
     assert!(parents.contains(pfk));
     assert!(parents.get_parent_out(pfk, 0).is_some());
@@ -1260,7 +1087,7 @@ fn pin_and_ensure_journey() {
     );
     let mut stamp3 = ParentPinStamp::take_from_plan(&mut plan3);
     fill_edges_from_packed(&mut plan3);
-    let (mut parents3, _, _) =
+    let (mut parents3, _) =
         pin_for_wire_batch(&q, Some(&plan3), &mut stamp3, &[], &[], None).unwrap();
     assert!(
         parents3.has_abs_layout(pfk),
@@ -1294,8 +1121,7 @@ fn pin_and_ensure_journey() {
     plan4.planned_fks = vec![Fk(2), Fk(3)];
     let mut stamp4 = ParentPinStamp::take_from_plan(&mut plan4);
     fill_edges_from_packed(&mut plan4);
-    let (parents4, _, _) =
-        pin_for_wire_batch(&q, Some(&plan4), &mut stamp4, &[], &[], None).unwrap();
+    let (parents4, _) = pin_for_wire_batch(&q, Some(&plan4), &mut stamp4, &[], &[], None).unwrap();
     assert!(
         !parents4.contains(Fk(2)),
         "same-header create is wire-valued, not pinned"
@@ -1517,7 +1343,7 @@ fn pin_takes_stamp_parent_vouts() {
         Some(&[0u32][..])
     );
     fill_edges_from_packed(&mut plan);
-    let (parents, _, _) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
+    let (parents, _) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
         .expect("pin via taken vouts");
     assert!(stamp.parent_vouts.is_empty(), "pin must take stamp vouts");
     assert!(parents.contains(pfk));
@@ -1595,7 +1421,7 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
     plan.external_parent_vouts.insert(1, vec![0]);
     let mut stamp = ParentPinStamp::take_from_plan(&mut plan);
     fill_edges_from_packed(&mut plan);
-    let (parents, edges, _) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
+    let (parents, edges) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
         .expect("cross-height CreatePin pin");
     let child_edges = edges.get(&2).expect("child spend edges");
     assert_eq!(child_edges.len(), 1);
@@ -1688,7 +1514,7 @@ fn pin_plan_edges_without_packed_ins() {
     );
     let mut stamp = ParentPinStamp::take_from_plan(&mut plan);
     fill_edges_from_packed(&mut plan);
-    let (parents, edges, _) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
+    let (parents, edges) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
         .expect("pin from plan.edges with empty packed ins");
     let child_edges = edges.get(&2).expect("child spend edges");
     assert_eq!(child_edges.len(), 1);
@@ -1842,9 +1668,8 @@ fn pin_sparse_need_high_vout_only() {
     };
     let mut parent_pin = ParentPinStamp::take_from_plan(&mut plan);
     fill_edges_from_packed(&mut plan);
-    let (parents, _thin, _warm) =
-        pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None)
-            .expect("pin high vout");
+    let (parents, _) = pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None)
+        .expect("pin high vout");
     assert!(parents.get_parent_out(pfk, 3).is_some());
     assert_eq!(
         parents.get_parent_out(pfk, 3).unwrap().1.value,
@@ -1947,11 +1772,12 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
 
     let mut parent_pin = ParentPinStamp::take_from_plan(&mut plan);
     fill_edges_from_packed(&mut plan);
-    let (_parents, _thin, warm) =
+    let (_parents, _) =
         pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None).expect("range-fill 3");
-    assert_eq!(warm.parents, 3);
+    let lp = rbitcoin_query::confirm_load_stats::last_pin_phases();
+    assert_eq!(lp.pin_new_n, 3);
     assert_eq!(
-        warm.already, 0,
+        lp.pin_plan_n, 0,
         "range-fills must not increment already / PIN_CACHE_BODY"
     );
     let _ = std::fs::remove_dir_all(&path);
@@ -2038,12 +1864,12 @@ fn pin_stamp_outs_is_cache_not_new() {
         "pin must use stamp-carried CreatePin"
     );
     fill_edges_from_packed(&mut plan);
-    let (_parents, _thin, warm) =
-        pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None)
-            .expect("stamp-carried outs must cover");
-    assert_eq!(warm.parents, 1);
+    let (_parents, _) = pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None)
+        .expect("stamp-carried outs must cover");
+    let lp = rbitcoin_query::confirm_load_stats::last_pin_phases();
+    assert_eq!(lp.pin_plan_n, 1);
     assert_eq!(
-        warm.already, 1,
+        lp.pin_new_n, 0,
         "stamp-carried outs must count as PIN_CACHE, not PIN_NEW"
     );
     let _ = std::fs::remove_dir_all(&path);
@@ -2128,12 +1954,12 @@ fn pin_recent_identity_without_outs_still_range_fills() {
 
     let mut parent_pin = ParentPinStamp::take_from_plan(&mut plan);
     fill_edges_from_packed(&mut plan);
-    let (_parents, _thin, warm) =
-        pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None)
-            .expect("identity-only stamp still range-fills");
-    assert_eq!(warm.parents, 1);
+    let (_parents, _) = pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None)
+        .expect("identity-only stamp still range-fills");
+    let lp = rbitcoin_query::confirm_load_stats::last_pin_phases();
+    assert_eq!(lp.pin_new_n, 1);
     assert_eq!(
-        warm.already, 0,
+        lp.pin_plan_n, 0,
         "identity without outs must not count as PIN_CACHE"
     );
     let _ = std::fs::remove_dir_all(&path);

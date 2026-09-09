@@ -615,7 +615,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 Some(Arc::clone(&node.peers)),
                 Some(Arc::clone(&node.hub)),
                 Some(Arc::clone(&shared_peers)),
-                Some(peers_path.clone()),
             )
             .await
             {

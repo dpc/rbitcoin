@@ -35,7 +35,7 @@ fn ctx_empty() -> (RpcContext, PathBuf) {
         peers: None,
         chain: None,
         addrman: None,
-        peers_path: None,
+
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
@@ -43,6 +43,10 @@ fn ctx_empty() -> (RpcContext, PathBuf) {
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     (ctx, dir)
+}
+
+fn named(obj: Value) -> RpcParams {
+    RpcParams::named(obj.as_object().cloned().expect("object"))
 }
 
 #[test]
@@ -609,13 +613,10 @@ fn unsupported_methods_error() {
 }
 
 #[test]
-fn handle_request_roundtrip() {
+fn dispatch_getblockcount_empty_store() {
     let (ctx, dir) = ctx_empty();
-    let body = json!({"jsonrpc":"1.0","id":"t1","method":"getblockcount","params":[]});
-    let resp = handle_request(&ctx, &body);
-    assert_eq!(resp["id"], "t1");
-    assert!(resp["error"].is_null());
-    assert_eq!(resp["result"], 0);
+    let resp = dispatch(&ctx, "getblockcount", vec![]).unwrap();
+    assert_eq!(resp, json!(0));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -623,24 +624,18 @@ fn handle_request_roundtrip() {
 fn named_params_getblock_object() {
     let (ctx, dir) = ctx_empty();
     // Empty object is valid for methods with no args.
-    let resp = handle_request(&ctx, &json!({"id":1,"method":"getblockcount","params":{}}));
-    assert!(resp["error"].is_null(), "{resp}");
-    assert_eq!(resp["result"], 0);
+    let resp = dispatch(&ctx, "getblockcount", RpcParams::named(Default::default())).unwrap();
+    assert_eq!(resp, json!(0));
 
-    let h = handle_request(
-        &ctx,
-        &json!({"method":"help","params":{"command":"getblockchaininfo"}}),
-    );
-    let s = h["result"].as_str().unwrap();
+    let h = dispatch(&ctx, "help", named(json!({"command": "getblockchaininfo"}))).unwrap();
+    let s = h.as_str().unwrap();
     assert!(s.starts_with("getblockchaininfo\n"), "{s}");
 
-    let unknown = handle_request(
-        &ctx,
-        &json!({"method":"help","params":{"random":"getblockchaininfo"}}),
-    );
-    assert_eq!(unknown["error"]["code"], ERR_INVALID_PARAMETER);
+    let unknown =
+        dispatch(&ctx, "help", named(json!({"random": "getblockchaininfo"}))).unwrap_err();
+    assert_eq!(unknown["code"], ERR_INVALID_PARAMETER);
     assert!(
-        unknown["error"]["message"]
+        unknown["message"]
             .as_str()
             .unwrap()
             .contains("Unknown named parameter"),
@@ -648,18 +643,15 @@ fn named_params_getblock_object() {
     );
 
     // Named height on empty store: accepted as params (not "named not supported").
-    let gh = handle_request(
-        &ctx,
-        &json!({"method":"getblockhash","params":{"height":0}}),
-    );
+    let gh = dispatch(&ctx, "getblockhash", named(json!({"height": 0}))).unwrap_err();
     assert_ne!(
-        gh["error"]["message"].as_str().unwrap_or(""),
+        gh["message"].as_str().unwrap_or(""),
         "named params not supported; use array"
     );
-    assert_eq!(gh["error"]["code"], ERR_INVALID_PARAMETER); // height out of range
+    assert_eq!(gh["code"], ERR_INVALID_PARAMETER); // height out of range
 
-    let missing = handle_request(&ctx, &json!({"method":"getblock","params":{}}));
-    assert_eq!(missing["error"]["code"], ERR_INVALID_PARAMS);
+    let missing = dispatch(&ctx, "getblock", RpcParams::named(Default::default())).unwrap_err();
+    assert_eq!(missing["code"], ERR_INVALID_PARAMS);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -667,63 +659,52 @@ fn named_params_getblock_object() {
 fn echo_positional_named_and_mixed_args() {
     let (ctx, dir) = ctx_empty();
 
-    let empty = handle_request(&ctx, &json!({"id":1,"method":"echo","params":[]}));
-    assert!(empty["error"].is_null(), "{empty}");
-    assert_eq!(empty["result"], json!([]));
+    let empty = dispatch(&ctx, "echo", vec![]).unwrap();
+    assert_eq!(empty, json!([]));
 
-    let named = handle_request(&ctx, &json!({"method":"echo","params":{"arg0":0,"arg9":9}}));
-    assert!(named["error"].is_null(), "{named}");
+    let named_echo = dispatch(&ctx, "echo", named(json!({"arg0": 0, "arg9": 9}))).unwrap();
     let mut want = vec![Value::Null; 10];
     want[0] = json!(0);
     want[9] = json!(9);
-    assert_eq!(named["result"], Value::Array(want));
+    assert_eq!(named_echo, Value::Array(want));
 
-    let arg1 = handle_request(&ctx, &json!({"method":"echo","params":{"arg1":1}}));
-    assert_eq!(arg1["result"], json!([Value::Null, 1]));
+    let arg1 = dispatch(&ctx, "echo", named(json!({"arg1": 1}))).unwrap();
+    assert_eq!(arg1, json!([Value::Null, 1]));
 
-    let arg9_null = handle_request(&ctx, &json!({"method":"echo","params":{"arg9":null}}));
-    assert_eq!(arg9_null["result"], json!(vec![Value::Null; 10]));
+    let arg9_null = dispatch(&ctx, "echo", named(json!({"arg9": null}))).unwrap();
+    assert_eq!(arg9_null, json!(vec![Value::Null; 10]));
 
     // AuthServiceProxy mixed: echo(0, 1, arg3=3, arg5=5)
-    let mixed = handle_request(
+    let mixed = dispatch(
         &ctx,
-        &json!({"method":"echo","params":{"args":[0,1],"arg3":3,"arg5":5}}),
-    );
-    assert!(mixed["error"].is_null(), "{mixed}");
-    assert_eq!(
-        mixed["result"],
-        json!([0, 1, Value::Null, 3, Value::Null, 5])
-    );
+        "echo",
+        named(json!({"args": [0, 1], "arg3": 3, "arg5": 5})),
+    )
+    .unwrap();
+    assert_eq!(mixed, json!([0, 1, Value::Null, 3, Value::Null, 5]));
 
-    let twice = handle_request(
-        &ctx,
-        &json!({"method":"echo","params":{"args":[0,1],"arg1":1}}),
-    );
-    assert_eq!(twice["error"]["code"], ERR_INVALID_PARAMETER);
+    let twice = dispatch(&ctx, "echo", named(json!({"args": [0, 1], "arg1": 1}))).unwrap_err();
+    assert_eq!(twice["code"], ERR_INVALID_PARAMETER);
     assert!(
-        twice["error"]["message"]
+        twice["message"]
             .as_str()
             .unwrap()
             .contains("specified twice"),
         "{twice}"
     );
 
-    let twice_null = handle_request(
+    let twice_null = dispatch(
         &ctx,
-        &json!({"method":"echo","params":{"args":[0,null,2],"arg1":1}}),
-    );
-    assert_eq!(twice_null["error"]["code"], ERR_INVALID_PARAMETER);
+        "echo",
+        named(json!({"args": [0, null, 2], "arg1": 1})),
+    )
+    .unwrap_err();
+    assert_eq!(twice_null["code"], ERR_INVALID_PARAMETER);
 
     // Mixed positional `args` must feed getblockhash(height).
-    let gh = handle_request(
-        &ctx,
-        &json!({"method":"getblockhash","params":{"args":[0]}}),
-    );
-    assert_ne!(
-        gh["error"]["message"].as_str().unwrap_or(""),
-        "height required"
-    );
-    assert_eq!(gh["error"]["code"], ERR_INVALID_PARAMETER);
+    let gh = dispatch(&ctx, "getblockhash", named(json!({"args": [0]}))).unwrap_err();
+    assert_ne!(gh["message"].as_str().unwrap_or(""), "height required");
+    assert_eq!(gh["code"], ERR_INVALID_PARAMETER);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -797,11 +778,8 @@ fn all_methods_callable_empty_or_error() {
     // estimatesmartfee requires conf_target (rpc_estimatefee.py)
     let _ = dispatch(&ctx, "estimatesmartfee", vec![]).unwrap_err();
     let _ = dispatch(&ctx, "estimatesmartfee", vec![json!(6)]).unwrap();
-    // handle_request error shapes
-    let _ = handle_request(&ctx, &json!({}));
-    let _ = handle_request(&ctx, &json!({"method":"getblockcount","params":{}}));
-    let _ = handle_request(&ctx, &json!({"method":"getblockcount","params":1}));
-    let _ = handle_request(&ctx, &json!({"id":1,"method":"nosuch","params":[]}));
+    let _ = dispatch(&ctx, "getblockcount", RpcParams::named(Default::default())).unwrap();
+    let _ = dispatch(&ctx, "nosuch", vec![]).unwrap_err();
     // no mempool
     let ctx2 = RpcContext {
         query: Arc::clone(&ctx.query),
@@ -820,7 +798,7 @@ fn all_methods_callable_empty_or_error() {
         peers: None,
         chain: None,
         addrman: None,
-        peers_path: None,
+
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
@@ -872,7 +850,7 @@ fn chain_methods_against_mined_regtest() {
         peers: None,
         chain: None,
         addrman: None,
-        peers_path: None,
+
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
@@ -1350,7 +1328,7 @@ fn ctx_regtest_hub() -> (RpcContext, PathBuf, Arc<rbitcoin_net::ChainHub>) {
         peers: None,
         chain: Some(Arc::clone(&hub)),
         addrman: None,
-        peers_path: None,
+
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
@@ -2745,7 +2723,6 @@ fn addpeeraddress_updates_addrman_without_rewriting_peers_file() {
     let peers_path = dir.join("peers");
     let am = Arc::new(Mutex::new(AddrMan::new()));
     ctx.addrman = Some(Arc::clone(&am));
-    ctx.peers_path = Some(peers_path.clone());
 
     let out = dispatch(
         &ctx,
@@ -2876,7 +2853,7 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
         peers: None,
         chain: None,
         addrman: None,
-        peers_path: None,
+
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
