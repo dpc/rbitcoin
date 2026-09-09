@@ -2958,11 +2958,10 @@ fn tx_accept_log(e: &rbitcoin_mempool::AcceptError) -> TxAcceptLog {
 
 fn queue_orphan_parent_getdata(
     mp: &crate::tx_relay::MempoolHub,
-    txid: bitcoin::Txid,
+    missing: &std::collections::BTreeSet<bitcoin::Txid>,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
 ) -> Result<(), NetError> {
-    let missing = mp.orphan_missing_parents(&txid);
-    let want = mp.take_parent_getdata(&missing);
+    let want = mp.take_parent_getdata(&missing.iter().copied().collect::<Vec<_>>());
     if want.is_empty() {
         return Ok(());
     }
@@ -3026,7 +3025,9 @@ async fn on_tx(
                     TxAcceptLog::Silent => {}
                     TxAcceptLog::Park => {
                         rbitcoin_log::debug!("txrelay: park {txid} orphans={}", mp.orphan_count());
-                        queue_orphan_parent_getdata(mp, txid, out_tx)?;
+                        if let rbitcoin_mempool::AcceptError::Orphaned { missing, .. } = &e {
+                            queue_orphan_parent_getdata(mp, missing, out_tx)?;
+                        }
                     }
                     TxAcceptLog::Reject => {
                         let id = session.map(|s| s.id).unwrap_or(0);

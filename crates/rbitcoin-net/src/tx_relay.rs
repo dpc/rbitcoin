@@ -328,7 +328,7 @@ const PARENT_GETDATA_TTL: Duration = Duration::from_secs(60);
 const MAX_PARENTS_PER_PARK: usize = 16;
 
 struct AdmitSpec {
-    park_orphans: bool,
+    report_orphans: bool,
     fee_delta: i64,
     time_prepare_lock: bool,
     min_relay: Option<u64>,
@@ -1130,7 +1130,7 @@ impl MempoolHub {
         self.accept_with_utxo(tx, &self.utxo_provider())
     }
 
-    /// Prepare under read lock, park orphans under write, scripts off-lock.
+    /// Prepare under read lock; scripts off-lock. Parking is the caller's job.
     fn admit_staged(
         &self,
         tx: &Transaction,
@@ -1148,7 +1148,7 @@ impl MempoolHub {
                 utxo,
                 tip,
                 spec.fee_delta,
-                spec.park_orphans,
+                spec.report_orphans,
                 spec.min_relay,
             )
         };
@@ -1189,7 +1189,7 @@ impl MempoolHub {
         let mut lock_us = 0u64;
         let delta = self.fee_delta(&tx.compute_txid());
         let spec = AdmitSpec {
-            park_orphans: true,
+            report_orphans: true,
             fee_delta: delta,
             time_prepare_lock: false,
             min_relay: None,
@@ -1200,7 +1200,6 @@ impl MempoolHub {
                 if let AcceptError::Orphaned { missing, .. } = &e {
                     if let Some(r) = self.admit_1p1c(tx, utxo, missing) {
                         let us = t0.elapsed().as_micros() as u64;
-                        self.meter_accept_stages(lock_us, stages);
                         self.meter_accept_wall(us, true);
                         return Ok(r);
                     }
@@ -1212,10 +1211,7 @@ impl MempoolHub {
                     self.meter_accept_stages(lock_us, stages);
                     return self.finish_accept_err(us, parked);
                 }
-                if rbitcoin_mempool::ActiveMempool::records_accept_failure(tx, &e) {
-                    let mut g = self.lock_write();
-                    g.note_accept_failure(tx, &e);
-                }
+                self.note_if_accept_failure(tx, &e);
                 let us = t0.elapsed().as_micros() as u64;
                 self.meter_accept_stages(lock_us, stages);
                 return self.finish_accept_err(us, e);
@@ -1238,6 +1234,7 @@ impl MempoolHub {
             Ok(r) => {
                 self.meter_accept_wall(us, true);
                 self.publish_admitted(tx, &r, &prevouts, utxo);
+                let _ = self.expire_stale();
                 Ok(r)
             }
             Err(e) => self.finish_accept_err(us, e),
@@ -1257,7 +1254,7 @@ impl MempoolHub {
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
         let spec_p = AdmitSpec {
-            park_orphans: false,
+            report_orphans: false,
             fee_delta: self.fee_delta(&parent.compute_txid()),
             time_prepare_lock: false,
             min_relay: Some(0),
@@ -1265,10 +1262,7 @@ impl MempoolHub {
         let prep_p = match self.admit_staged(&parent, utxo, spec_p, &mut stages, &mut lock_us) {
             Ok(p) => p,
             Err(e) => {
-                if rbitcoin_mempool::ActiveMempool::records_accept_failure(&parent, &e) {
-                    let mut g = self.lock_write();
-                    g.note_accept_failure(&parent, &e);
-                }
+                self.note_if_accept_failure(&parent, &e);
                 return None;
             }
         };
@@ -1281,7 +1275,7 @@ impl MempoolHub {
             g.commit_after_script(&parent, prep_p).ok()?
         };
         let spec_c = AdmitSpec {
-            park_orphans: false,
+            report_orphans: false,
             fee_delta: self.fee_delta(&child.compute_txid()),
             time_prepare_lock: false,
             min_relay: None,
@@ -1289,9 +1283,8 @@ impl MempoolHub {
         let prep_c = match self.admit_staged(child, utxo, spec_c, &mut stages, &mut lock_us) {
             Ok(p) => p,
             Err(_) => {
-                let mut g = self.lock_write();
-                let _ = g.remove_txid(&parent_res.txid);
-                self.unindex_txid(&parent_res.txid);
+                self.meter_accept_stages(lock_us, stages);
+                self.rollback_1p1c_parent(&parent_res.txid);
                 return None;
             }
         };
@@ -1300,18 +1293,30 @@ impl MempoolHub {
             let mut g = self.lock_write();
             g.commit_after_script(child, prep_c)
         };
+        self.meter_accept_stages(lock_us, stages);
         match child_res {
             Ok(r) => {
                 self.publish_admitted(&parent, &parent_res, &prevouts_p, utxo);
                 self.publish_admitted(child, &r, &prevouts_c, utxo);
+                let _ = self.expire_stale();
                 Some(r)
             }
             Err(_) => {
-                let mut g = self.lock_write();
-                let _ = g.remove_txid(&parent_res.txid);
-                self.unindex_txid(&parent_res.txid);
+                self.rollback_1p1c_parent(&parent_res.txid);
                 None
             }
+        }
+    }
+
+    fn rollback_1p1c_parent(&self, txid: &Txid) {
+        let mut g = self.lock_write();
+        let _ = g.remove_txid(txid);
+    }
+
+    fn note_if_accept_failure(&self, tx: &Transaction, e: &AcceptError) {
+        if let Some(rec) = rbitcoin_mempool::ActiveMempool::accept_failure_record(tx, e) {
+            let mut g = self.lock_write();
+            g.apply_accept_failure(tx, rec);
         }
     }
 
@@ -1343,7 +1348,6 @@ impl MempoolHub {
         self.publish_announce(r, shs);
         self.note_template_update();
         self.promote_orphans_staged(r.txid, utxo);
-        let _ = self.expire_stale();
     }
 
     fn promote_orphans_staged(&self, parent: Txid, utxo: &impl rbitcoin_mempool::UtxoProvider) {
@@ -1394,7 +1398,7 @@ impl MempoolHub {
         let mut lock_us = 0u64;
         let delta = self.fee_delta(&tx.compute_txid());
         let spec = AdmitSpec {
-            park_orphans: false,
+            report_orphans: false,
             fee_delta: delta,
             time_prepare_lock: false,
             min_relay: None,
@@ -1563,7 +1567,7 @@ impl MempoolHub {
             utxo.note_spender(tx);
             let delta = self.fee_delta(&tx.compute_txid());
             let spec = AdmitSpec {
-                park_orphans: true,
+                report_orphans: true,
                 fee_delta: delta,
                 time_prepare_lock: true,
                 min_relay: None,
@@ -1761,14 +1765,6 @@ impl MempoolHub {
         (g.orphanage.len(), g.orphanage.total_weight())
     }
 
-    pub fn orphan_missing_parents(&self, txid: &Txid) -> Vec<Txid> {
-        self.lock_read()
-            .orphanage
-            .missing_of(txid)
-            .map(|s| s.iter().copied().collect())
-            .unwrap_or_default()
-    }
-
     /// Unique missing parents not already held and not asked within TTL.
     pub fn take_parent_getdata(&self, missing: &[Txid]) -> Vec<Txid> {
         self.take_parent_getdata_at(missing, Instant::now())
@@ -1822,7 +1818,7 @@ impl MempoolHub {
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
         let spec = AdmitSpec {
-            park_orphans: true,
+            report_orphans: true,
             fee_delta: 0,
             time_prepare_lock: false,
             min_relay: None,
@@ -3249,6 +3245,40 @@ mod tests {
             hub.accept_package(&[]),
             Err(AcceptError::PackageEmpty)
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
+    fn accept_package_does_not_park_orphan_member() {
+        let dir = tmp();
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+        hub.set_relay_enabled(true);
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x44; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let err = hub.accept_package(&[tx]).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Orphaned { .. }),
+            "package member missing parent: {err}"
+        );
+        assert_eq!(hub.orphan_count(), 0, "accept_package must not park");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }

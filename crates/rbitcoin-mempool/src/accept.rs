@@ -190,6 +190,13 @@ impl std::fmt::Display for AcceptError {
 
 impl std::error::Error for AcceptError {}
 
+/// Side effects of a recordable accept failure (recent-invalid / extra-compact).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptFailureRecord {
+    Invalid(Txid),
+    Extra,
+}
+
 impl From<MempoolError> for AcceptError {
     fn from(e: MempoolError) -> Self {
         match e {
@@ -257,6 +264,17 @@ pub fn check_mempool_structural(
 /// interpreter.
 fn tx_has_witness(tx: &Transaction) -> bool {
     tx.input.iter().any(|i| !i.witness.is_empty())
+}
+
+fn first_missing_outpoint(
+    tx: &Transaction,
+    missing: &BTreeSet<Txid>,
+    extra: impl Fn(&OutPoint) -> bool,
+) -> Option<OutPoint> {
+    tx.input
+        .iter()
+        .map(|inp| inp.previous_output)
+        .find(|op| missing.contains(&op.txid) && extra(op))
 }
 
 fn verify_tx_scripts(tx: &Transaction, prevouts: Vec<TxOut>) -> Result<(), AcceptError> {
@@ -476,12 +494,7 @@ impl ActiveMempool {
                 self.promote_orphans_of(r.txid, utxos, tip);
                 Ok(r)
             }
-            Err(AcceptError::Orphaned { missing, .. }) => {
-                if let Some(r) = self.admit_1p1c_pair(tx, &missing, utxos, tip) {
-                    return Ok(r);
-                }
-                Err(self.park_orphan(tx, missing))
-            }
+            Err(AcceptError::Orphaned { missing, .. }) => Err(self.park_orphan(tx, missing)),
             Err(e) => {
                 self.note_accept_failure(tx, &e);
                 Err(e)
@@ -495,10 +508,10 @@ impl ActiveMempool {
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
         fee_delta: i64,
-        park_orphans: bool,
+        report_orphans: bool,
         min_relay: Option<u64>,
     ) -> Result<AcceptResult, AcceptError> {
-        let prep = self.prepare_admit(tx, utxos, tip, fee_delta, park_orphans, min_relay)?;
+        let prep = self.prepare_admit(tx, utxos, tip, fee_delta, report_orphans, min_relay)?;
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
         let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
@@ -511,30 +524,6 @@ impl ActiveMempool {
             return Err(e);
         }
         self.commit_after_script(tx, prep)
-    }
-
-    fn admit_1p1c_pair(
-        &mut self,
-        child: &Transaction,
-        missing: &BTreeSet<Txid>,
-        utxos: &impl UtxoProvider,
-        tip: ChainTipCtx,
-    ) -> Option<AcceptResult> {
-        let parent = self.try_one_parent_package(child, missing, utxos)?;
-        let pr = self
-            .accept_tx_with(&parent, utxos, tip, 0, false, Some(0))
-            .ok()?;
-        match self.accept_tx_with(child, utxos, tip, 0, false, None) {
-            Ok(cr) => {
-                self.promote_orphans_of(pr.txid, utxos, tip);
-                self.promote_orphans_of(cr.txid, utxos, tip);
-                Some(cr)
-            }
-            Err(_) => {
-                let _ = self.remove_txid(&pr.txid);
-                None
-            }
-        }
     }
 
     fn note_conflict_and_parent(
@@ -588,14 +577,16 @@ impl ActiveMempool {
     }
 
     /// Graph peek + UTXO resolve (`&self`: callers may hold a read lock).
-    /// Does not park orphans; [`Self::park_orphan`] does that under write.
+    ///
+    /// `report_orphans`: missing parents become [`AcceptError::Orphaned`] (caller
+    /// may [`Self::park_orphan`]); otherwise [`AcceptError::MissingPrevout`].
     pub fn prepare_admit(
         &self,
         tx: &Transaction,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
         fee_delta: i64,
-        park_orphans: bool,
+        report_orphans: bool,
         min_relay: Option<u64>,
     ) -> Result<PreparedAdmit, AcceptError> {
         if tx.is_coinbase() {
@@ -611,7 +602,7 @@ impl ActiveMempool {
             return Err(AcceptError::Policy("txn-same-nonwitness-data-in-mempool"));
         }
         // Already parked: soft re-announce of the same orphan.
-        if park_orphans {
+        if report_orphans {
             if let Some(missing) = self.orphanage.missing_of(&txid).cloned() {
                 return Err(AcceptError::Orphaned { txid, missing });
             }
@@ -658,28 +649,21 @@ impl ActiveMempool {
         let utxo_us = t_utxo.elapsed().as_micros() as u64;
 
         if !missing_parents.is_empty() {
-            if let Some(op) = tx.input.iter().find_map(|inp| {
-                let op = inp.previous_output;
-                missing_parents
-                    .contains(&op.txid)
-                    .then_some(op)
-                    .filter(|_| self.recent_invalid.contains(&op.txid))
+            if let Some(op) = first_missing_outpoint(tx, &missing_parents, |op| {
+                self.recent_invalid.contains(&op.txid)
             }) {
                 return Err(AcceptError::MissingPrevout(op));
             }
-            if park_orphans {
+            if report_orphans {
                 return Err(AcceptError::Orphaned {
                     txid,
                     missing: missing_parents,
                 });
             }
-            let op = tx
-                .input
-                .iter()
-                .find(|inp| missing_parents.contains(&inp.previous_output.txid))
-                .map(|inp| inp.previous_output)
-                .unwrap_or(tx.input[0].previous_output);
-            return Err(AcceptError::MissingPrevout(op));
+            return Err(AcceptError::MissingPrevout(
+                first_missing_outpoint(tx, &missing_parents, |_| true)
+                    .expect("missing_parents is built from tx.input"),
+            ));
         }
 
         check_mempool_structural(tx, &chain_coins, tip)?;
@@ -720,9 +704,11 @@ impl ActiveMempool {
         if self.graph.get(&txid).is_some() {
             return AcceptError::Duplicate(txid);
         }
-        if self.orphanage.contains(&txid) {
-            let missing = self.orphanage.missing_of(&txid).cloned().unwrap_or(missing);
-            return AcceptError::Orphaned { txid, missing };
+        if let Some(parked) = self.orphanage.missing_of(&txid).cloned() {
+            return AcceptError::Orphaned {
+                txid,
+                missing: parked,
+            };
         }
         if missing.is_empty() {
             return AcceptError::MissingPrevout(tx.input[0].previous_output);
@@ -927,34 +913,16 @@ impl ActiveMempool {
         Ok((conflict_set, fee_sat, weight))
     }
 
-    /// Full prepare → script → commit without resetting stage timers (orphan promote).
-    fn accept_tx_inner(
-        &mut self,
-        tx: &Transaction,
-        utxos: &impl UtxoProvider,
-        tip: ChainTipCtx,
-    ) -> Result<AcceptResult, AcceptError> {
-        let prep = self.prepare_admit(tx, utxos, tip, 0, true, None)?;
-        let t_script = Instant::now();
-        let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
-        self.last_accept_stages.script_us = self
-            .last_accept_stages
-            .script_us
-            .saturating_add(t_script.elapsed().as_micros() as u64);
-        script_res?;
-        self.commit_after_script(tx, prep)
-    }
-
     /// Electrum scripthash = SHA256(scriptPubKey) (same as store `script_hash`).
     fn electrum_scripthash(script: &[u8]) -> [u8; 32] {
         use bitcoin::hashes::{sha256, Hash};
         *sha256::Hash::hash(script).as_byte_array()
     }
 
-    /// Re-try orphans that listed `parent` as missing (recursive via accept_tx_inner).
+    /// Re-try orphans that listed `parent` as missing (recursive via accept_tx_with).
     ///
-    /// Uses inner (not top-level accept_tx) so stage timers accumulate on the
-    /// parent admit that unlocked the orphan chain. Public for hub staged commit.
+    /// Uses `accept_tx_with` (not top-level accept_tx) so stage timers accumulate
+    /// on the parent admit that unlocked the orphan chain. Public for hub staged commit.
     pub fn promote_orphans_of(
         &mut self,
         parent: Txid,
@@ -963,7 +931,7 @@ impl ActiveMempool {
     ) {
         let children = self.orphanage.take_children_of(&parent);
         for child in children {
-            if let Ok(r) = self.accept_tx_inner(&child, utxos, tip) {
+            if let Ok(r) = self.accept_tx_with(&child, utxos, tip, 0, true, None) {
                 self.promote_orphans_of(r.txid, utxos, tip);
             }
         }
@@ -1105,8 +1073,8 @@ impl ActiveMempool {
         self.last_accept_stages = AcceptStageUs::default();
         let mut accepted: Vec<AcceptResult> = Vec::with_capacity(txs.len());
         for tx in txs {
-            // Inner + promote (not top-level accept_tx) so stages are not reset per member.
-            match self.accept_tx_inner(tx, utxos, tip) {
+            // accept_tx_with + promote (not top-level accept_tx) so stages are not reset per member.
+            match self.accept_tx_with(tx, utxos, tip, 0, true, None) {
                 Ok(r) => {
                     self.promote_orphans_of(r.txid, utxos, tip);
                     accepted.push(r);
@@ -1225,23 +1193,29 @@ impl ActiveMempool {
         self.extra_compact.iter().map(|(_, tx)| tx)
     }
 
-    pub fn records_accept_failure(tx: &Transaction, e: &AcceptError) -> bool {
+    pub fn accept_failure_record(tx: &Transaction, e: &AcceptError) -> Option<AcceptFailureRecord> {
         match e {
-            AcceptError::InputsDuplicate | AcceptError::Coinbase => true,
-            AcceptError::Script(_) => !tx_has_witness(tx),
-            AcceptError::Policy("min relay fee") => true,
-            _ => false,
+            AcceptError::InputsDuplicate | AcceptError::Coinbase => {
+                Some(AcceptFailureRecord::Invalid(tx.compute_txid()))
+            }
+            AcceptError::Script(_) if !tx_has_witness(tx) => {
+                Some(AcceptFailureRecord::Invalid(tx.compute_txid()))
+            }
+            AcceptError::Policy("min relay fee") => Some(AcceptFailureRecord::Extra),
+            _ => None,
+        }
+    }
+
+    pub fn apply_accept_failure(&mut self, tx: &Transaction, rec: AcceptFailureRecord) {
+        match rec {
+            AcceptFailureRecord::Invalid(txid) => self.note_invalid(txid),
+            AcceptFailureRecord::Extra => self.note_extra(tx),
         }
     }
 
     pub fn note_accept_failure(&mut self, tx: &Transaction, e: &AcceptError) {
-        match e {
-            AcceptError::InputsDuplicate | AcceptError::Coinbase => {
-                self.note_invalid(tx.compute_txid())
-            }
-            AcceptError::Script(_) if !tx_has_witness(tx) => self.note_invalid(tx.compute_txid()),
-            AcceptError::Policy("min relay fee") => self.note_extra(tx),
-            _ => {}
+        if let Some(rec) = Self::accept_failure_record(tx, e) {
+            self.apply_accept_failure(tx, rec);
         }
     }
 
@@ -1268,6 +1242,7 @@ impl ActiveMempool {
             .map(|(_, tx)| tx)
     }
 
+    /// 1p1c parent body from extra-compact. Parent inputs must be confirmed.
     pub fn try_one_parent_package(
         &self,
         child: &Transaction,
@@ -1288,12 +1263,15 @@ impl ActiveMempool {
         Some(parent)
     }
 
+    /// Combined parent+child fee must meet min-relay. Parent inputs must be
+    /// confirmed (no unconfirmed grandparent — same limit as Core 1p1c).
     fn package_pays_min_relay(
         &self,
         parent: &Transaction,
         child: &Transaction,
         utxos: &impl UtxoProvider,
     ) -> bool {
+        let pid = parent.compute_txid();
         let mut p_in = 0u64;
         for inp in &parent.input {
             let Some(coin) = utxos.get_coin(&inp.previous_output) else {
@@ -1308,7 +1286,7 @@ impl ActiveMempool {
         let mut c_in = 0u64;
         for inp in &child.input {
             let op = inp.previous_output;
-            let val = if op.txid == parent.compute_txid() {
+            let val = if op.txid == pid {
                 parent
                     .output
                     .get(op.vout as usize)
@@ -2789,7 +2767,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Parent below min-relay + paying child: 1p1c package admits both.
+    /// Parent below min-relay + paying child: 1p1c policy finds the parent body.
     #[test]
     fn one_parent_one_child_admits_below_minrelay_parent() {
         let dir = tmp_dir();
@@ -2813,15 +2791,16 @@ mod tests {
             },
             1_000,
         );
-        mp.accept_tx(&child, &utxos, TIP_OK)
-            .expect("1p1c child should pull parent");
-        assert!(mp.graph.contains(&parent_id), "parent in package");
-        assert!(mp.graph.contains(&child.compute_txid()), "child in package");
-        assert_eq!(mp.orphan_count(), 0);
+        let missing = BTreeSet::from([parent_id]);
+        let got = mp
+            .try_one_parent_package(&child, &missing, &utxos)
+            .expect("paying child must select the extra-compact parent");
+        assert_eq!(got.compute_txid(), parent_id);
+        assert_eq!(mp.live_count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 1p1c must not admit a parked sibling at min-relay floor 0.
+    /// 1-sat sibling of a below-min-relay parent is not a 1p1c package.
     #[test]
     fn one_parent_one_child_does_not_skip_minrelay_for_siblings() {
         let dir = tmp_dir();
@@ -2853,6 +2832,7 @@ mod tests {
             mp.accept_tx(&parent, &utxos, TIP_OK),
             Err(AcceptError::Policy("min relay fee"))
         ));
+        let missing = BTreeSet::from([parent_id]);
         let sib = spend_tx(
             OutPoint {
                 txid: parent_id,
@@ -2860,11 +2840,10 @@ mod tests {
             },
             49_899,
         );
-        assert!(matches!(
-            mp.accept_tx(&sib, &utxos, TIP_OK),
-            Err(AcceptError::Orphaned { .. })
-        ));
-        assert_eq!(mp.orphan_count(), 1);
+        assert!(
+            mp.try_one_parent_package(&sib, &missing, &utxos).is_none(),
+            "1-sat sibling must not be a 1p1c package"
+        );
         let child = spend_tx(
             OutPoint {
                 txid: parent_id,
@@ -2872,13 +2851,10 @@ mod tests {
             },
             1_000,
         );
-        mp.accept_tx(&child, &utxos, TIP_OK).expect("1p1c");
-        assert!(mp.graph.contains(&parent_id));
-        assert!(mp.graph.contains(&child.compute_txid()));
-        assert!(
-            !mp.graph.contains(&sib.compute_txid()),
-            "1-sat sibling must not ride the 1p1c min-relay skip"
-        );
+        let got = mp
+            .try_one_parent_package(&child, &missing, &utxos)
+            .expect("paying child");
+        assert_eq!(got.compute_txid(), parent_id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2925,10 +2901,11 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         };
-        mp.accept_tx(&child, &utxos, TIP_OK)
+        let missing = BTreeSet::from([parent_id]);
+        let got = mp
+            .try_one_parent_package(&child, &missing, &utxos)
             .expect("confirmed extra input must not block 1p1c");
-        assert!(mp.graph.contains(&parent_id));
-        assert!(mp.graph.contains(&child.compute_txid()));
+        assert_eq!(got.compute_txid(), parent_id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
