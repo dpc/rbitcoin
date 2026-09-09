@@ -207,7 +207,6 @@ pub mod confirm_phase_stats {
     static LAST_WRITE_BIP68_NS: AtomicU64 = AtomicU64::new(0);
     static LAST_WRITE_CLASS_C_NS: AtomicU64 = AtomicU64::new(0);
     static LAST_WRITE_SPEND_ANN_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_TIP_GC_NS: AtomicU64 = AtomicU64::new(0);
     static LAST_WRITE_TWEAK_NS: AtomicU64 = AtomicU64::new(0);
     static LAST_WRITE_WALL_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -226,7 +225,6 @@ pub mod confirm_phase_stats {
         pub bip68_ns: u64,
         pub class_c_ns: u64,
         pub spend_ann_ns: u64,
-        pub tip_gc_ns: u64,
         /// BIP-352 thin tweak index (`index_sp_tweaks_batch`) after annotate.
         pub tweak_ns: u64,
     }
@@ -250,7 +248,6 @@ pub mod confirm_phase_stats {
         LAST_WRITE_BIP68_NS.store(p.bip68_ns, Ordering::Relaxed);
         LAST_WRITE_CLASS_C_NS.store(p.class_c_ns, Ordering::Relaxed);
         LAST_WRITE_SPEND_ANN_NS.store(p.spend_ann_ns, Ordering::Relaxed);
-        LAST_WRITE_TIP_GC_NS.store(p.tip_gc_ns, Ordering::Relaxed);
         LAST_WRITE_TWEAK_NS.store(p.tweak_ns, Ordering::Relaxed);
     }
 
@@ -266,7 +263,6 @@ pub mod confirm_phase_stats {
             bip68_ns: LAST_WRITE_BIP68_NS.load(Ordering::Relaxed),
             class_c_ns: LAST_WRITE_CLASS_C_NS.load(Ordering::Relaxed),
             spend_ann_ns: LAST_WRITE_SPEND_ANN_NS.load(Ordering::Relaxed),
-            tip_gc_ns: LAST_WRITE_TIP_GC_NS.load(Ordering::Relaxed),
             tweak_ns: LAST_WRITE_TWEAK_NS.load(Ordering::Relaxed),
         }
     }
@@ -827,7 +823,6 @@ mod coverage_tests {
             bip68_ns: 50_000,
             class_c_ns: 400_000,
             spend_ann_ns: 300_000,
-            tip_gc_ns: 10_000,
             tweak_ns: 2_500_000,
         });
         let p = last_write_phases();

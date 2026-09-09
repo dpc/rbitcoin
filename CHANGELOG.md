@@ -27,10 +27,11 @@ before 1.0).
 - **`ibd: perf` / `ibd: sizes` drop never-written meters:** DEBUG no longer
   prints `recon`/`wire`/`resolve`, `parent_io`, `miss_p`, `cold_idx`,
   `tip_gc`, `recent_pub`, annotate `pread=`, `spend_mix i=/skip=`,
-  `pstore`, or always-zero heap `recent=` occupancy. Live lookup / load /
-  scripts / write stage tokens stay. `write=` is Class A + ensure +
-  structural + class_c + SH + spend + tweaks + pins + head_sub +
-  drain_join + dequeue.
+  `pstore`, or always-zero heap `recent=` occupancy. Slow-batch INFO
+  `ibd: confirm write slow` also drops `tip_gc=` (write no longer GCs
+  header plans). Live lookup / load / scripts / write stage tokens stay.
+  `write=` is Class A + ensure + structural + class_c + SH + spend +
+  tweaks + pins + head_sub + drain_join + dequeue.
 
 ## [0.6.0] — 2026-09-08
 
