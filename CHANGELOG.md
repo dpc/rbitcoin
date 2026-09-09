@@ -36,10 +36,12 @@ before 1.0).
   `prepare_cmpct_fuzz_*`, …). rustc `dead_code` then deleted unused wrappers
   (`ScriptsPhaseHandle` / feed-ahead, `select_most_work` / `WorkCandidate`,
   `ConfirmLoadStats`, `cmpct_missing_empty_mempool`, `handle_request`,
-  `magic_for`, `max_level`, `drive_script_waves` wrapper). Tests drive the
-  remaining production entries (`drive_script_waves_with`,
+  `magic_for`, `max_level`, `drive_script_waves` wrapper, `NetConfig` /
+  `P2PHandle` / `handle()`, `SortedHeadWriter` / idx-only open). Tests drive
+  the remaining production entries (`drive_script_waves_with`,
   `confirm_bq_resolve_wave_capped`, `dispatch` / `run_rpc`, `enabled`,
-  `hold_body` / `register_explore`).
+  `hold_body` / `register_explore`, `SortedHead::write`/`open`). Dropped
+  crate-root names are denied by ast-grep (`crate-root-dropped-pub`).
 - **Workspace version 0.6.99:** in-tree toward 0.7.0.
   Published GitHub Releases remain 0.6.0; `v0.6.x` is the patch branch.
 - **`ibd: perf` / `ibd: sizes` drop never-written meters:** DEBUG no longer

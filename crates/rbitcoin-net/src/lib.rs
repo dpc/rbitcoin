@@ -64,7 +64,7 @@ pub use seeds::{
     resolve_fixed_seeds, AddrMan, PeerEntry, PeerFlags,
 };
 pub use serve_perf::{format_serve_perf, sample_reset_serve_perf, ServePerfSample};
-pub use service::{NetConfig, P2PHandle, P2PNode};
+pub use service::P2PNode;
 pub use tx_relay::{ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample};
 pub use v2::{parse_v2_regtest, parse_v2_regtest_named, WireBytes};
 pub use versionbits_warn::warning_strings;

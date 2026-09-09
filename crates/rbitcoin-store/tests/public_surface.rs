@@ -1,6 +1,7 @@
 //! Pin the crate-root names other crates actually import (X-04 keep list).
-//! Internal head/IO types stay off this list so `pub(crate)` / dropped
-//! re-exports fail this test if they sneak back onto the public surface.
+//! This test only asserts those names still resolve. Dropped names
+//! (`AddressHead`, `NetConfig`, `P2PHandle`, `LiveShardTable`, …) are
+//! denied by `lint/ast-grep/rules/crate-root-dropped-pub.yml`.
 
 use rbitcoin_store::{
     block_header_hash, block_wire_input_count, clear_unsorted_shard_dir,

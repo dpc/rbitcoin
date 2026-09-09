@@ -23,27 +23,6 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
-#[derive(Clone, Debug)]
-pub struct NetConfig {
-    pub magic: Magic,
-    pub listen: Option<SocketAddr>,
-    pub user_agent: String,
-}
-
-impl NetConfig {
-    pub fn for_regtest(listen: Option<SocketAddr>) -> Self {
-        Self {
-            magic: Magic::REGTEST,
-            listen,
-            user_agent: rbitcoin_primitives::rbitcoin_subversion(
-                env!("CARGO_PKG_VERSION"),
-                &[] as &[&str],
-            )
-            .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
-        }
-    }
-}
-
 /// Running P2P node handle (listen + optional outbound sync / tip follow).
 pub struct P2PNode {
     /// Shared RAM cache (also on hub).
@@ -67,12 +46,6 @@ pub struct P2PNode {
     pub max_inbound: usize,
     /// Shared inbound slots across all listen sockets.
     inbound_sem: Arc<tokio::sync::Semaphore>,
-}
-
-pub struct P2PHandle {
-    pub cache: Arc<BlockCache>,
-    pub query: Arc<Query>,
-    pub local_addr: SocketAddr,
 }
 
 impl P2PNode {
@@ -206,14 +179,6 @@ impl P2PNode {
     /// Number of live outbound tip-follow sessions.
     pub fn follow_live_count(&self) -> usize {
         self.follow_live.load(Ordering::SeqCst)
-    }
-
-    pub fn handle(&self) -> P2PHandle {
-        P2PHandle {
-            cache: self.cache.clone(),
-            query: self.query.clone(),
-            local_addr: self.local_addr,
-        }
     }
 
     pub fn tip_height(&self) -> Option<u32> {
@@ -594,7 +559,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn magic_for_all_networks_and_regtest_config() {
+    fn magic_for_all_networks() {
         assert_eq!(
             magic_for_params(&ChainParams::mainnet()),
             Magic::from(bitcoin::Network::Bitcoin)
@@ -608,14 +573,6 @@ mod tests {
             Magic::from(bitcoin::Network::Signet)
         );
         assert_eq!(magic_for_params(&ChainParams::regtest()), Magic::REGTEST);
-        let cfg = NetConfig::for_regtest(None);
-        assert_eq!(cfg.magic, Magic::REGTEST);
-        assert!(cfg.listen.is_none());
-        assert_eq!(
-            cfg.user_agent,
-            rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &[] as &[&str])
-                .unwrap()
-        );
     }
 
     #[test]
