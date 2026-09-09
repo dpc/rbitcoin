@@ -3147,13 +3147,11 @@ fn tx_accept_log_parks_orphans_silences_duplicates() {
         tx_accept_log(&rbitcoin_mempool::AcceptError::Duplicate(txid)),
         TxAcceptLog::Silent
     );
-    assert_eq!(
-        tx_accept_log(&rbitcoin_mempool::AcceptError::Orphaned {
-            txid,
-            missing: Default::default(),
-        }),
-        TxAcceptLog::Park
-    );
+    let e = rbitcoin_mempool::AcceptError::Orphaned {
+        txid,
+        missing: Default::default(),
+    };
+    assert!(matches!(tx_accept_log(&e), TxAcceptLog::Park(m) if m.is_empty()));
     assert_eq!(
         tx_accept_log(&rbitcoin_mempool::AcceptError::Policy("min relay fee")),
         TxAcceptLog::Reject

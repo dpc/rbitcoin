@@ -1766,11 +1766,18 @@ impl MempoolHub {
     }
 
     /// Unique missing parents not already held and not asked within TTL.
-    pub fn take_parent_getdata(&self, missing: &[Txid]) -> Vec<Txid> {
+    pub fn take_parent_getdata<'a>(
+        &self,
+        missing: impl IntoIterator<Item = &'a Txid>,
+    ) -> Vec<Txid> {
         self.take_parent_getdata_at(missing, Instant::now())
     }
 
-    pub(crate) fn take_parent_getdata_at(&self, missing: &[Txid], now: Instant) -> Vec<Txid> {
+    pub(crate) fn take_parent_getdata_at<'a>(
+        &self,
+        missing: impl IntoIterator<Item = &'a Txid>,
+        now: Instant,
+    ) -> Vec<Txid> {
         let mut asked = self.parent_asked.lock().unwrap();
         asked.retain(|_, t| now.saturating_duration_since(*t) < PARENT_GETDATA_TTL);
         let mut out = Vec::new();
@@ -3176,7 +3183,29 @@ mod tests {
         let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
         hub.set_relay_enabled(true);
         hub.set_min_relay_sat_kvb(50_000);
-        let parent = spend_true(cbs[0], 200, spk.clone());
+        let parent = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: cbs[0],
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(25_0000_0000),
+                    script_pubkey: spk.clone(),
+                },
+                TxOut {
+                    value: Amount::from_sat(25_0000_0000 - 200),
+                    script_pubkey: spk.clone(),
+                },
+            ],
+        };
         let parent_id = parent.compute_txid();
         assert!(
             matches!(
@@ -3185,13 +3214,36 @@ mod tests {
             ),
             "parent alone below min-relay"
         );
-        let child = Transaction {
+        let sib = Transaction {
             version: Version::TWO,
             lock_time: LockTime::ZERO,
             input: vec![TxIn {
                 previous_output: OutPoint {
                     txid: parent_id,
                     vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(25_0000_0000 - 1),
+                script_pubkey: spk.clone(),
+            }],
+        };
+        let sib_id = sib.compute_txid();
+        assert!(matches!(
+            hub.accept_tx(&sib),
+            Err(AcceptError::Orphaned { .. })
+        ));
+        assert_eq!(hub.orphan_count(), 1);
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: parent_id,
+                    vout: 1,
                 },
                 script_sig: ScriptBuf::new(),
                 sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
@@ -3206,6 +3258,10 @@ mod tests {
             .expect("hub 1p1c must admit parent+child");
         assert!(hub.contains(&parent_id));
         assert!(hub.contains(&child.compute_txid()));
+        assert!(
+            !hub.contains(&sib_id),
+            "1-sat sibling must not ride 1p1c promote at floor 0"
+        );
         assert_eq!(hub.orphan_count(), 0);
         let _ = std::fs::remove_dir_all(&mp);
         let _ = std::fs::remove_dir_all(&store_dir);

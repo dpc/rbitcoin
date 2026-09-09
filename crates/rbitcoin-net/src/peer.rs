@@ -25,7 +25,7 @@ use bitcoin::p2p::{Magic, ServiceFlags, PROTOCOL_VERSION};
 use bitcoin::{Block, BlockHash, Transaction};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -2942,26 +2942,26 @@ async fn on_blocktxn(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TxAcceptLog {
+enum TxAcceptLog<'a> {
     Silent,
-    Park,
+    Park(&'a BTreeSet<bitcoin::Txid>),
     Reject,
 }
 
-fn tx_accept_log(e: &rbitcoin_mempool::AcceptError) -> TxAcceptLog {
+fn tx_accept_log(e: &rbitcoin_mempool::AcceptError) -> TxAcceptLog<'_> {
     match e {
         rbitcoin_mempool::AcceptError::Duplicate(_) => TxAcceptLog::Silent,
-        rbitcoin_mempool::AcceptError::Orphaned { .. } => TxAcceptLog::Park,
+        rbitcoin_mempool::AcceptError::Orphaned { missing, .. } => TxAcceptLog::Park(missing),
         _ => TxAcceptLog::Reject,
     }
 }
 
 fn queue_orphan_parent_getdata(
     mp: &crate::tx_relay::MempoolHub,
-    missing: &std::collections::BTreeSet<bitcoin::Txid>,
+    missing: &BTreeSet<bitcoin::Txid>,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
 ) -> Result<(), NetError> {
-    let want = mp.take_parent_getdata(&missing.iter().copied().collect::<Vec<_>>());
+    let want = mp.take_parent_getdata(missing);
     if want.is_empty() {
         return Ok(());
     }
@@ -3023,11 +3023,9 @@ async fn on_tx(
                 }
                 Err(e) => match tx_accept_log(&e) {
                     TxAcceptLog::Silent => {}
-                    TxAcceptLog::Park => {
+                    TxAcceptLog::Park(missing) => {
                         rbitcoin_log::debug!("txrelay: park {txid} orphans={}", mp.orphan_count());
-                        if let rbitcoin_mempool::AcceptError::Orphaned { missing, .. } = &e {
-                            queue_orphan_parent_getdata(mp, missing, out_tx)?;
-                        }
+                        queue_orphan_parent_getdata(mp, missing, out_tx)?;
                     }
                     TxAcceptLog::Reject => {
                         let id = session.map(|s| s.id).unwrap_or(0);

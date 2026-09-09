@@ -2802,7 +2802,7 @@ mod tests {
 
     /// 1-sat sibling of a below-min-relay parent is not a 1p1c package.
     #[test]
-    fn one_parent_one_child_does_not_skip_minrelay_for_siblings() {
+    fn one_sat_sibling_is_not_a_one_parent_package() {
         let dir = tmp_dir();
         let (op, _, utxos) = chain_utxo(100_000);
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
