@@ -92,10 +92,6 @@ use rbitcoin_store::HeaderRecord;
 /// IBD diagnostics: wall time spent in each phase (nanoseconds; reset by the sampler).
 pub mod confirm_phase_stats {
     use std::sync::atomic::{AtomicU64, Ordering};
-    /// Total reconstruct-ish wall (wire rebuild; historical total).
-    pub static RECONSTRUCT_NS: AtomicU64 = AtomicU64::new(0);
-    /// Full wire `Block` rebuild from Class A rows.
-    pub static RECONSTRUCT_WIRE_NS: AtomicU64 = AtomicU64::new(0);
     /// Optimistic assemble (prevout content + jobs; no durable spentness).
     pub static CONNECT_NS: AtomicU64 = AtomicU64::new(0);
     pub static SCRIPT_NS: AtomicU64 = AtomicU64::new(0);
@@ -135,12 +131,6 @@ pub mod confirm_phase_stats {
     pub static TWEAK_NS: AtomicU64 = AtomicU64::new(0);
     /// Write-stage denserels/abs ensure after Class A (fill planned + ensure spends).
     pub static ENSURE_LAYOUT_NS: AtomicU64 = AtomicU64::new(0);
-    /// Write-stage RecentCreates note+expire+one snapshot publish.
-    pub static WRITE_RECENT_NS: AtomicU64 = AtomicU64::new(0);
-    /// `tx_body_range_batch` inside that publish.
-    pub static WRITE_RECENT_IDX_NS: AtomicU64 = AtomicU64::new(0);
-    /// `publish_if_dirty` clone inside that publish.
-    pub static WRITE_RECENT_CLONE_NS: AtomicU64 = AtomicU64::new(0);
     /// `class_c_commit` wall minus tables (`flush` / SH join).
     pub static WRITE_CLASS_C_JOIN_NS: AtomicU64 = AtomicU64::new(0);
     /// Residual wait on `head_insert_queued` join after Class C / annotate.
@@ -164,15 +154,9 @@ pub mod confirm_phase_stats {
     pub static ASM_JOB_NS: AtomicU64 = AtomicU64::new(0);
     /// Non-coinbase inputs resolved in `resolve_prevout` (for us/in).
     pub static ASM_IN_N: AtomicU64 = AtomicU64::new(0);
-    /// Prevout path splits (ns + counts; sum of path ns ≈ ASM_PREVOUT_NS).
-    pub static ASM_PREV_BATCH_NS: AtomicU64 = AtomicU64::new(0);
     pub static ASM_PREV_BATCH_N: AtomicU64 = AtomicU64::new(0);
-    pub static ASM_PREV_SAME_NS: AtomicU64 = AtomicU64::new(0);
     pub static ASM_PREV_SAME_N: AtomicU64 = AtomicU64::new(0);
-    pub static ASM_PREV_COLD_NS: AtomicU64 = AtomicU64::new(0);
     pub static ASM_PREV_COLD_N: AtomicU64 = AtomicU64::new(0);
-    /// Time in `tx_fk_by_txid` / durable head lookup on cold prevout path.
-    pub static ASM_PREV_FK_NS: AtomicU64 = AtomicU64::new(0);
     /// Cold success with **no** `prev_fk_hint` (thin + pending + head miss at assemble).
     pub static ASM_PREV_COLD_NULL_FK_N: AtomicU64 = AtomicU64::new(0);
     /// Cold success: had fk, batch pin miss (pin did not cover parent/vout).
@@ -189,22 +173,14 @@ pub mod confirm_phase_stats {
     /// Annotate edges via abs pin denserels (pure-write known meta).
     /// Historical name: formerly also counted ranged body walks (removed on Direct write).
     pub static SPEND_ANNOTATE_RANGED: AtomicU64 = AtomicU64::new(0);
-    /// Legacy cold idx annotate path (must stay 0 on Direct IBD after abs-only write).
-    pub static SPEND_ANNOTATE_IDX: AtomicU64 = AtomicU64::new(0);
-    /// Spends skipped (null create_fk or null spend_fk).
-    pub static SPEND_ANNOTATE_SKIP: AtomicU64 = AtomicU64::new(0);
     /// Pure-write annotate wall (ns) / edge count (backend is uring or pwrite).
     pub static SPEND_ANN_NS: AtomicU64 = AtomicU64::new(0);
     pub static SPEND_ANN_N: AtomicU64 = AtomicU64::new(0);
     /// Edges annotated without body pread (should equal all annotate edges).
     pub static SPEND_ANN_PREAD_SKIP: AtomicU64 = AtomicU64::new(0);
-    /// Body preads on annotate (must stay 0 on pure-write write path).
-    pub static SPEND_ANN_PREAD: AtomicU64 = AtomicU64::new(0);
     /// Structural spent meta bulk read wall (ns) / peek count.
     pub static SPEND_META_NS: AtomicU64 = AtomicU64::new(0);
     pub static SPEND_META_N: AtomicU64 = AtomicU64::new(0);
-    /// Header + body-fk resolve for the batch.
-    pub static RESOLVE_NS: AtomicU64 = AtomicU64::new(0);
     /// Prep pre-assemble wall on the prep/load thread.
     ///
     /// Wire path: structure + plan Class A + pin parents (stops before assemble).
@@ -220,10 +196,6 @@ pub mod confirm_phase_stats {
     pub static PREP_PREPARE_NS: AtomicU64 = AtomicU64::new(0);
     /// Wire load sub: filter need + plan batch + meta/tx_fks wiring (not pin).
     pub static PREP_FILTER_PLAN_NS: AtomicU64 = AtomicU64::new(0);
-    /// Unpin spent outs from ConfirmParentCache after Class C.
-    pub static UNPIN_NS: AtomicU64 = AtomicU64::new(0);
-    /// `advance_parent_cache_tip` (drop bodies / GC parents).
-    pub static CACHE_TIP_NS: AtomicU64 = AtomicU64::new(0);
     pub static BLOCKS: AtomicU64 = AtomicU64::new(0);
 
     static LAST_WRITE_N: AtomicU64 = AtomicU64::new(0);
@@ -322,21 +294,6 @@ pub mod confirm_phase_stats {
         )
     }
 
-    /// Sample and reset write-stage RecentCreates publish wall.
-    #[inline]
-    pub fn sample_write_recent_and_reset() -> u64 {
-        WRITE_RECENT_NS.swap(0, Ordering::Relaxed)
-    }
-
-    /// `(idx, clone)` parts of RecentCreates publish.
-    #[inline]
-    pub fn sample_write_recent_parts_and_reset() -> (u64, u64) {
-        (
-            WRITE_RECENT_IDX_NS.swap(0, Ordering::Relaxed),
-            WRITE_RECENT_CLONE_NS.swap(0, Ordering::Relaxed),
-        )
-    }
-
     /// `(drain_join, dequeue)` residual write walls.
     #[inline]
     pub fn sample_write_residuals_and_reset() -> (u64, u64) {
@@ -388,20 +345,14 @@ pub mod confirm_phase_stats {
         )
     }
 
-    /// Prevout path detail: `(in_n, batch_ns, batch_n, same_ns, same_n,
-    /// cold_ns, cold_n, fk_ns)`.
+    /// Prevout path counts: `(in_n, batch_n, same_n, cold_n)`.
     #[inline]
-    #[allow(clippy::type_complexity)]
-    pub fn sample_assemble_prevout_detail_and_reset() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+    pub fn sample_assemble_prevout_detail_and_reset() -> (u64, u64, u64, u64) {
         (
             ASM_IN_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_BATCH_NS.swap(0, Ordering::Relaxed),
             ASM_PREV_BATCH_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_SAME_NS.swap(0, Ordering::Relaxed),
             ASM_PREV_SAME_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_COLD_NS.swap(0, Ordering::Relaxed),
             ASM_PREV_COLD_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_FK_NS.swap(0, Ordering::Relaxed),
         )
     }
 
@@ -505,14 +456,12 @@ pub mod confirm_phase_stats {
     /// Sample and reset all confirm phases.
     ///
     /// Returns
-    /// `(recon, wire, connect, script, class_c, strong, scripthash, tip,
-    ///   utxo_apply, blocks, resolve, load, unpin, cache_tip,
-    ///   spend_ranged, spend_idx, spend_skip, structural, structural_spent,
-    ///   structural_create_h, structural_bip68)`.
+    /// `(connect, script, class_c, strong, scripthash, tip, utxo_apply, blocks,
+    ///   load, spend_ranged, structural, structural_spent, structural_create_h,
+    ///   structural_bip68)`.
     /// `class_c` is **strong+tip tables only** (not SH join wall; SH is
     /// `scripthash`). `strong` / `scripthash` / `tip` come from
     /// [`rbitcoin_query::class_c_phase_stats`].
-    /// `recon` prefers wire sub-timer, else legacy total.
     /// `connect` is **load assemble**, not write structural — see `structural`.
     #[allow(clippy::type_complexity)]
     pub fn sample_and_reset() -> (
@@ -530,21 +479,9 @@ pub mod confirm_phase_stats {
         u64,
         u64,
         u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
     ) {
         let (strong, sh, tip) = rbitcoin_query::class_c_phase_stats::sample_and_reset();
-        let wire = RECONSTRUCT_WIRE_NS.swap(0, Ordering::Relaxed);
-        let recon_total = RECONSTRUCT_NS.swap(0, Ordering::Relaxed);
-        let recon = if wire > 0 { wire } else { recon_total };
         (
-            recon,
-            wire,
             CONNECT_NS.swap(0, Ordering::Relaxed),
             SCRIPT_NS.swap(0, Ordering::Relaxed),
             CLASS_C_NS.swap(0, Ordering::Relaxed),
@@ -553,13 +490,8 @@ pub mod confirm_phase_stats {
             tip,
             UTXO_APPLY_NS.swap(0, Ordering::Relaxed),
             BLOCKS.swap(0, Ordering::Relaxed),
-            RESOLVE_NS.swap(0, Ordering::Relaxed),
             LOAD_NS.swap(0, Ordering::Relaxed),
-            UNPIN_NS.swap(0, Ordering::Relaxed),
-            CACHE_TIP_NS.swap(0, Ordering::Relaxed),
             SPEND_ANNOTATE_RANGED.swap(0, Ordering::Relaxed),
-            SPEND_ANNOTATE_IDX.swap(0, Ordering::Relaxed),
-            SPEND_ANNOTATE_SKIP.swap(0, Ordering::Relaxed),
             STRUCTURAL_NS.swap(0, Ordering::Relaxed),
             STRUCTURAL_SPENT_NS.swap(0, Ordering::Relaxed),
             STRUCTURAL_CREATE_H_NS.swap(0, Ordering::Relaxed),
@@ -576,14 +508,13 @@ pub mod confirm_phase_stats {
         )
     }
 
-    /// Pure-write annotate: (ann_ns, ann_n, pread_skip, pread).
+    /// Pure-write annotate: (ann_ns, ann_n, pread_skip).
     #[inline]
-    pub fn sample_spend_ann_and_reset() -> (u64, u64, u64, u64) {
+    pub fn sample_spend_ann_and_reset() -> (u64, u64, u64) {
         (
             SPEND_ANN_NS.swap(0, Ordering::Relaxed),
             SPEND_ANN_N.swap(0, Ordering::Relaxed),
             SPEND_ANN_PREAD_SKIP.swap(0, Ordering::Relaxed),
-            SPEND_ANN_PREAD.swap(0, Ordering::Relaxed),
         )
     }
 
@@ -914,8 +845,6 @@ mod coverage_tests {
         WRITE_HEAD_SUB_NS.store(33, Ordering::Relaxed);
         assert_eq!(sample_write_pins_and_reset(), (11, 22, 33));
         assert_eq!(sample_write_pins_and_reset(), (0, 0, 0));
-        RECONSTRUCT_NS.store(5, Ordering::Relaxed);
-        RECONSTRUCT_WIRE_NS.store(7, Ordering::Relaxed);
         CONNECT_NS.store(1, Ordering::Relaxed);
         SCRIPT_NS.store(1, Ordering::Relaxed);
         CLASS_C_NS.store(1, Ordering::Relaxed);
@@ -923,20 +852,15 @@ mod coverage_tests {
         ENSURE_LAYOUT_NS.store(11, Ordering::Relaxed);
         UTXO_APPLY_NS.store(1, Ordering::Relaxed);
         BLOCKS.store(1, Ordering::Relaxed);
-        RESOLVE_NS.store(1, Ordering::Relaxed);
         LOAD_NS.store(1, Ordering::Relaxed);
-        UNPIN_NS.store(1, Ordering::Relaxed);
-        CACHE_TIP_NS.store(1, Ordering::Relaxed);
         SPEND_ANNOTATE_RANGED.store(1, Ordering::Relaxed);
-        SPEND_ANNOTATE_IDX.store(1, Ordering::Relaxed);
-        SPEND_ANNOTATE_SKIP.store(1, Ordering::Relaxed);
         STRUCTURAL_NS.store(1, Ordering::Relaxed);
         STRUCTURAL_SPENT_NS.store(1, Ordering::Relaxed);
         STRUCTURAL_CREATE_H_NS.store(1, Ordering::Relaxed);
         STRUCTURAL_BIP68_NS.store(1, Ordering::Relaxed);
         let s = sample_and_reset();
-        assert_eq!(s.0, 7); // wire preferred over recon total
-        assert_eq!(s.1, 7);
+        assert_eq!(s.0, 1);
+        assert_eq!(s.1, 1);
         let (ca, en) = sample_class_a_ensure_and_reset();
         assert_eq!((ca, en), (9, 11));
         // Drain prep residual (other tests may have accrued), then set known values.
@@ -957,17 +881,10 @@ mod coverage_tests {
         // I3 assemble prevout path detail.
         let _ = sample_assemble_prevout_detail_and_reset();
         ASM_IN_N.store(100, Ordering::Relaxed);
-        ASM_PREV_BATCH_NS.store(1000, Ordering::Relaxed);
         ASM_PREV_BATCH_N.store(80, Ordering::Relaxed);
-        ASM_PREV_SAME_NS.store(50, Ordering::Relaxed);
         ASM_PREV_SAME_N.store(5, Ordering::Relaxed);
-        ASM_PREV_COLD_NS.store(300, Ordering::Relaxed);
         ASM_PREV_COLD_N.store(5, Ordering::Relaxed);
-        ASM_PREV_FK_NS.store(40, Ordering::Relaxed);
-        assert_eq!(
-            sample_assemble_prevout_detail_and_reset(),
-            (100, 1000, 80, 50, 5, 300, 5, 40)
-        );
+        assert_eq!(sample_assemble_prevout_detail_and_reset(), (100, 80, 5, 5));
         let _ = sample_assemble_cold_why_and_reset();
         ASM_PREV_COLD_NULL_FK_N.store(1, Ordering::Relaxed);
         ASM_PREV_COLD_NOT_PIN_N.store(2, Ordering::Relaxed);

@@ -69,20 +69,6 @@ pub struct ProcessOwnedSizes {
     pub inflight_layers: usize,
     pub inflight_pins: usize,
     pub inflight_bytes: u64,
-    /// Unused process pstore meters (always 0; BatchParents is batch-local).
-    pub pstore_weak: usize,
-    pub pstore_live: usize,
-    pub pstore_bytes: u64,
-    /// Write-published recent-create layer chain (layers / live keys).
-    pub recent_heights: usize,
-    pub recent_keys: usize,
-    /// Published layer keys (pending not included).
-    pub recent_pub_keys: usize,
-    pub recent_overlay_keys: usize,
-    /// Same as live keys (pending + published).
-    pub recent_fifo_keys: usize,
-    /// Live CreatePin payload bytes (not 96 B/key).
-    pub recent_pin_bytes: u64,
     /// Confirmed hash→height map entries.
     pub h2h_keys: usize,
     /// Height-fence run count (no Vec clone).
@@ -93,33 +79,19 @@ pub struct ProcessOwnedSizes {
 
 /// Plan-thread published heap meters for structures not owned by [`Query`].
 ///
-/// Updated after each load note/prune ([`InFlight`]). IBD pstore counts stay 0.
-/// Sampled by the ~5s IBD sizes line.
+/// Updated after each load note/prune ([`InFlight`]). Sampled by the ~5s IBD sizes line.
 pub mod process_mem_stats {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static INFLIGHT_LAYERS: AtomicU64 = AtomicU64::new(0);
     static INFLIGHT_PINS: AtomicU64 = AtomicU64::new(0);
     static INFLIGHT_BYTES: AtomicU64 = AtomicU64::new(0);
-    static PSTORE_WEAK: AtomicU64 = AtomicU64::new(0);
-    static PSTORE_LIVE: AtomicU64 = AtomicU64::new(0);
-    static PSTORE_BYTES: AtomicU64 = AtomicU64::new(0);
 
-    /// Publish latest prep-ahead / parent-store occupancy (overwrite).
-    pub fn note(
-        inflight_layers: usize,
-        inflight_pins: usize,
-        inflight_bytes: u64,
-        pstore_weak: usize,
-        pstore_live: usize,
-        pstore_bytes: u64,
-    ) {
+    /// Publish latest prep-ahead occupancy (overwrite).
+    pub fn note(inflight_layers: usize, inflight_pins: usize, inflight_bytes: u64) {
         INFLIGHT_LAYERS.store(inflight_layers as u64, Ordering::Relaxed);
         INFLIGHT_PINS.store(inflight_pins as u64, Ordering::Relaxed);
         INFLIGHT_BYTES.store(inflight_bytes, Ordering::Relaxed);
-        PSTORE_WEAK.store(pstore_weak as u64, Ordering::Relaxed);
-        PSTORE_LIVE.store(pstore_live as u64, Ordering::Relaxed);
-        PSTORE_BYTES.store(pstore_bytes, Ordering::Relaxed);
     }
 
     #[derive(Clone, Copy, Debug, Default)]
@@ -127,9 +99,6 @@ pub mod process_mem_stats {
         pub inflight_layers: usize,
         pub inflight_pins: usize,
         pub inflight_bytes: u64,
-        pub pstore_weak: usize,
-        pub pstore_live: usize,
-        pub pstore_bytes: u64,
     }
 
     pub fn load() -> Snap {
@@ -137,9 +106,6 @@ pub mod process_mem_stats {
             inflight_layers: INFLIGHT_LAYERS.load(Ordering::Relaxed) as usize,
             inflight_pins: INFLIGHT_PINS.load(Ordering::Relaxed) as usize,
             inflight_bytes: INFLIGHT_BYTES.load(Ordering::Relaxed),
-            pstore_weak: PSTORE_WEAK.load(Ordering::Relaxed) as usize,
-            pstore_live: PSTORE_LIVE.load(Ordering::Relaxed) as usize,
-            pstore_bytes: PSTORE_BYTES.load(Ordering::Relaxed),
         }
     }
 }
@@ -177,7 +143,6 @@ pub mod confirm_load_stats {
     pub static NS: AtomicU64 = AtomicU64::new(0);
     pub static BLOCKS: AtomicU64 = AtomicU64::new(0);
     pub static UTXO_PARENTS: AtomicU64 = AtomicU64::new(0);
-    pub static CREATES: AtomicU64 = AtomicU64::new(0);
     pub static PARENT_UNIQUE: AtomicU64 = AtomicU64::new(0);
     /// Pin filled from same-batch / in-flight / pstore adopt (no Class A re-decode).
     pub static PIN_CACHE_BODY: AtomicU64 = AtomicU64::new(0);
@@ -186,19 +151,14 @@ pub mod confirm_load_stats {
     /// Pin candidates that missed same-batch / in-flight / adopt (cold denserels).
     pub static PIN_NEW: AtomicU64 = AtomicU64::new(0);
     pub static PIN_BODY_NS: AtomicU64 = AtomicU64::new(0);
-    pub static PIN_NEW_META_NS: AtomicU64 = AtomicU64::new(0);
     /// Wire pin sub-walls (ns).
     pub static PLAN_PIN_NS: AtomicU64 = AtomicU64::new(0);
-    /// Pipeline store adopt (bulk Weak upgrade) wall.
-    pub static PIN_ADOPT_NS: AtomicU64 = AtomicU64::new(0);
     /// Post cold-range denserels: insert_owned into BatchParents (not IO).
     pub static PIN_RANGE_FILL_NS: AtomicU64 = AtomicU64::new(0);
     /// Stamp-carried CreatePin probe (after in-flight / same-batch, before range fill).
     pub static PIN_RECENT_OUTS_NS: AtomicU64 = AtomicU64::new(0);
     /// Final pin contract (contains + pin_covered) wall.
     pub static PIN_CONTRACT_NS: AtomicU64 = AtomicU64::new(0);
-    /// Pipeline store publish (bulk Weak insert + conflict merge) wall.
-    pub static PIN_PUBLISH_NS: AtomicU64 = AtomicU64::new(0);
     /// Cold denserels wall (range + idx). Prefer split fields when diagnosing.
     pub static COLD_IO_NS: AtomicU64 = AtomicU64::new(0);
     /// Cold denserels via plan stamp body range (`get_outs_by_range_batch`).
@@ -208,24 +168,9 @@ pub mod confirm_load_stats {
     pub static COLD_RANGE_BODY_NS: AtomicU64 = AtomicU64::new(0);
     /// Sub-wall of cold range: sparse denserels decode (N2.0).
     pub static COLD_RANGE_DECODE_NS: AtomicU64 = AtomicU64::new(0);
-    /// Cold denserels via idx→body (`load_creates_once`).
-    pub static COLD_IDX_NS: AtomicU64 = AtomicU64::new(0);
-    pub static COLD_IDX_N: AtomicU64 = AtomicU64::new(0);
-    pub static COLD_DECODE_NS: AtomicU64 = AtomicU64::new(0);
-    pub static PARENT_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
-    pub static FULL_TX_READS: AtomicU64 = AtomicU64::new(0);
     pub static BODY_TX_READS: AtomicU64 = AtomicU64::new(0);
-    pub static MISSING_PARENTS: AtomicU64 = AtomicU64::new(0);
-    /// Phase nanoseconds (sum over calls this window).
-    pub static HEADER_NS: AtomicU64 = AtomicU64::new(0);
-    pub static BODY_DECODE_NS: AtomicU64 = AtomicU64::new(0);
     pub static THIN_NS: AtomicU64 = AtomicU64::new(0);
     pub static PARENT_PIN_NS: AtomicU64 = AtomicU64::new(0);
-    pub static CACHE_PUT_NS: AtomicU64 = AtomicU64::new(0);
-    /// Thin edges: same-batch / stamped-fk / coinbase.
-    pub static EDGE_SAME_BATCH: AtomicU64 = AtomicU64::new(0);
-    pub static EDGE_FK: AtomicU64 = AtomicU64::new(0);
-    pub static EDGE_COINBASE: AtomicU64 = AtomicU64::new(0);
 
     /// One sampler snapshot (all counters reset).
     #[derive(Debug, Default, Clone, Copy)]
@@ -233,39 +178,23 @@ pub mod confirm_load_stats {
         pub ns: u64,
         pub blocks: u64,
         pub utxo_parents: u64,
-        pub creates: u64,
         pub parent_unique: u64,
         pub pin_cache_body: u64,
         pub pin_plan: u64,
         pub pin_new: u64,
         pub pin_body_ns: u64,
-        pub pin_new_meta_ns: u64,
         pub plan_pin_ns: u64,
-        pub pin_adopt_ns: u64,
         pub pin_range_fill_ns: u64,
         pub pin_recent_outs_ns: u64,
         pub pin_contract_ns: u64,
-        pub pin_publish_ns: u64,
         pub cold_io_ns: u64,
         pub cold_range_ns: u64,
         pub cold_range_n: u64,
         pub cold_range_body_ns: u64,
         pub cold_range_decode_ns: u64,
-        pub cold_idx_ns: u64,
-        pub cold_idx_n: u64,
-        pub cold_decode_ns: u64,
-        pub cache_hits: u64,
         pub body_tx: u64,
-        pub parent_tx: u64,
-        pub missing: u64,
-        pub header_ns: u64,
-        pub body_decode_ns: u64,
         pub thin_ns: u64,
         pub parent_pin_ns: u64,
-        pub cache_put_ns: u64,
-        pub edge_same_batch: u64,
-        pub edge_fk: u64,
-        pub edge_coinbase: u64,
     }
 
     static LAST_PIN_ADOPT_NS: AtomicU64 = AtomicU64::new(0);
@@ -330,39 +259,23 @@ pub mod confirm_load_stats {
             ns: NS.swap(0, Ordering::Relaxed),
             blocks: BLOCKS.swap(0, Ordering::Relaxed),
             utxo_parents: UTXO_PARENTS.swap(0, Ordering::Relaxed),
-            creates: CREATES.swap(0, Ordering::Relaxed),
             parent_unique: PARENT_UNIQUE.swap(0, Ordering::Relaxed),
             pin_cache_body: PIN_CACHE_BODY.swap(0, Ordering::Relaxed),
             pin_plan: PIN_PLAN.swap(0, Ordering::Relaxed),
             pin_new: PIN_NEW.swap(0, Ordering::Relaxed),
             pin_body_ns: PIN_BODY_NS.swap(0, Ordering::Relaxed),
-            pin_new_meta_ns: PIN_NEW_META_NS.swap(0, Ordering::Relaxed),
             plan_pin_ns: PLAN_PIN_NS.swap(0, Ordering::Relaxed),
-            pin_adopt_ns: PIN_ADOPT_NS.swap(0, Ordering::Relaxed),
             pin_range_fill_ns: PIN_RANGE_FILL_NS.swap(0, Ordering::Relaxed),
             pin_recent_outs_ns: PIN_RECENT_OUTS_NS.swap(0, Ordering::Relaxed),
             pin_contract_ns: PIN_CONTRACT_NS.swap(0, Ordering::Relaxed),
-            pin_publish_ns: PIN_PUBLISH_NS.swap(0, Ordering::Relaxed),
             cold_io_ns: COLD_IO_NS.swap(0, Ordering::Relaxed),
             cold_range_ns: COLD_RANGE_NS.swap(0, Ordering::Relaxed),
             cold_range_n: COLD_RANGE_N.swap(0, Ordering::Relaxed),
             cold_range_body_ns: COLD_RANGE_BODY_NS.swap(0, Ordering::Relaxed),
             cold_range_decode_ns: COLD_RANGE_DECODE_NS.swap(0, Ordering::Relaxed),
-            cold_idx_ns: COLD_IDX_NS.swap(0, Ordering::Relaxed),
-            cold_idx_n: COLD_IDX_N.swap(0, Ordering::Relaxed),
-            cold_decode_ns: COLD_DECODE_NS.swap(0, Ordering::Relaxed),
-            cache_hits: PARENT_CACHE_HITS.swap(0, Ordering::Relaxed),
             body_tx: BODY_TX_READS.swap(0, Ordering::Relaxed),
-            parent_tx: FULL_TX_READS.swap(0, Ordering::Relaxed),
-            missing: MISSING_PARENTS.swap(0, Ordering::Relaxed),
-            header_ns: HEADER_NS.swap(0, Ordering::Relaxed),
-            body_decode_ns: BODY_DECODE_NS.swap(0, Ordering::Relaxed),
             thin_ns: THIN_NS.swap(0, Ordering::Relaxed),
             parent_pin_ns: PARENT_PIN_NS.swap(0, Ordering::Relaxed),
-            cache_put_ns: CACHE_PUT_NS.swap(0, Ordering::Relaxed),
-            edge_same_batch: EDGE_SAME_BATCH.swap(0, Ordering::Relaxed),
-            edge_fk: EDGE_FK.swap(0, Ordering::Relaxed),
-            edge_coinbase: EDGE_COINBASE.swap(0, Ordering::Relaxed),
         }
     }
 
@@ -381,24 +294,13 @@ pub mod confirm_load_stats {
         }
         add!(blocks, BLOCKS);
         add!(utxo_parents, UTXO_PARENTS);
-        add!(creates_registered, CREATES);
         add!(parent_unique, PARENT_UNIQUE);
         add!(pin_cache_body, PIN_CACHE_BODY);
         add!(pin_new, PIN_NEW);
         add!(pin_body_ns, PIN_BODY_NS);
-        add!(pin_new_meta_ns, PIN_NEW_META_NS);
-        add!(parent_cache_hits, PARENT_CACHE_HITS);
-        add!(full_tx_reads, FULL_TX_READS);
         add!(body_tx_reads, BODY_TX_READS);
-        add!(missing_parents, MISSING_PARENTS);
-        add!(header_ns, HEADER_NS);
-        add!(body_decode_ns, BODY_DECODE_NS);
         add!(thin_ns, THIN_NS);
         add!(parent_pin_ns, PARENT_PIN_NS);
-        add!(cache_put_ns, CACHE_PUT_NS);
-        add!(edge_same_batch, EDGE_SAME_BATCH);
-        add!(edge_fk, EDGE_FK);
-        add!(edge_coinbase, EDGE_COINBASE);
     }
 }
 
@@ -1873,15 +1775,6 @@ impl Query {
             inflight_layers: mem.inflight_layers,
             inflight_pins: mem.inflight_pins,
             inflight_bytes: mem.inflight_bytes,
-            pstore_weak: mem.pstore_weak,
-            pstore_live: mem.pstore_live,
-            pstore_bytes: mem.pstore_bytes,
-            recent_heights: 0,
-            recent_keys: 0,
-            recent_pub_keys: 0,
-            recent_overlay_keys: 0,
-            recent_fifo_keys: 0,
-            recent_pin_bytes: 0,
             h2h_keys,
             fence_runs: self.store.height_fence_run_count(),
             bq_promoted: self.block_queue_promoted_count(),

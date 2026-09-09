@@ -264,12 +264,10 @@ mod tests {
         assert_eq!(entries, 2);
         assert!(bytes > 0, "expected non-zero approx bytes");
         assert!(bytes < 4096, "bytes={bytes}");
-        crate::process_mem_stats::note(packs, entries, bytes, 10, 2, 100);
+        crate::process_mem_stats::note(packs, entries, bytes);
         let s = crate::process_mem_stats::load();
         assert_eq!(s.inflight_layers, 2);
         assert_eq!(s.inflight_pins, 2);
-        assert_eq!(s.pstore_weak, 10);
-        assert_eq!(s.pstore_live, 2);
         let again = m.size_snapshot();
         assert_eq!(
             (packs, entries, bytes),

@@ -65,10 +65,10 @@ impl LoadAheadState {
         }
     }
 
-    /// Publish InFlight occupancy for `ibd: sizes`. IBD has no process pstore.
+    /// Publish InFlight occupancy for `ibd: sizes`.
     fn publish_mem_stats(&self) {
         let (layers, pins, if_bytes) = self.in_flight.size_snapshot();
-        rbitcoin_query::process_mem_stats::note(layers, pins, if_bytes, 0, 0, 0);
+        rbitcoin_query::process_mem_stats::note(layers, pins, if_bytes);
     }
 
     fn pipeline_for(
