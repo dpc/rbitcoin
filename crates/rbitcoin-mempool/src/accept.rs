@@ -598,7 +598,6 @@ impl ActiveMempool {
         park_orphans: bool,
         min_relay: Option<u64>,
     ) -> Result<PreparedAdmit, AcceptError> {
-        let _ = park_orphans;
         if tx.is_coinbase() {
             return Err(AcceptError::Coinbase);
         }
@@ -612,13 +611,10 @@ impl ActiveMempool {
             return Err(AcceptError::Policy("txn-same-nonwitness-data-in-mempool"));
         }
         // Already parked: soft re-announce of the same orphan.
-        if self.orphanage.contains(&txid) {
-            let missing = self
-                .orphanage
-                .missing_of(&txid)
-                .cloned()
-                .unwrap_or_default();
-            return Err(AcceptError::Orphaned { txid, missing });
+        if park_orphans {
+            if let Some(missing) = self.orphanage.missing_of(&txid).cloned() {
+                return Err(AcceptError::Orphaned { txid, missing });
+            }
         }
 
         // Finding 011: duplicate inputs before any value sum (phantom fee).
@@ -671,10 +667,19 @@ impl ActiveMempool {
             }) {
                 return Err(AcceptError::MissingPrevout(op));
             }
-            return Err(AcceptError::Orphaned {
-                txid,
-                missing: missing_parents,
-            });
+            if park_orphans {
+                return Err(AcceptError::Orphaned {
+                    txid,
+                    missing: missing_parents,
+                });
+            }
+            let op = tx
+                .input
+                .iter()
+                .find(|inp| missing_parents.contains(&inp.previous_output.txid))
+                .map(|inp| inp.previous_output)
+                .unwrap_or(tx.input[0].previous_output);
+            return Err(AcceptError::MissingPrevout(op));
         }
 
         check_mempool_structural(tx, &chain_coins, tip)?;
@@ -1177,7 +1182,6 @@ impl ActiveMempool {
         tip: ChainTipCtx,
     ) -> Result<usize, AcceptError> {
         let n = self.remove_live_txids(block_txids)?;
-        self.recent_invalid.clear();
         for txid in block_txids {
             self.promote_orphans_of(*txid, utxos, tip);
         }
@@ -2949,11 +2953,8 @@ mod tests {
             .prepare_admit(&child, &utxos, TIP_OK, 0, false, None)
             .unwrap_err();
         assert!(
-            matches!(
-                err,
-                AcceptError::MissingPrevout(_) | AcceptError::Orphaned { .. }
-            ),
-            "{err:?}"
+            matches!(err, AcceptError::MissingPrevout(_)),
+            "dry-run missing inputs must be MissingPrevout, got {err}"
         );
         assert_eq!(mp.orphan_count(), 0);
 

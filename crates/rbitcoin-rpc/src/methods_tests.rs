@@ -3046,6 +3046,55 @@ fn testmempoolaccept_rbf_does_not_evict_conflict() {
 }
 
 #[test]
+fn testmempoolaccept_missing_inputs_is_missingorspent() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    let (ctx, dir) = ctx_empty();
+    let tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0x11; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let hex = hex_encode(serialize(&tx));
+    let row = dispatch(&ctx, "testmempoolaccept", vec![json!([hex])]).unwrap();
+    assert_eq!(row[0]["allowed"], json!(false), "{row}");
+    assert_eq!(
+        row[0]["reject-reason"],
+        json!("bad-txns-inputs-missingorspent"),
+        "{row}"
+    );
+    assert_eq!(ctx.mempool.as_ref().unwrap().orphan_count(), 0);
+
+    ctx.mempool.as_ref().unwrap().accept_tx(&tx).unwrap_err();
+    assert_eq!(ctx.mempool.as_ref().unwrap().orphan_count(), 1);
+    let row = dispatch(&ctx, "testmempoolaccept", vec![json!([hex])]).unwrap();
+    assert_eq!(row[0]["allowed"], json!(false), "{row}");
+    assert_eq!(
+        row[0]["reject-reason"],
+        json!("bad-txns-inputs-missingorspent"),
+        "{row}"
+    );
+    assert_eq!(ctx.mempool.as_ref().unwrap().orphan_count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn decode_rpc_subset() {
     use bitcoin::absolute::LockTime;
     use bitcoin::consensus::encode::serialize_hex;

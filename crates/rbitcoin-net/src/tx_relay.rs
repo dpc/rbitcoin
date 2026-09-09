@@ -1160,13 +1160,6 @@ impl MempoolHub {
                 stages.utxo_us = stages.utxo_us.saturating_add(p.utxo_us);
                 p
             }
-            Err(AcceptError::Orphaned { missing, .. }) if spec.park_orphans => {
-                let t_lock = Instant::now();
-                let mut g = self.lock_write();
-                let e = g.park_orphan(tx, missing);
-                *lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
-                return Err(e);
-            }
             Err(e) => return Err(e),
         };
         let t_script = Instant::now();
@@ -1196,7 +1189,7 @@ impl MempoolHub {
         let mut lock_us = 0u64;
         let delta = self.fee_delta(&tx.compute_txid());
         let spec = AdmitSpec {
-            park_orphans: false,
+            park_orphans: true,
             fee_delta: delta,
             time_prepare_lock: false,
             min_relay: None,
@@ -1239,37 +1232,12 @@ impl MempoolHub {
             lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
             r
         };
-        if let Ok(ref ar) = result {
-            for old in &ar.replaced {
-                self.unindex_txid(old);
-            }
-            let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
-            let w = tx.compute_wtxid();
-            self.insert_relay_maps(ar.txid, w, seq);
-            self.reorg_servable.lock().unwrap().remove(&w);
-        }
-
         let us = t0.elapsed().as_micros() as u64;
         self.meter_accept_stages(lock_us, stages);
         match result {
             Ok(r) => {
                 self.meter_accept_wall(us, true);
-                self.note_fee_flow_admit(r.weight, r.fee_sat);
-                self.push_recent(tx, &r);
-                self.index_txid(r.txid, tx, &prevouts);
-                let shs = self
-                    .sh_index
-                    .lock()
-                    .unwrap()
-                    .by_tx
-                    .get(&r.txid)
-                    .cloned()
-                    .unwrap_or_default();
-                self.publish_announce(&r, shs);
-                self.note_template_update();
-                self.promote_orphans_staged(r.txid, utxo);
-                // Core: expiry checked when a new tx is added to the mempool.
-                let _ = self.expire_stale();
+                self.publish_admitted(tx, &r, &prevouts, utxo);
                 Ok(r)
             }
             Err(e) => self.finish_accept_err(us, e),
@@ -1290,14 +1258,24 @@ impl MempoolHub {
         let mut lock_us = 0u64;
         let spec_p = AdmitSpec {
             park_orphans: false,
-            fee_delta: 0,
+            fee_delta: self.fee_delta(&parent.compute_txid()),
             time_prepare_lock: false,
             min_relay: Some(0),
         };
-        let prep_p = self
-            .admit_staged(&parent, utxo, spec_p, &mut stages, &mut lock_us)
-            .ok()?;
+        let prep_p = match self.admit_staged(&parent, utxo, spec_p, &mut stages, &mut lock_us) {
+            Ok(p) => p,
+            Err(e) => {
+                if rbitcoin_mempool::ActiveMempool::records_accept_failure(&parent, &e) {
+                    let mut g = self.lock_write();
+                    g.note_accept_failure(&parent, &e);
+                }
+                return None;
+            }
+        };
         let prevouts_p = prep_p.prevouts.clone();
+        // Parent is live until the child commits (or we roll it back). A
+        // concurrent spender of the parent that lands in this window survives
+        // `remove_txid(parent)` if the child then fails.
         let parent_res = {
             let mut g = self.lock_write();
             g.commit_after_script(&parent, prep_p).ok()?
@@ -1344,6 +1322,9 @@ impl MempoolHub {
         prevouts: &[TxOut],
         utxo: &impl rbitcoin_mempool::UtxoProvider,
     ) {
+        for old in &r.replaced {
+            self.unindex_txid(old);
+        }
         let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
         let w = tx.compute_wtxid();
         self.insert_relay_maps(r.txid, w, seq);
@@ -1846,7 +1827,14 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: None,
         };
-        let prep = self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us)?;
+        let prep = match self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us) {
+            Ok(p) => p,
+            Err(AcceptError::Orphaned { missing, .. }) => {
+                let mut g = self.lock_write();
+                return Err(g.park_orphan(tx, missing));
+            }
+            Err(e) => return Err(e),
+        };
         let prevouts = prep.prevouts.clone();
         {
             let mut g = self.lock_write();
@@ -3088,15 +3076,18 @@ mod tests {
         };
         let err = hub.test_accept(&tx).unwrap_err();
         assert!(
-            matches!(
-                err,
-                AcceptError::MissingPrevout(_) | AcceptError::Orphaned { .. }
-            ),
+            matches!(err, AcceptError::MissingPrevout(_)),
             "dry-run missing parent: {err}"
         );
         assert_eq!(hub.orphan_count(), 0);
         let err = hub.accept_tx(&tx).unwrap_err();
         assert!(matches!(err, AcceptError::Orphaned { .. }), "{err}");
+        assert_eq!(hub.orphan_count(), 1);
+        let err = hub.test_accept(&tx).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::MissingPrevout(_)),
+            "dry-run of parked orphan must stay MissingPrevout: {err}"
+        );
         assert_eq!(hub.orphan_count(), 1);
         assert!(hub.fee_histogram().is_empty());
         assert!(hub.estimate_fee_btc_per_kb(2) < 0.0 || hub.estimate_fee_btc_per_kb(2) >= 0.0);
