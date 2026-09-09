@@ -29,15 +29,6 @@ const DATA_HEADER_LEN: u64 = 32;
 const IDX_HEADER_LEN: usize = 16;
 const IDX_ENT_LEN: usize = SH_HEAD_KEY_LEN + 8;
 
-/// Membership filter on a sealed sorted head.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SortedHeadFilter {
-    /// Main shards: page idx only. No `.fuse8` (and leftovers are ignored).
-    None,
-    /// Sealed global ovf: BF8R skip before idx / data pread.
-    Fuse8,
-}
-
 /// Sealed sorted head file (one shard or one global ovf segment).
 pub struct SortedHead {
     path: PathBuf,
@@ -54,26 +45,6 @@ impl SortedHead {
         &self.path
     }
 
-    pub fn len(&self) -> u64 {
-        self.count
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    pub fn pread_count(&self) -> u64 {
-        self.preads.load(Ordering::Relaxed)
-    }
-
-    pub fn reset_pread_count(&self) {
-        self.preads.store(0, Ordering::Relaxed);
-    }
-
-    pub fn has_fuse(&self) -> bool {
-        self.fuse.is_some()
-    }
-
     /// Durability barrier (shutdown / SH flush). Data already pwrite'd.
     pub fn flush(&self) -> Result<(), StoreError> {
         self.file
@@ -85,7 +56,6 @@ impl SortedHead {
     pub fn write(
         path: impl AsRef<Path>,
         recs: &[(ShHeadKey, [u8; SH_HEAD_VALUE_LEN])],
-        filter: SortedHeadFilter,
     ) -> Result<Self, StoreError> {
         let path = path.as_ref();
         for w in recs.windows(2) {
@@ -121,23 +91,16 @@ impl SortedHead {
         }
         write_idx(&idx_path(path), &idx)?;
 
-        match filter {
-            SortedHeadFilter::None => {
-                let _ = std::fs::remove_file(fuse_path(path));
-            }
-            SortedHeadFilter::Fuse8 => {
-                let mut fuse_keys: Vec<u64> = recs.iter().map(|(k, _)| fuse_key16(k)).collect();
-                fuse_keys.sort_unstable();
-                fuse_keys.dedup();
-                let fuse = SealedFuse8::build(&fuse_keys)?;
-                fuse.write_to(&fuse_path(path))?;
-            }
-        }
+        let mut fuse_keys: Vec<u64> = recs.iter().map(|(k, _)| fuse_key16(k)).collect();
+        fuse_keys.sort_unstable();
+        fuse_keys.dedup();
+        let fuse = SealedFuse8::build(&fuse_keys)?;
+        fuse.write_to(&fuse_path(path))?;
 
-        Self::open(path, filter)
+        Self::open(path)
     }
 
-    pub fn open(path: impl AsRef<Path>, filter: SortedHeadFilter) -> Result<Self, StoreError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new()
             .read(true)
@@ -157,10 +120,7 @@ impl SortedHead {
         }
         let count = u64::from_le_bytes(header[6..14].try_into().unwrap());
         let idx = read_idx(&idx_path(&path))?;
-        let fuse = match filter {
-            SortedHeadFilter::None => None,
-            SortedHeadFilter::Fuse8 => Some(SealedFuse8::read_from(&fuse_path(&path))?),
-        };
+        let fuse = Some(SealedFuse8::read_from(&fuse_path(&path))?);
         Ok(Self {
             path,
             file,
@@ -218,13 +178,6 @@ impl SortedHead {
             }
         }
         Ok(())
-    }
-
-    /// New keys are not punched into a sealed sorted file.
-    pub fn insert_new(&self, _key: &ShHeadKey, _value: &ShHeadValue) -> Result<(), StoreError> {
-        Err(StoreError::Corrupt(
-            "scripthash sorted head: new key not on main",
-        ))
     }
 
     fn locate_rec(
@@ -378,7 +331,38 @@ pub fn install_head_part(part: &Path, path: &Path) -> Result<SortedHead, StoreEr
         std::fs::rename(&part_idx, &idx_path(path)).map_err(|e| StoreError::io(path, e))?;
     }
     let _ = std::fs::remove_file(fuse_path(path));
-    SortedHead::open(path, SortedHeadFilter::None)
+    open_idx_only(path)
+}
+
+#[cfg(test)]
+fn open_idx_only(path: &Path) -> Result<SortedHead, StoreError> {
+    let path = path.to_path_buf();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| StoreError::io(&path, e))?;
+    let mut header = [0u8; DATA_HEADER_LEN as usize];
+    let _ = pread_file(&file, 0, &mut header).map_err(|e| StoreError::io(&path, e))?;
+    if header[0..4] != *DATA_MAGIC {
+        return Err(StoreError::BadMagic);
+    }
+    let ver = u16::from_le_bytes(header[4..6].try_into().unwrap());
+    if ver != FORMAT_VER {
+        return Err(StoreError::Corrupt(
+            "scripthash sorted head: unsupported version",
+        ));
+    }
+    let count = u64::from_le_bytes(header[6..14].try_into().unwrap());
+    let idx = read_idx(&idx_path(&path))?;
+    Ok(SortedHead {
+        path,
+        file,
+        count,
+        idx,
+        fuse: None,
+        preads: AtomicU64::new(0),
+    })
 }
 
 fn pread_file(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -487,6 +471,7 @@ fn read_idx(path: &Path) -> Result<Vec<(ShHeadKey, u64)>, StoreError> {
 mod tests {
     use super::*;
     use rbitcoin_primitives::Fk;
+    use std::sync::atomic::Ordering;
 
     fn tmp() -> PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -517,87 +502,59 @@ mod tests {
     }
 
     #[test]
-    fn sorted_main_idx_only_hit_miss_update() {
+    fn sorted_head_hit_miss_update() {
         let path = tmp();
         let n = 10_000u32;
         let recs = recs(n);
-        let h = SortedHead::write(&path, &recs, SortedHeadFilter::None).unwrap();
-        assert_eq!(h.len(), u64::from(n));
-        assert!(!h.is_empty());
-        assert!(!h.has_fuse());
+        let h = SortedHead::write(&path, &recs).unwrap();
+        assert_eq!(h.count, u64::from(n));
+        assert!(h.fuse.is_some());
         assert_eq!(h.path(), path.as_path());
         assert!(path.is_file());
         assert!(idx_path(&path).is_file());
-        assert!(
-            !fuse_path(&path).is_file(),
-            "main shards must not write fuse"
-        );
+        assert!(fuse_path(&path).is_file());
 
-        h.reset_pread_count();
+        h.preads.store(0, Ordering::Relaxed);
         let got = h.get(&key_of(1234)).unwrap().unwrap();
         assert_eq!(got.inline_fks(), vec![Fk(1235)]);
         assert!(
-            h.pread_count() <= 2,
+            h.preads.load(Ordering::Relaxed) <= 2,
             "hit must be ≤2 preads, got {}",
-            h.pread_count()
+            h.preads.load(Ordering::Relaxed)
         );
 
-        // No fuse: a miss still reads the candidate data page.
-        h.reset_pread_count();
+        h.preads.store(0, Ordering::Relaxed);
         assert!(h.get(&key_of(n + 10_000)).unwrap().is_none());
-        assert!(
-            h.pread_count() >= 1,
-            "idx-only miss must pread the data page"
-        );
 
         let new_val = ShHeadValue::slab(0, 2, 4096);
         assert!(h.update_value(&key_of(7), &new_val).unwrap());
         assert_eq!(h.get(&key_of(7)).unwrap().unwrap(), new_val);
         assert!(!h.update_value(&key_of(n + 1), &new_val).unwrap());
 
-        match h.insert_new(&key_of(n + 1), &new_val) {
-            Err(StoreError::Corrupt(m)) => {
-                assert!(m.contains("not on main"), "{m}");
-            }
-            other => panic!("expected not-on-main, got {other:?}"),
-        }
-
-        let h2 = SortedHead::open(&path, SortedHeadFilter::None).unwrap();
-        assert!(!h2.has_fuse());
+        let h2 = SortedHead::open(&path).unwrap();
+        assert!(h2.fuse.is_some());
         assert_eq!(h2.get(&key_of(7)).unwrap().unwrap(), new_val);
 
-        // Leftover .fuse8 is ignored on idx-only open and removed on rewrite.
-        std::fs::write(fuse_path(&path), b"junk").unwrap();
-        let h3 = SortedHead::open(&path, SortedHeadFilter::None).unwrap();
-        assert!(!h3.has_fuse());
-        SortedHead::write(&path, &recs, SortedHeadFilter::None).unwrap();
-        assert!(!fuse_path(&path).is_file());
-
         let unsorted = vec![(key_of(2), recs[0].1), (key_of(1), recs[0].1)];
-        assert!(SortedHead::write(
-            path.with_extension("bad"),
-            &unsorted,
-            SortedHeadFilter::None
-        )
-        .is_err());
+        assert!(SortedHead::write(path.with_extension("bad"), &unsorted).is_err());
         let junk = path.with_extension("junk");
         std::fs::write(&junk, b"XXXX").unwrap();
-        assert!(matches!(
-            SortedHead::open(&junk, SortedHeadFilter::None),
-            Err(StoreError::BadMagic)
-        ));
+        assert!(matches!(SortedHead::open(&junk), Err(StoreError::BadMagic)));
         let mut bad_ver = std::fs::read(&path).unwrap();
         bad_ver[4..6].copy_from_slice(&99u16.to_le_bytes());
         let verp = path.with_extension("ver");
         std::fs::write(&verp, &bad_ver).unwrap();
         std::fs::copy(idx_path(&path), idx_path(&verp)).unwrap();
-        assert!(SortedHead::open(&verp, SortedHeadFilter::None).is_err());
+        std::fs::copy(fuse_path(&path), fuse_path(&verp)).unwrap();
+        assert!(SortedHead::open(&verp).is_err());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(idx_path(&path));
+        let _ = std::fs::remove_file(fuse_path(&path));
         let _ = std::fs::remove_file(&junk);
         let _ = std::fs::remove_file(&verp);
         let _ = std::fs::remove_file(idx_path(&verp));
+        let _ = std::fs::remove_file(fuse_path(&verp));
     }
 
     #[test]
@@ -615,7 +572,7 @@ mod tests {
             "sealed path must stay absent until install"
         );
         let h = install_head_part(&part, &path).unwrap();
-        assert_eq!(h.len(), 10_000);
+        assert_eq!(h.count, 10_000);
         assert_eq!(
             h.get(&key_of(1234)).unwrap().unwrap().inline_fks(),
             vec![Fk(1235)]
@@ -629,20 +586,20 @@ mod tests {
         let path = tmp();
         let n = 10_000u32;
         let recs = recs(n);
-        let h = SortedHead::write(&path, &recs, SortedHeadFilter::Fuse8).unwrap();
-        assert!(h.has_fuse());
+        let h = SortedHead::write(&path, &recs).unwrap();
+        assert!(h.fuse.is_some());
         assert!(fuse_path(&path).is_file());
 
-        h.reset_pread_count();
+        h.preads.store(0, Ordering::Relaxed);
         assert!(h.get(&key_of(1234)).unwrap().is_some());
-        assert!(h.pread_count() <= 2);
+        assert!(h.preads.load(Ordering::Relaxed) <= 2);
 
         let mut saw_fuse_miss = false;
         for extra in 0..2000u32 {
             let k = key_of(n + 10_000 + extra);
-            h.reset_pread_count();
+            h.preads.store(0, Ordering::Relaxed);
             let got = h.get(&k).unwrap();
-            if got.is_none() && h.pread_count() == 0 {
+            if got.is_none() && h.preads.load(Ordering::Relaxed) == 0 {
                 saw_fuse_miss = true;
                 break;
             }
@@ -653,11 +610,9 @@ mod tests {
             "ovf fuse must skip data/idx IO on a true miss"
         );
 
-        assert!(SortedHead::open(&path, SortedHeadFilter::Fuse8)
-            .unwrap()
-            .has_fuse());
+        assert!(SortedHead::open(&path).unwrap().fuse.is_some());
         let _ = std::fs::remove_file(fuse_path(&path));
-        assert!(SortedHead::open(&path, SortedHeadFilter::Fuse8).is_err());
+        assert!(SortedHead::open(&path).is_err());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(idx_path(&path));

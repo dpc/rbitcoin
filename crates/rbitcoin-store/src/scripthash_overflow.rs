@@ -11,11 +11,13 @@ use std::path::Path;
 use std::path::PathBuf;
 
 #[cfg(test)]
+use crate::file::FILE_HEADER_LEN;
+#[cfg(test)]
 use crate::fuse8_filter::{fuse_key_from_mixed, SealedFuse8};
 #[cfg(test)]
-use crate::scripthash_head::{ScriptHashHead, ShardedScriptHashHead};
+use crate::scripthash_head::{ScriptHashHead, ShardedScriptHashHead, SH_HEAD_FULL};
 #[cfg(test)]
-use crate::scripthash_layout::ShHeadValue;
+use crate::scripthash_layout::{ShHeadValue, SH_HEAD_SLOT_SIZE};
 #[cfg(test)]
 use std::collections::HashSet;
 
@@ -80,6 +82,7 @@ pub fn sh_ovf_fuse_key(full: &[u8; 32]) -> u64 {
 pub struct OvfSegment {
     pub id: u32,
     pub head: ScriptHashHead,
+    pub slots: u64,
     /// Set after seal (BF8R on disk). Open segment has None.
     pub fuse: Option<SealedFuse8>,
 }
@@ -91,7 +94,7 @@ impl OvfSegment {
     }
 
     pub fn slots(&self) -> u64 {
-        self.head.slots()
+        self.slots
     }
 }
 
@@ -163,7 +166,14 @@ impl ShOverflowStack {
                 ));
             }
             let path = ovf_seg_path(store_dir, *id);
-            let head = ScriptHashHead::open(path)?;
+            let head = ScriptHashHead::open(&path)?;
+            let slots = {
+                let body = std::fs::metadata(&path)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    .saturating_sub(FILE_HEADER_LEN as u64);
+                body / SH_HEAD_SLOT_SIZE as u64
+            };
             let fuse_path = ovf_fuse_path(store_dir, *id);
             let is_last = i + 1 == ids.len();
             let fuse = if fuse_path.is_file() {
@@ -204,6 +214,7 @@ impl ShOverflowStack {
             segs.push(OvfSegment {
                 id: *id,
                 head,
+                slots,
                 fuse,
             });
         }
@@ -231,6 +242,7 @@ impl ShOverflowStack {
         self.segs.push(OvfSegment {
             id,
             head,
+            slots,
             fuse: None,
         });
         Ok(())
@@ -281,14 +293,13 @@ impl ShOverflowStack {
             .iter()
             .find(|s| s.id == seg_id)
             .ok_or(StoreError::Corrupt("scripthash.ovf: missing home segment"))?;
-        let allow_new = seg.is_open();
-        let rem = seg.head.insert_many_full_no_rehash(entries, allow_new)?;
-        if !rem.is_empty() {
-            // Sealed home must always accept updates; open NeedSlot is handled
-            // by the caller via seal+roll for **new** keys only.
-            return Err(StoreError::Corrupt(
-                "scripthash.ovf: home segment refused update (invariant)",
-            ));
+        for (k, v) in entries {
+            seg.head.insert(k, v).map_err(|e| match e {
+                StoreError::Corrupt(SH_HEAD_FULL) => {
+                    StoreError::Corrupt("scripthash.ovf: home segment refused update (invariant)")
+                }
+                other => other,
+            })?;
         }
         Ok(())
     }
@@ -306,7 +317,15 @@ impl ShOverflowStack {
             .last()
             .filter(|s| s.is_open())
             .ok_or(StoreError::Corrupt("scripthash.ovf: no open segment"))?;
-        open.head.insert_many_full_no_rehash(entries, true)
+        let mut rem = Vec::new();
+        for (k, v) in entries {
+            match open.head.insert(k, v) {
+                Ok(()) => {}
+                Err(StoreError::Corrupt(SH_HEAD_FULL)) => rem.push((*k, v.clone())),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(rem)
     }
 
     /// Seal open segment if load ≥ seal threshold (real BF8R + next empty segment).
@@ -364,6 +383,7 @@ impl ShOverflowStack {
         self.segs.push(OvfSegment {
             id: next_id,
             head,
+            slots,
             fuse: None,
         });
         Ok(())
@@ -423,15 +443,12 @@ impl ShOverflowStack {
             .last()
             .filter(|s| s.is_open())
             .ok_or(StoreError::Corrupt("scripthash.ovf: insert without open"))?;
-        let rem = open
-            .head
-            .insert_many_full_no_rehash(&[(*key, val.clone())], true)?;
-        if !rem.is_empty() {
-            return Err(StoreError::Corrupt(
-                "scripthash.ovf: open full (use insert_new_with_roll)",
-            ));
-        }
-        Ok(())
+        open.head.insert(key, val).map_err(|e| match e {
+            StoreError::Corrupt(SH_HEAD_FULL) => {
+                StoreError::Corrupt("scripthash.ovf: open full (use insert_new_with_roll)")
+            }
+            other => other,
+        })
     }
 
     pub fn flush(&self) -> Result<(), StoreError> {

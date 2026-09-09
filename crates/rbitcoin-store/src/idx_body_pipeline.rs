@@ -239,7 +239,7 @@ fn extend_truncated_txout_jobs(
 mod tests {
     use super::*;
     use crate::tx_table::{
-        decode_packed_tx_with_spender_rels, InputRecord, OutputRecord, TxRecord, TxTable,
+        decode_packed_tx_outs_with_spender_rels, InputRecord, OutputRecord, TxRecord, TxTable,
     };
     use rbitcoin_primitives::Fk;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -378,7 +378,7 @@ mod tests {
             assert!(j.ok, "id={}", j.id);
             let seq = t.body.record_range(Fk(j.id)).unwrap();
             assert_eq!(j.range, Some(seq));
-            let (tx, _ins, outs, rels) = decode_packed_tx_with_spender_rels(&j.body).unwrap();
+            let (tx, outs, rels) = decode_packed_tx_outs_with_spender_rels(&j.body).unwrap();
             assert_eq!(outs.len(), rels.len());
             assert_eq!(tx.output_count as usize, outs.len());
         }
@@ -430,7 +430,7 @@ mod tests {
             assert!(j.ok, "id={}", j.id);
             let seq = t.body.record_range(Fk(j.id)).unwrap();
             assert_eq!(j.range, Some(seq));
-            let (tx, _ins, outs, rels) = decode_packed_tx_with_spender_rels(&j.body).unwrap();
+            let (tx, outs, rels) = decode_packed_tx_outs_with_spender_rels(&j.body).unwrap();
             assert_eq!(outs.len(), rels.len());
             assert_eq!(tx.output_count as usize, outs.len());
         }

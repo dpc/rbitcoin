@@ -358,11 +358,6 @@ fn read_unsorted_done(dir: &Path, n_shards: usize) -> Option<UnsortedDone> {
     Some(UnsortedDone { last_fk, per_shard })
 }
 
-/// True when `DONE` is `SHUNSRT3` (includes last create_fk) and shard files match counts.
-pub fn unsorted_manifest_ok(dir: &Path, n_shards: usize) -> bool {
-    read_unsorted_done(dir, n_shards).is_some()
-}
-
 /// Inclusive Class A create_fk recorded in `DONE`, if the manifest is valid.
 pub fn unsorted_done_last_fk(dir: &Path, n_shards: usize) -> Option<u64> {
     read_unsorted_done(dir, n_shards).map(|d| d.last_fk)
@@ -1178,7 +1173,7 @@ mod tests {
         fs::write(unsorted_shard_path(&dir, 0), []).unwrap();
         fs::write(unsorted_shard_path(&dir, 1), []).unwrap();
         assert!(
-            !unsorted_manifest_ok(&dir, n_shards),
+            unsorted_done_last_fk(&dir, n_shards).is_none(),
             "SHUNSRT2 without last_fk must restart collect"
         );
         let _ = fs::remove_dir_all(&dir);

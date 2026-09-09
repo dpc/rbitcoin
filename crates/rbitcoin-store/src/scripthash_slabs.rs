@@ -3,12 +3,12 @@
 //! Occupancy helpers compare schema-14 4 KiB page allocation against
 //! schema-15 size-class slabs (megakeys still use pages). Encode/decode of
 //! the fk stream is shared by slab payloads and megakey pages
-//! ([`encode_fk_delta_stream`]).
+//! ([`encode_fk_delta_stream_into`]).
 
 use crate::compact::{read_uleb128, write_uleb128_into};
 use crate::error::StoreError;
 use crate::scripthash_layout::{slab_bytes, slab_cap, SH_INLINE_CAP, SH_MAX_SLAB_CLASS};
-use crate::scripthash_pages::{sh_page_count_for_entries, SH_FLAG_BIT, SH_PAGE_SIZE};
+use crate::scripthash_pages::SH_FLAG_BIT;
 use rbitcoin_primitives::Fk;
 
 /// First fk count that freezes into a megakey page chain (class 6 cap + 1).
@@ -48,28 +48,6 @@ pub fn slab_class_for_n_fks_with_slack(n: u32) -> Option<u8> {
     slab_class_for_n_fks(n.saturating_add(1)).or_else(|| slab_class_for_n_fks(n))
 }
 
-/// Schema-14 body bytes for one key with `n` create fks (inline → 0).
-pub fn page_alloc_bytes_for_n_fks(n: u32) -> u64 {
-    if n as usize <= SH_INLINE_CAP {
-        0
-    } else {
-        sh_page_count_for_entries(n as usize) as u64 * SH_PAGE_SIZE as u64
-    }
-}
-
-/// Schema-15 allocated body bytes for one key with `n` create fks.
-///
-/// Exact class (cold pack). Tip grow uses [`slab_class_for_n_fks_with_slack`].
-pub fn slab_alloc_bytes_for_n_fks(n: u32) -> u64 {
-    if n as usize <= SH_INLINE_CAP {
-        0
-    } else if let Some(c) = slab_class_for_n_fks(n) {
-        slab_bytes(c)
-    } else {
-        page_alloc_bytes_for_n_fks(n)
-    }
-}
-
 /// Encode strictly increasing create fks as ULEB128 `fk0` + ULEB128 deltas.
 ///
 /// Does not prefix `used` — slabs write `u16` first; pages keep `n_fks` in the
@@ -99,16 +77,6 @@ pub fn encode_fk_delta_stream_into(out: &mut [u8], fks: &[u64]) -> Result<usize,
         n += write_uleb128_into(out.get_mut(n..).unwrap_or(&mut []), w[1] - w[0])?;
     }
     Ok(n)
-}
-
-/// Encode strictly increasing create fks as ULEB128 `fk0` + ULEB128 deltas.
-pub fn encode_fk_delta_stream(fks: &[Fk]) -> Result<Vec<u8>, StoreError> {
-    let mut raw = Vec::with_capacity(fks.len());
-    raw.extend(fks.iter().map(|fk| fk.0));
-    let mut out = vec![0u8; raw.len().saturating_mul(10)];
-    let n = encode_fk_delta_stream_into(&mut out, &raw)?;
-    out.truncate(n);
-    Ok(out)
 }
 
 /// Decode `n` strictly increasing fks from a delta stream into `out` (stops after `n`).
@@ -153,13 +121,6 @@ pub fn decode_fk_delta_stream_into(
     Ok(())
 }
 
-/// Decode `n` strictly increasing fks from a delta stream (stops after `n`).
-pub fn decode_fk_delta_stream(buf: &[u8], n: usize) -> Result<Vec<Fk>, StoreError> {
-    let mut out = Vec::with_capacity(n);
-    decode_fk_delta_stream_into(buf, n, &mut out)?;
-    Ok(out)
-}
-
 /// Slab payload: `used:u16` LE + [`encode_fk_delta_stream_into`].
 pub fn encode_slab_payload_into(out: &mut [u8], fks: &[u64]) -> Result<usize, StoreError> {
     if fks.len() > u16::MAX as usize {
@@ -173,16 +134,6 @@ pub fn encode_slab_payload_into(out: &mut [u8], fks: &[u64]) -> Result<usize, St
     Ok(2 + n)
 }
 
-/// Slab payload: `used:u16` LE + [`encode_fk_delta_stream`].
-pub fn encode_slab_payload(fks: &[Fk]) -> Result<Vec<u8>, StoreError> {
-    let mut raw = Vec::with_capacity(fks.len());
-    raw.extend(fks.iter().map(|fk| fk.0));
-    let mut out = vec![0u8; 2 + raw.len().saturating_mul(10)];
-    let n = encode_slab_payload_into(&mut out, &raw)?;
-    out.truncate(n);
-    Ok(out)
-}
-
 /// Decode a slab payload (`used` + stream) into `out`. Extra padding after the stream is ignored.
 pub fn decode_slab_payload_into(buf: &[u8], out: &mut Vec<Fk>) -> Result<(), StoreError> {
     if buf.len() < 2 {
@@ -192,47 +143,34 @@ pub fn decode_slab_payload_into(buf: &[u8], out: &mut Vec<Fk>) -> Result<(), Sto
     decode_fk_delta_stream_into(&buf[2..], used, out)
 }
 
-/// Decode a slab payload (`used` + stream). Extra padding after the stream is ignored.
-pub fn decode_slab_payload(buf: &[u8]) -> Result<Vec<Fk>, StoreError> {
-    let mut out = Vec::new();
-    decode_slab_payload_into(buf, &mut out)?;
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Measured mainnet page histogram (share of 4 KiB pages, per 1000).
-    ///
-    /// Representative `n_fks` sits in the middle of each bucket from the live
-    /// `scripthash.body` sample (61.8 % pages hold 3–7 fks, …).
-    const MAINNET_PAGE_MIX: &[(u32, u32)] = &[
-        (5, 618),  // 3–7
-        (11, 172), // 8–15
-        (23, 92),  // 16–31
-        (47, 50),  // 32–63
-        (95, 27),  // 64–127
-        (191, 15), // 128–255
-        (380, 6),  // 256–509
-        (510, 20), // full page
-    ];
+    fn encode_stream(fks: &[u64]) -> Result<Vec<u8>, StoreError> {
+        let mut out = vec![0u8; fks.len().saturating_mul(10).max(1)];
+        let n = encode_fk_delta_stream_into(&mut out, fks)?;
+        out.truncate(n);
+        Ok(out)
+    }
 
-    #[test]
-    fn slab_pack_beats_pages_on_mainnet_mix() {
-        let mut page_bytes = 0u64;
-        let mut slab_bytes_tot = 0u64;
-        for &(n, weight) in MAINNET_PAGE_MIX {
-            page_bytes += page_alloc_bytes_for_n_fks(n) * u64::from(weight);
-            slab_bytes_tot += slab_alloc_bytes_for_n_fks(n) * u64::from(weight);
-        }
-        assert!(page_bytes > 0, "page packer must charge body bytes");
-        let ratio = slab_bytes_tot as f64 / page_bytes as f64;
-        assert!(
-            ratio < 0.12,
-            "slab packer must use <12% of page bytes on the measured mix; \
-             got {ratio:.4} (slab={slab_bytes_tot} page={page_bytes})"
-        );
+    fn decode_stream(buf: &[u8], n: usize) -> Result<Vec<Fk>, StoreError> {
+        let mut out = Vec::new();
+        decode_fk_delta_stream_into(buf, n, &mut out)?;
+        Ok(out)
+    }
+
+    fn encode_slab(fks: &[u64]) -> Result<Vec<u8>, StoreError> {
+        let mut out = vec![0u8; 2 + fks.len().saturating_mul(10).max(1)];
+        let n = encode_slab_payload_into(&mut out, fks)?;
+        out.truncate(n);
+        Ok(out)
+    }
+
+    fn decode_slab(buf: &[u8]) -> Result<Vec<Fk>, StoreError> {
+        let mut out = Vec::new();
+        decode_slab_payload_into(buf, &mut out)?;
+        Ok(out)
     }
 
     #[test]
@@ -249,16 +187,11 @@ mod tests {
         assert_eq!(slab_class_for_n_fks(257), None);
         assert_eq!(slab_class_for_n_fks_with_slack(4), Some(1));
         assert_eq!(slab_class_for_n_fks_with_slack(256), Some(6));
-        assert_eq!(slab_alloc_bytes_for_n_fks(1), 0);
-        assert_eq!(page_alloc_bytes_for_n_fks(1), 0);
-        assert_eq!(slab_alloc_bytes_for_n_fks(2), 16);
-        assert_eq!(slab_alloc_bytes_for_n_fks(5), 32);
-        assert_eq!(slab_alloc_bytes_for_n_fks(257), 4096);
-        let five: Vec<Fk> = (1..=5u64).map(Fk).collect();
-        let packed = encode_slab_payload(&five).unwrap();
+        let five: Vec<u64> = (1..=5u64).collect();
+        let packed = encode_slab(&five).unwrap();
         assert_eq!(slab_class_for_packed_len(packed.len()), Some(0));
-        let two: Vec<Fk> = vec![Fk(1), Fk(2)];
-        let packed2 = encode_slab_payload(&two).unwrap();
+        let two = [1u64, 2];
+        let packed2 = encode_slab(&two).unwrap();
         assert_eq!(slab_bytes(0), 16);
         assert_eq!(slab_class_for_packed_len(packed2.len()), Some(0));
         assert!(
@@ -266,13 +199,12 @@ mod tests {
             "2-fk ULEB must fit class 0 16 B (len={})",
             packed2.len()
         );
-        let three_hundred: Vec<Fk> = (1..=300u64).map(Fk).collect();
-        let packed = encode_slab_payload(&three_hundred).unwrap();
+        let three_hundred: Vec<u64> = (1..=300u64).collect();
+        let packed = encode_slab(&three_hundred).unwrap();
         let class = slab_class_for_packed_len(packed.len()).expect("300 tight deltas fit a slab");
         assert!(class <= 5, "class={class} packed={}", packed.len());
         assert_eq!(slab_class_for_packed_len(0), None);
         assert_eq!(slab_class_for_packed_len(2049), None);
-        assert_eq!(page_alloc_bytes_for_n_fks(5), 4096);
     }
 
     #[test]
@@ -286,57 +218,45 @@ mod tests {
         ];
         for raw in cases {
             let fks: Vec<Fk> = raw.iter().copied().map(Fk).collect();
-            let stream = encode_fk_delta_stream(&fks).unwrap();
+            let stream = encode_stream(raw).unwrap();
             assert!(
                 stream.len() <= 8 * fks.len() || fks.is_empty(),
                 "packed length {} > 8×n={}",
                 stream.len(),
                 fks.len()
             );
-            let got = decode_fk_delta_stream(&stream, fks.len()).unwrap();
+            let got = decode_stream(&stream, fks.len()).unwrap();
             assert_eq!(got, fks);
             let mut into = Vec::new();
             decode_fk_delta_stream_into(&stream, fks.len(), &mut into).unwrap();
             assert_eq!(into, got);
-            let slab = encode_slab_payload(&fks).unwrap();
-            assert_eq!(decode_slab_payload(&slab).unwrap(), fks);
+            let slab = encode_slab(raw).unwrap();
+            assert_eq!(decode_slab(&slab).unwrap(), fks);
             let mut slab_got = Vec::new();
             decode_slab_payload_into(&slab, &mut slab_got).unwrap();
             assert_eq!(slab_got, fks);
             assert_eq!(slab.len(), 2 + stream.len());
-            let raw: Vec<u64> = raw.to_vec();
             let mut stream_into = vec![0u8; raw.len().saturating_mul(10).max(1)];
-            let sn = encode_fk_delta_stream_into(&mut stream_into, &raw).unwrap();
+            let sn = encode_fk_delta_stream_into(&mut stream_into, raw).unwrap();
             assert_eq!(&stream_into[..sn], stream.as_slice());
             let mut slab_into = vec![0u8; 2 + raw.len().saturating_mul(10).max(1)];
-            let pn = encode_slab_payload_into(&mut slab_into, &raw).unwrap();
+            let pn = encode_slab_payload_into(&mut slab_into, raw).unwrap();
             assert_eq!(&slab_into[..pn], slab.as_slice());
         }
-        assert!(encode_fk_delta_stream(&[Fk(5), Fk(5)]).is_err());
-        assert!(encode_fk_delta_stream(&[Fk(0)]).is_err());
-        assert!(encode_fk_delta_stream(&[Fk(SH_FLAG_BIT | 1)]).is_err());
-        assert!(encode_fk_delta_stream(&[Fk(1), Fk(SH_FLAG_BIT | 2)]).is_err());
-        assert!(decode_fk_delta_stream(&[0x00], 1).is_err());
+        assert!(encode_stream(&[5, 5]).is_err());
+        assert!(encode_stream(&[0]).is_err());
+        assert!(encode_stream(&[SH_FLAG_BIT | 1]).is_err());
+        assert!(encode_stream(&[1, SH_FLAG_BIT | 2]).is_err());
+        assert!(decode_stream(&[0x00], 1).is_err());
         let mut flagged = Vec::new();
         crate::compact::write_uleb128(&mut flagged, SH_FLAG_BIT);
-        assert!(decode_fk_delta_stream(&flagged, 1).is_err());
-        assert!(decode_fk_delta_stream(&[0x01, 0x00], 2).is_err());
-        assert!(decode_slab_payload(&[0]).is_err());
-        assert!(decode_fk_delta_stream(&[], 0).unwrap().is_empty());
+        assert!(decode_stream(&flagged, 1).is_err());
+        assert!(decode_stream(&[0x01, 0x00], 2).is_err());
+        assert!(decode_slab(&[0]).is_err());
+        assert!(decode_stream(&[], 0).unwrap().is_empty());
         let mut keep = vec![Fk(99)];
         decode_fk_delta_stream_into(&[], 0, &mut keep).unwrap();
         assert_eq!(keep, vec![Fk(99)]);
-        for (buf, n) in [
-            (&[0x00][..], 1usize),
-            (&flagged[..], 1),
-            (&[0x01, 0x00][..], 2),
-        ] {
-            let vec_err = decode_fk_delta_stream(buf, n).unwrap_err();
-            let into_err = decode_fk_delta_stream_into(buf, n, &mut Vec::new()).unwrap_err();
-            assert_eq!(format!("{into_err}"), format!("{vec_err}"));
-        }
-        let slab_err = decode_slab_payload(&[0]).unwrap_err();
-        let slab_into_err = decode_slab_payload_into(&[0], &mut Vec::new()).unwrap_err();
-        assert_eq!(format!("{slab_into_err}"), format!("{slab_err}"));
+        assert!(decode_slab_payload_into(&[0], &mut Vec::new()).is_err());
     }
 }

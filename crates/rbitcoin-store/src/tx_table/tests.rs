@@ -83,8 +83,12 @@ fn open_refuses_packed_tx_body_with_creates() {
     let dir = tempfile_dir("legacy-tx-body");
     {
         let t = crate::var_table::VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
-        t.put_batch_encode(1, 32, |_, buf| buf.extend_from_slice(&[1u8; 16]))
-            .unwrap();
+        let prep = t
+            .prepare_batch_encode(1, 32, |_, buf| buf.extend_from_slice(&[1u8; 16]))
+            .unwrap()
+            .expect("prep");
+        t.write_body_blob_bulk(prep.start, &prep.body_blob).unwrap();
+        t.finish_prepared(prep).unwrap();
     }
     match TxTable::open(&dir) {
         Ok(_) => panic!("packed tx.body must refuse"),
@@ -423,7 +427,7 @@ fn scan_packed_meta_and_prevouts_no_output_alloc() {
     let outputs = vec![OutputRecord::unspent(50, vec![0x51])];
     let mut raw = Vec::new();
     encode_packed_tx(&tx, &inputs, &outputs, &mut raw);
-    let (meta, _) = scan_packed_meta_and_prevouts(&raw).unwrap();
+    let (meta, _) = TxRecord::decode_body_meta(&raw).unwrap();
     assert_eq!(meta.txid, [0u8; 32], "body scan has no leading txid");
     let mut inwit = Vec::new();
     encode_inwit_with_secret(&inputs, &mut inwit, None);
@@ -1613,9 +1617,9 @@ fn packed_tx_roundtrip() {
     ];
     let mut enc = Vec::new();
     encode_packed_tx(&tx, &inputs, &outputs, &mut enc);
-    assert!(is_packed_tx_payload(&enc));
+    assert!(TxRecord::decode_body_meta(&enc).is_ok());
     assert!(enc.len() >= 3, "thin LAYOUT17 meta");
-    let (dtx, _dins, douts) = decode_packed_tx(&enc).unwrap();
+    let (dtx, douts, _) = decode_packed_tx_outs_with_spender_rels(&enc).unwrap();
     assert_eq!(dtx.txid, [0u8; 32], "body decode leaves txid zero");
     assert_eq!(dtx.input_count, 1);
     assert_eq!(dtx.output_count, 2);
@@ -1717,18 +1721,18 @@ fn visit_packed_script_hashes_matches_full_decode() {
 
 #[test]
 fn short_or_truncated_packed_body_rejected() {
-    assert!(!is_packed_tx_payload(&[]));
-    assert!(!is_packed_tx_payload(&[0u8; 15]));
+    assert!(TxRecord::decode_body_meta(&[]).is_err());
+    assert!(TxRecord::decode_body_meta(&[0u8; 15]).is_err());
     assert!(matches!(
-        decode_packed_tx(&[0u8; 15]),
+        decode_packed_tx_outs_with_spender_rels(&[0u8; 15]),
         Err(StoreError::Corrupt(_))
     ));
     // v17 empty tx (0 in / 0 out) is a valid packed payload.
     let empty = rec_meta(1, 0, 0, 0);
     let mut empty_raw = Vec::new();
     empty.encode_body_meta_into(&mut empty_raw);
-    assert!(is_packed_tx_payload(&empty_raw));
-    assert!(decode_packed_tx(&empty_raw).is_ok());
+    assert!(TxRecord::decode_body_meta(&empty_raw).is_ok());
+    assert!(decode_packed_tx_outs_with_spender_rels(&empty_raw).is_ok());
     // Meta claims inputs/outputs but payload ends after body meta.
     let rec = TxRecord {
         txid: [1u8; 32],
@@ -1741,9 +1745,9 @@ fn short_or_truncated_packed_body_rejected() {
     };
     let mut raw = Vec::new();
     rec.encode_body_meta_into(&mut raw);
-    assert!(is_packed_tx_payload(&raw));
+    assert!(TxRecord::decode_body_meta(&raw).is_ok());
     assert!(matches!(
-        decode_packed_tx(&raw),
+        decode_packed_tx_outs_with_spender_rels(&raw),
         Err(StoreError::Corrupt(_))
     ));
     assert!(matches!(
@@ -1935,19 +1939,17 @@ fn packed_encode_decode_flags_and_error_arms() {
     let outputs = vec![o_true.clone(), o_script.clone()];
     let mut raw = Vec::new();
     encode_packed_tx(&tx, &inputs, &outputs, &mut raw);
-    assert!(is_packed_tx_payload(&raw));
-    assert!(!is_packed_tx_payload(&[]));
-    assert!(!is_packed_tx_payload(&[0u8; 15]));
-    assert!(!is_packed_tx_payload(&[0u8; 20]));
-    assert!(!is_packed_tx_payload(&[0u8; 64]));
-    let (m, ins, outs) = decode_packed_tx(&raw).unwrap();
+    assert!(TxRecord::decode_body_meta(&raw).is_ok());
+    assert!(TxRecord::decode_body_meta(&[]).is_err());
+    assert!(TxRecord::decode_body_meta(&[0u8; 15]).is_err());
+    assert!(TxRecord::decode_body_meta(&[0u8; 20]).is_err());
+    assert!(TxRecord::decode_body_meta(&[0u8; 64]).is_err());
+    let (m, outs, _) = decode_packed_tx_outs_with_spender_rels(&raw).unwrap();
     assert_eq!(m.txid, [0u8; 32], "body decode: no leading txid");
     assert_eq!(m.input_start_fk, Fk::NULL);
-    assert!(ins.is_empty(), "txout decode does not include inwit");
     assert_eq!(outs.len(), 2);
-    let (m2, prevs) = scan_packed_meta_and_prevouts(&raw).unwrap();
+    let (m2, _) = TxRecord::decode_body_meta(&raw).unwrap();
     assert_eq!(m2.txid, [0u8; 32]);
-    assert!(prevs.is_empty(), "prevouts live in inwit");
     let mut inwit = Vec::new();
     encode_inwit_with_secret(&inputs, &mut inwit, None);
     assert_eq!(scan_inwit_prevouts(&inwit, m.input_count).unwrap().len(), 2);
@@ -1960,21 +1962,22 @@ fn packed_encode_decode_flags_and_error_arms() {
     let mut cleared = outs.clone();
     cleared[0].spender_field = Fk(9);
     cleared[0].multi_spender = true;
-    clear_output_spender_fields(&mut cleared);
+    cleared[0].spender_field = Fk::NULL;
+    cleared[0].multi_spender = false;
     assert!(cleared[0].spender_field.is_null());
     assert!(!cleared[0].multi_spender);
 
     // Packed error arms (short / truncated)
     assert!(matches!(
-        decode_packed_tx(&[0x02, 0, 0]),
+        decode_packed_tx_outs_with_spender_rels(&[0x02, 0, 0]),
         Err(StoreError::Corrupt(_))
     ));
     assert!(matches!(
-        decode_packed_tx(&[0x01]),
+        decode_packed_tx_outs_with_spender_rels(&[0x01]),
         Err(StoreError::Corrupt(_))
     ));
     assert!(matches!(
-        scan_packed_meta_and_prevouts(&[0x02]),
+        TxRecord::decode_body_meta(&[0x02]),
         Err(StoreError::Corrupt(_))
     ));
     assert!(matches!(
@@ -1984,13 +1987,13 @@ fn packed_encode_decode_flags_and_error_arms() {
     // trailing zero pad is accepted (schema 11 alignment gap)
     let mut trail_z = raw.clone();
     trail_z.extend_from_slice(&[0u8; 7]);
-    let (mz, _, _) = decode_packed_tx(&trail_z).unwrap();
+    let (mz, _, _) = decode_packed_tx_outs_with_spender_rels(&trail_z).unwrap();
     assert_eq!(mz.txid, [0u8; 32]);
     // non-zero trailing garbage is rejected
     let mut trail = raw.clone();
     trail.push(0x01);
     assert!(matches!(
-        decode_packed_tx(&trail),
+        decode_packed_tx_outs_with_spender_rels(&trail),
         Err(StoreError::Corrupt(_))
     ));
     // run helpers
@@ -2105,16 +2108,12 @@ fn packed_encode_decode_flags_and_error_arms() {
         encode_output_run_secret(&outputs, &mut raw, None);
         // ends after 1 output but meta says 2
         assert!(matches!(
-            decode_packed_tx(&raw),
-            Err(StoreError::Corrupt(_))
-        ));
-        assert!(matches!(
             decode_packed_tx_outs_with_spender_rels(&raw),
             Err(StoreError::Corrupt(_))
         ));
         // short scan
         assert!(matches!(
-            scan_packed_meta_and_prevouts(&[0u8; 8]),
+            TxRecord::decode_body_meta(&[0u8; 8]),
             Err(StoreError::Corrupt(_))
         ));
         // non-zero trailing on outs_only path
@@ -2179,22 +2178,6 @@ fn body_txid_range_edges() {
     // Beyond count → NotFound or empty ranges
     let _ = t.body_txid_range(1, 1);
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn next_tx_body_start_8_align_and_page_rule() {
-    // Schema 13: 8-byte align only (identity lives in txid.body).
-    assert_eq!(next_tx_body_start(0), 0);
-    assert_eq!(next_tx_body_start(1), 8);
-    assert_eq!(next_tx_body_start(8), 8);
-    assert_eq!(next_tx_body_start(9), 16);
-    assert_eq!(next_tx_body_start(4065), 4072);
-    assert_eq!(next_tx_body_start(4095), 4096);
-    for c in [0u64, 1, 7, 15, 100, 4090, 4095, 4096, 8191, 100_003] {
-        let s = next_tx_body_start(c);
-        assert_eq!(s % 8, 0, "c={c} s={s}");
-        assert!(s >= c);
-    }
 }
 
 /// Appended Class A records start 8-aligned; sidefile holds txid.
@@ -2773,10 +2756,6 @@ fn rebuild_head_direct_mphf_empty_tail() {
                 &std::fs::read(crate::tx_head_mphf::mphf_path(&root.join("000000"))).unwrap()[0..4],
                 b"BDZ2"
             );
-            match t.head.open_tail_range() {
-                Some((_, 0)) => {}
-                other => panic!("expected empty open tail, got {other:?}"),
-            }
             for i in [1u64, 64, 65] {
                 let mut txid = [0u8; 32];
                 txid[0..8].copy_from_slice(&i.to_le_bytes());
@@ -3412,18 +3391,24 @@ fn idx_roll_independent_of_inwit_span() {
             t.put_full_batch_indexed(&[(tx, inputs, outs)], false)
                 .unwrap();
         }
-        assert!(
-            t.inwit.idx_segment_count() >= 2,
-            "inwit segs={}",
-            t.inwit.idx_segment_count()
-        );
+        let idx_segs = |stem: &str| {
+            std::fs::read_dir(dir.join(format!("{stem}.idx")))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.len() == 6 && n.chars().all(|c| c.is_ascii_digit())
+                })
+                .count()
+        };
+        assert!(idx_segs("inwit") >= 2, "inwit segs={}", idx_segs("inwit"));
         assert_eq!(
-            t.body.idx_segment_count(),
+            idx_segs("txout"),
             1,
             "txout.idx must not roll when only inwit crosses the soft span"
         );
         assert_eq!(
-            t.spent.idx_segment_count(),
+            idx_segs("spent"),
             1,
             "spent.idx must not roll when only inwit crosses the soft span"
         );

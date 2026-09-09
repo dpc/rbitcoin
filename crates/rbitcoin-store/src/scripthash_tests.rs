@@ -1,5 +1,9 @@
 use super::*;
+use crate::scripthash_head::prefix_shard_of;
 use crate::scripthash_layout::SH_HEAD_VALUE_LEN;
+use crate::scripthash_materialize::{
+    materialize_sh_from_unsorted, unsorted_done_last_fk, unsorted_shard_path, UNSORTED_SHARD_DIR,
+};
 use crate::scripthash_pages::{
     sh_page_as_array, sh_page_extent, SH_PAGE_EXTENT_STREAM_MAX, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
 };
@@ -1177,58 +1181,6 @@ fn bulk_session_stream_megakey_caps_buf_at_page() {
 }
 
 #[test]
-fn remap_sh_body() {
-    use crate::scripthash_pages::SH_PAGE_STREAM_MAX;
-    let src_dir = tmp();
-    let dst_dir = tmp();
-    let src = ScriptHashTable::create(&src_dir).unwrap();
-    let mut slab_key = [0u8; 32];
-    slab_key[0] = 0x11;
-    let mut mega_key = [0u8; 32];
-    mega_key[0] = 0x22;
-    let n_mega = SH_PAGE_STREAM_MAX + 10;
-    let mut session = src.bulk_session(2).unwrap();
-    for i in 1..=8u64 {
-        session.push_sorted_fk(slab_key, Fk(i)).unwrap();
-    }
-    session.finish_key().unwrap();
-    for i in 1..=n_mega as u64 {
-        session.push_sorted_fk(mega_key, Fk(i)).unwrap();
-    }
-    session.finish_key().unwrap();
-    let _ = session.finish().unwrap();
-    let slab_val = src.head_value(&slab_key).unwrap().unwrap();
-    let mega_val = src.head_value(&mega_key).unwrap().unwrap();
-    assert!(matches!(slab_val, ShHeadValue::Slab { .. }));
-    assert!(matches!(mega_val, ShHeadValue::Extent { .. }));
-    let src_lo = payload_start(FILE_HEADER_LEN);
-    let src_hi = src.alloc_bump();
-    let delta = 3 * SH_PAGE_SIZE as u64;
-    let dst = ScriptHashTable::create(&dst_dir).unwrap();
-    copy_sh_body_range(src.body(), src_lo, src_hi, dst.body(), src_lo + delta).unwrap();
-    let slab_r = remap_sh_head_value(&slab_val, delta);
-    let mega_r = remap_sh_head_value(&mega_val, delta);
-    if let ShHeadValue::Extent { last_page } = mega_r {
-        let mut page = [0u8; SH_PAGE_SIZE];
-        dst.body().read_at(last_page, &mut page).unwrap();
-        let (base, _) = sh_page_extent(sh_page_as_array(&page).unwrap())
-            .unwrap()
-            .expect("ver=2 last page");
-        remap_copied_page_chain(dst.body(), base.saturating_add(delta), delta).unwrap();
-    }
-    let recs = vec![
-        (head_key_from_full(&slab_key), pack8(&slab_r).unwrap()),
-        (head_key_from_full(&mega_key), pack8(&mega_r).unwrap()),
-    ];
-    dst.publish_sorted_shard(0, &recs, 8 + n_mega as u64, src_hi + delta)
-        .unwrap();
-    assert_eq!(dst.entries(&slab_key).unwrap().len(), 8);
-    assert_eq!(dst.entries(&mega_key).unwrap().len(), n_mega);
-    let _ = std::fs::remove_dir_all(&src_dir);
-    let _ = std::fs::remove_dir_all(&dst_dir);
-}
-
-#[test]
 fn pack_one_shard() {
     HeadScale::test_with(HeadScale::Tiny, || {
         let dir = tmp();
@@ -2019,7 +1971,7 @@ fn for_each_live_create_skips_unlinked() {
 fn script_for_prefix_shard(shard: usize, n_shards: usize) -> Vec<u8> {
     for n in 0u32..100_000 {
         let script = vec![0x51, n as u8, (n >> 8) as u8, (n >> 16) as u8];
-        if crate::prefix_shard_of(&script_hash(&script), n_shards) == shard {
+        if prefix_shard_of(&script_hash(&script), n_shards) == shard {
             return script;
         }
     }
@@ -2031,7 +1983,7 @@ fn two_scripts_same_shard_reverse_hash(shard: usize, n_shards: usize) -> (Vec<u8
     for n in 0u32..200_000 {
         let script = vec![0x51, n as u8, (n >> 8) as u8, (n >> 16) as u8];
         let sh = script_hash(&script);
-        if crate::prefix_shard_of(&sh, n_shards) == shard {
+        if prefix_shard_of(&sh, n_shards) == shard {
             found.push((script, sh));
             if found.len() >= 8 {
                 break;
@@ -2111,18 +2063,19 @@ fn unsorted_collect_partitions_by_prefix_and_is_not_scripthash_sorted() {
         let udir = dir.join("unsorted");
         let out = crate::collect_unsorted_shard_files(&s, &udir, n_shards, 1, None).unwrap();
         assert_eq!(out.per_shard.len(), n_shards);
-        assert!(crate::unsorted_manifest_ok(&udir, n_shards));
+        assert!(unsorted_done_last_fk(&udir, n_shards).is_some());
+        assert!(udir.join("DONE").is_file());
         assert_eq!(out.recs, 5);
         for shard in 0..n_shards {
-            let recs = decode_unsorted_file(&crate::unsorted_shard_path(&udir, shard));
+            let recs = decode_unsorted_file(&unsorted_shard_path(&udir, shard));
             assert!(
                 recs.iter()
-                    .all(|r| crate::prefix_shard_of(&r.scripthash, n_shards) == shard),
+                    .all(|r| prefix_shard_of(&r.scripthash, n_shards) == shard),
                 "shard {shard} must contain only its prefix"
             );
             assert_eq!(recs.len() as u64, out.per_shard[shard]);
         }
-        let shard1 = decode_unsorted_file(&crate::unsorted_shard_path(&udir, 1));
+        let shard1 = decode_unsorted_file(&unsorted_shard_path(&udir, 1));
         assert_eq!(shard1.len(), 2);
         assert!(
             shard1[0].scripthash > shard1[1].scripthash,
@@ -2150,9 +2103,9 @@ fn unsorted_materialize_four_shards_from_class_a_no_catalog_runs() {
         let sh_dir = dir.join("sh4");
         std::fs::create_dir_all(&sh_dir).unwrap();
         let table = four_shard_dir_table(&sh_dir);
-        let udir = sh_dir.join(crate::UNSORTED_SHARD_DIR);
+        let udir = sh_dir.join(UNSORTED_SHARD_DIR);
         crate::collect_unsorted_shard_files(&s, &udir, n_shards, 2, None).unwrap();
-        let mat = crate::materialize_sh_from_unsorted(&table, &udir, 2, None).unwrap();
+        let mat = materialize_sh_from_unsorted(&table, &udir, 2, None).unwrap();
         assert_eq!(mat.creates, 4, "all Class A creates packed");
         assert_eq!(mat.keys, 4);
         for k in &keys {
@@ -2178,7 +2131,7 @@ fn unsorted_pack_sorts_numeric_fk_and_keeps_all_creates() {
         std::fs::create_dir_all(&sh_dir).unwrap();
         let table = four_shard_dir_table(&sh_dir);
         let n_shards = 4usize;
-        let udir = sh_dir.join(crate::UNSORTED_SHARD_DIR);
+        let udir = sh_dir.join(UNSORTED_SHARD_DIR);
         std::fs::create_dir_all(&udir).unwrap();
         let (low, high) = two_scripts_same_shard_reverse_hash(1, n_shards);
         let sh_lo = script_hash(&low);
@@ -2196,12 +2149,12 @@ fn unsorted_pack_sorts_numeric_fk_and_keeps_all_creates() {
         push(sh_lo, 1);
         push(sh_lo, 1);
         push(sh_hi, 0);
-        std::fs::write(crate::unsorted_shard_path(&udir, 1), &bytes).unwrap();
+        std::fs::write(unsorted_shard_path(&udir, 1), &bytes).unwrap();
         for shard in [0usize, 2, 3] {
-            std::fs::write(crate::unsorted_shard_path(&udir, shard), []).unwrap();
+            std::fs::write(unsorted_shard_path(&udir, shard), []).unwrap();
         }
         rbitcoin_log::capture_logs(true);
-        let mat = crate::materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
+        let mat = materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
         let logs = rbitcoin_log::take_logs();
         rbitcoin_log::capture_logs(false);
         assert_eq!(mat.creates, 4, "null and duplicate (sh,fk) must not pack");
@@ -2270,11 +2223,11 @@ fn unsorted_combined_skips_collect_when_done_and_resumes_unsealed() {
         let sh_dir = dir.join("sh4");
         std::fs::create_dir_all(&sh_dir).unwrap();
         let table = four_shard_dir_table(&sh_dir);
-        let udir = sh_dir.join(crate::UNSORTED_SHARD_DIR);
+        let udir = sh_dir.join(UNSORTED_SHARD_DIR);
         crate::collect_unsorted_shard_files(&s, &udir, n_shards, 1, None).unwrap();
-        crate::materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
+        materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
         assert!(table.unsealed_main_shards().is_empty());
-        let again = crate::materialize_sh_from_unsorted(&table, &udir, 2, None).unwrap();
+        let again = materialize_sh_from_unsorted(&table, &udir, 2, None).unwrap();
         assert_eq!(again.creates, 4);
         for k in &keys {
             assert_eq!(table.entries(k).unwrap().len(), 1);
@@ -2296,13 +2249,12 @@ fn unsorted_cancel_before_collect_is_cancelled() {
             matches!(err, StoreError::Cancelled(_)),
             "expected Cancelled, got {err}"
         );
+        let udir = crate::unsorted_shard_dir(s.path());
         assert!(
-            !crate::unsorted_manifest_ok(
-                &crate::unsorted_shard_dir(s.path()),
-                s.scripthash.head_shard_count()
-            ),
+            unsorted_done_last_fk(&udir, s.scripthash.head_shard_count()).is_none(),
             "cancel must not write DONE"
         );
+        assert!(!udir.join("DONE").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     });
 }
@@ -2317,7 +2269,7 @@ fn unsorted_done_records_class_a_last_fk() {
         let n_shards = s.scripthash.head_shard_count();
         let udir = crate::unsorted_shard_dir(s.path());
         let out = crate::collect_unsorted_shard_files(&s, &udir, n_shards, 1, None).unwrap();
-        assert!(crate::unsorted_manifest_ok(&udir, n_shards));
+        assert!(udir.join("DONE").is_file());
         assert_eq!(out.last_fk, s.txs.count());
         assert_eq!(
             crate::unsorted_done_last_fk(&udir, n_shards),

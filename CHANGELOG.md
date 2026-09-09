@@ -22,6 +22,10 @@ before 1.0).
 
 ### Changed
 
+- **Store crate-root surface:** drop re-exports other crates never import
+  (`AddressHead`, packed decode aliases, SH remap/slab Vec codecs, sorted-run
+  catalog helpers, …). Tests use the remaining production insert/probe/decode
+  paths; rustc `dead_code` then deleted the unused wrappers.
 - **Workspace version 0.6.99:** in-tree toward 0.7.0.
   Published GitHub Releases remain 0.6.0; `v0.6.x` is the patch branch.
 - **`ibd: perf` / `ibd: sizes` drop never-written meters:** DEBUG no longer
